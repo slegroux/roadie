@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# roadie — one command for the whole stems-to-Live pipeline.
+#
+#   roadie split <file|url> [opts]   separate audio into stems        (yt2stems.sh)
+#   roadie load <stems_dir> [opts]   load stems into the open Live set (stems2live.py)
+#   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
+#   roadie sections <stems> [opts]   detect song sections              (sections.py)
+#   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
+#
+# `roadie <command> --help` shows that command's own options. Every argument
+# after the command is passed through untouched, except that `split` turns a
+# local path into `--file <path>` (a URL goes through as is).
+
+set -euo pipefail
+
+usage () { awk 'NR>1 && /^#/{sub(/^# ?/, ""); print; next} NR>1{exit}' "$SELF"; }
+
+# The real location, through the ~/.local/bin symlink chain — same loop as the
+# .sh scripts, since older macOS has no `readlink -f`.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINKDIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  [[ "$SELF" == /* ]] || SELF="$LINKDIR/$SELF"
+done
+REPO="$(cd -P "$(dirname "$SELF")" && pwd)"
+
+[[ $# -gt 0 ]] || { usage; exit 0; }
+cmd="$1"; shift
+
+case "$cmd" in
+  -h|--help) usage; exit 0 ;;
+  split)
+    # The first bare argument is the source. An existing path is a local file
+    # (--file); something URL-shaped that is not on disk — with a scheme, or a
+    # bare host like youtu.be/x or www.youtube.com/... — goes through as a URL,
+    # given https:// if it had none. Anything else is taken as a file, so a
+    # typo gets yt2stems' "no such file" rather than a network fetch. `--`
+    # ends option parsing here and is not passed on (yt2stems has no `--`).
+    args=() src_done=0 opts_done=0
+    while [[ $# -gt 0 ]]; do
+      if [[ $opts_done -eq 0 ]]; then
+        case "$1" in
+          --) opts_done=1; shift; continue ;;
+          --file|-i) args+=("$1" "${2:-}"); src_done=1; shift $(( $# > 1 ? 2 : 1 )); continue ;;
+          -o|-m) args+=("$1" "${2:-}"); shift $(( $# > 1 ? 2 : 1 )); continue ;;
+          -*) args+=("$1"); shift; continue ;;
+        esac
+      fi
+      if [[ $src_done -eq 1 ]]; then
+        args+=("$1")
+      elif [[ -e "$1" ]]; then
+        args+=(--file "$1")
+      elif [[ "$1" == *://* ]]; then
+        args+=("$1")
+      elif [[ "$1" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/ ]]; then
+        args+=("https://$1")
+      else
+        args+=(--file "$1")
+      fi
+      src_done=1; shift
+    done
+    exec "$REPO/yt2stems.sh" ${args[@]+"${args[@]}"} ;;
+  load)     exec "$REPO/stems2live.py" "$@" ;;
+  open)     exec "$REPO/stems2als.sh" "$@" ;;
+  sections) exec "$REPO/sections.py" "$@" ;;
+  scenes)   exec "$REPO/session_view.py" "$@" ;;
+  *) echo "roadie: unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac

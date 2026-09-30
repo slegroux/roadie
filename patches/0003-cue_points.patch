@@ -1,0 +1,140 @@
+diff --git a/AbletonMCP_Remote_Script/__init__.py b/AbletonMCP_Remote_Script/__init__.py
+index 328b69a..e9c5beb 100644
+--- a/AbletonMCP_Remote_Script/__init__.py
++++ b/AbletonMCP_Remote_Script/__init__.py
+@@ -232,6 +232,7 @@ class AbletonMCP(ControlSurface):
+                                  "start_playback", "stop_playback", "load_browser_item",
+                                  "set_song_time", "set_arrangement_loop", "jump_to_cue",
+                                  "create_cue_point", "delete_cue_point",
++                                 "delete_all_cue_points",
+                                  "create_arrangement_clip", "create_arrangement_audio_clip",
+                                  "duplicate_to_arrangement", "delete_arrangement_clip",
+                                  "set_arrangement_clip_property",
+@@ -319,6 +320,10 @@ class AbletonMCP(ControlSurface):
+                         elif command_type == "delete_cue_point":
+                             time_val = params.get("time", 0.0)
+                             result = self._delete_cue_point(time_val)
++                        elif command_type == "delete_all_cue_points":
++                            # LOCAL PATCH: stems2live re-runs against the same Set,
++                            # so locators must be cleared or they accumulate.
++                            result = self._delete_all_cue_points()
+                         elif command_type == "create_arrangement_clip":
+                             ti = params.get("track_index", 0)
+                             pos = params.get("position", 0.0)
+@@ -1305,23 +1310,107 @@ class AbletonMCP(ControlSurface):
+             raise
+ 
+     def _create_cue_point(self, time, name=""):
+-        """Create a cue point at the given time."""
++        """Create (or rename) a cue point at the given time.
++
++        LOCAL PATCH. The original matched cue points by comparing their time to
++        the REQUESTED time, which is wrong in three ways, all observed against
++        Live 12.2.7 while inserting nine section locators:
++
++        1. set_or_delete_cue() is a TOGGLE. If a cue already sits at the play
++           head it DELETES it, so asking for a locator could silently remove
++           one. We now look first and rename in place instead of toggling.
++        2. Live SNAPS current_song_time to its own grid, so the created cue does
++           not land on the requested time. The old code then failed every
++           `abs(cp.time - time) < 0.01` lookup and never applied the name -- the
++           nine locators all came back as Live's defaults "1".."9". We now read
++           the snapped time back and identify the new cue by DIFFING the cue
++           list, which does not care where Live actually put it.
++        3. Cue points cannot be created past song_length: Live raises "Cannot
++           set the Songtime behind the Songlength". Five of the nine failed that
++           way because the arrangement was still empty. Hence the guard and its
++           message -- PLACE THE CLIPS FIRST, they are what extends the song.
++
++        Returns the ACTUAL time, so a caller can verify rather than assume.
++        """
+         try:
++            song_length = self._song.song_length
++            if time > song_length:
++                raise ValueError(
++                    "Cue point at {0} is past song_length {1}. Live cannot move the "
++                    "song time there. Place the arrangement clips FIRST -- they are "
++                    "what extends the song -- then add locators.".format(
++                        time, song_length))
++
++            self._song.current_song_time = float(time)
++            # Live may snap; everything below works off where it ACTUALLY went.
++            actual = float(self._song.current_song_time)
++
++            existing = None
+             for cp in tuple(self._song.cue_points):
+-                if abs(cp.time - time) < 0.01:
+-                    raise ValueError("Cue point already exists at this position: " + cp.name)
+-            self._song.current_song_time = time
+-            self._song.set_or_delete_cue()
+-            if name:
++                if abs(cp.time - actual) < 1e-6:
++                    existing = cp
++                    break
++
++            if existing is not None:
++                # Do NOT call set_or_delete_cue here -- it would delete this one.
++                cue = existing
++                created = False
++            else:
++                before = set()
++                for cp in tuple(self._song.cue_points):
++                    before.add(round(cp.time, 6))
++                self._song.set_or_delete_cue()
++                cue = None
+                 for cp in tuple(self._song.cue_points):
+-                    if abs(cp.time - time) < 0.01:
+-                        cp.name = name
++                    if round(cp.time, 6) not in before:
++                        cue = cp
+                         break
+-            return {"time": time, "name": name}
++                created = cue is not None
++
++            if cue is None:
++                raise RuntimeError(
++                    "set_or_delete_cue produced no new cue point at {0}".format(actual))
++
++            if name:
++                cue.name = name
++
++            return {
++                "requested_time": time,
++                "time": float(cue.time),
++                "snapped": abs(float(cue.time) - time) > 1e-6,
++                "name": cue.name,
++                "created": created,
++            }
+         except Exception as e:
+             self.log_message("Error creating cue point: " + str(e))
+             raise
+ 
++    def _delete_all_cue_points(self):
++        """Deliberately NOT a bulk delete. Clear locators from the client instead.
++
++        LOCAL PATCH, and it is a stub on purpose. A loop over the cue points
++        CANNOT work inside one handler: locators are toggled at the play head via
++        set_or_delete_cue(), and Live does not finish moving the play head within
++        a single main-thread task. So on the second iteration the toggle fires at
++        the PREVIOUS position, where it lands on an existing cue and deletes the
++        wrong one -- or on empty space and CREATES one. Measured: a bulk clear of
++        10 locators removed none and added a stray at bar 36.
++
++        The move has to be its own bridge round trip, which only the caller can
++        arrange. stems2live does exactly that -- set_song_time, then
++        delete_cue_point, per locator -- and clears 10 of 10. Keeping this
++        endpoint alive as a working-looking bulk delete would be a trap.
++        """
++        try:
++            raise NotImplementedError(
++                "Bulk locator delete cannot work in one main-thread task: the "
++                "play head has not moved yet when set_or_delete_cue runs, so it "
++                "toggles the wrong position. Clear from the client instead -- "
++                "set_song_time(t) then delete_cue_point(t), one round trip each.")
++        except Exception as e:
++            self.log_message("Error deleting cue points: " + str(e))
++            raise
++
+     def _delete_cue_point(self, time):
+         """Delete a cue point at the given time."""
+         try:

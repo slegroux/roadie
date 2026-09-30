@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# OMC operational state
+.omc/
+
+# Audio working data / test fixtures (large)
+reference/
+alignment.json
+*.wav
+*.aiff
+*.aif
+*.opus
+*.ogg
+*.part
+*.flac
+*.mp3
+*.m4a
+*.webm
+
+# Ableton output
+*.als
+*.asd
+Backup/
+
+# macOS
+.DS_Store

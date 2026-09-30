@@ -1,0 +1,84 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      # ffmpeg is REQUIRED BY MADMOM, which was not obvious: _madmom_downbeats
+      # writes a temp wav and madmom's loader shells out to decode it. On a Mac
+      # ffmpeg is already there for yt2stems, so the dependency stayed invisible
+      # until a clean runner failed with
+      #   LoadAudioFileError: ... Try installing ffmpeg (or avconv on Ubuntu)
+      #
+      # aubiotrack gates the real-stem tests. Those stems are gitignored (they
+      # are hundreds of MB), so they skip here regardless — it is installed so
+      # that a skip reason stays "no stems" rather than silently becoming "no
+      # aubio too" if the fixtures are ever vendored.
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg aubio-tools libsndfile1
+
+      # VERSIONS ARE PINNED in requirements.txt — see the note there. The same
+      # file install.sh builds a user's .venv from, so CI tests what users get.
+      - name: Install dependencies
+        run: |
+          uv venv --python 3.13 .venv
+          .venv/bin/python -c "import sys; print('python', sys.version)"
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      # madmom is a real backend but an awkward build: the PyPI release is from
+      # 2018 and imports MutableSequence from collections, so it needs git main,
+      # Cython, and setuptools<81 (81+ dropped pkg_resources). Allowed to fail —
+      # the one test that uses it is an importorskip, so a broken madmom costs a
+      # skip rather than a red build for a reason unrelated to the change.
+      - name: Install madmom (optional)
+        continue-on-error: true
+        run: |
+          uv pip install --python .venv/bin/python "setuptools<81" cython
+          uv pip install --python .venv/bin/python --no-build-isolation \
+            "madmom @ git+https://github.com/CPJKU/madmom"
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest -q -rs --junitxml=junit.xml
+
+      # THE POINT OF THIS STEP. Every test here is gated on something — the real
+      # stems, aubiotrack, madmom — so a missing dependency does not fail the
+      # suite, it SKIPS its way to green. Three silent-success bugs in this repo
+      # were caught only by reading state back rather than trusting a report, and
+      # a vacuously green CI is the same failure in a different costume.
+      - name: Guard against a vacuously green run
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          # if: always() means this runs even when an earlier step died, so a
+          # missing report is "the tests never ran", not a crash to debug.
+          if not os.path.exists("junit.xml"):
+              sys.exit("::error::no junit.xml — the suite never ran. "
+                       "Check the install and test steps above.")
+          root = ET.parse("junit.xml").getroot()
+          ts = root if root.tag == "testsuite" else root.find("testsuite")
+          total = int(ts.get("tests", 0))
+          skipped = int(ts.get("skipped", 0))
+          ran = total - skipped
+          print(f"{ran} ran, {skipped} skipped, {total} collected")
+          MIN_RAN = 140          # a floor, not the count: only the stem- and madmom-gated tests may skip
+          if ran < MIN_RAN:
+              sys.exit(f"::error::only {ran} tests actually ran (expected >= {MIN_RAN}). "
+                       "A dependency is missing and the suite is passing by default.")
+          PY

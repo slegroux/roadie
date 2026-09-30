@@ -1,0 +1,11 @@
+# Pinned, and not for tidiness: unpinned, uv resolved numba 0.53.1 / llvmlite
+# 0.36.0 — a 2021 pair that does not build on Python 3.13. These are the
+# versions the suite is developed and CI-tested against (Python 3.13).
+# install.sh builds .venv from this file; CI installs exactly the same.
+numpy==2.4.6
+scipy==1.18.0
+librosa==0.11.0
+soundfile==0.14.0
+numba==0.66.0
+# tests
+pytest==9.1.1

@@ -1,0 +1,207 @@
+diff --git a/AbletonMCP_Remote_Script/__init__.py b/AbletonMCP_Remote_Script/__init__.py
+index f27b122..328b69a 100644
+--- a/AbletonMCP_Remote_Script/__init__.py
++++ b/AbletonMCP_Remote_Script/__init__.py
+@@ -235,6 +235,7 @@ class AbletonMCP(ControlSurface):
+                                  "create_arrangement_clip", "create_arrangement_audio_clip",
+                                  "duplicate_to_arrangement", "delete_arrangement_clip",
+                                  "set_arrangement_clip_property",
++                                 "set_clip_warp_markers",
+                                  "set_view", "control_arrangement_view",
+                                  "manage_clip_automation",
+                                  "add_notes_to_arrangement_clip",
+@@ -344,6 +345,17 @@ class AbletonMCP(ControlSurface):
+                             prop = params.get("property", "")
+                             val = params.get("value", None)
+                             result = self._set_arrangement_clip_property(ti, ci, prop, val)
++                        elif command_type == "set_clip_warp_markers":
++                            # LOCAL PATCH: warp markers cannot be written over the
++                            # generic LOM bridge — add_warp_marker wants a C++
++                            # TWarpMarker, and no JSON-expressible value converts
++                            # to one. See _set_clip_warp_markers and
++                            # _make_warp_marker for the full explanation.
++                            ti = params.get("track_index", 0)
++                            ci = params.get("clip_index", 0)
++                            markers = params.get("markers", [])
++                            wm = params.get("warp_mode", None)
++                            result = self._set_clip_warp_markers(ti, ci, markers, wm)
+                         elif command_type == "set_view":
+                             vn = params.get("view_name", "Arranger")
+                             result = self._set_view(vn)
+@@ -1449,6 +1461,176 @@ class AbletonMCP(ControlSurface):
+             self.log_message("Error setting arrangement clip property: " + str(e))
+             raise
+ 
++    # Cache of the marker construction that this Live build actually accepts,
++    # so the probe below runs once per session rather than once per marker.
++    _warp_marker_strategy = None
++
++    def _make_warp_marker(self, clip, beat_time, sample_time):
++        """Add one warp marker, discovering the accepted argument shape once.
++
++        Returns the name of the strategy that worked. Raises with the full list
++        of what was tried if none do — a silent no-op here would look like a
++        successful warp and produce a clip that is subtly out of time, which is
++        far worse than a loud failure.
++        """
++        bt, st = float(beat_time), float(sample_time)
++
++        def s_kwargs():
++            import Live
++            return Live.Clip.WarpMarker(beat_time=bt, sample_time=st)
++
++        def s_positional():
++            import Live
++            return Live.Clip.WarpMarker(bt, st)
++
++        def s_namedtuple():
++            import collections
++            WM = collections.namedtuple("WarpMarker", ["beat_time", "sample_time"])
++            return WM(bt, st)
++
++        def s_duck():
++            class WM(object):
++                pass
++            m = WM()
++            m.beat_time = bt
++            m.sample_time = st
++            return m
++
++        def s_tuple():
++            return (bt, st)
++
++        strategies = [
++            ("Live.Clip.WarpMarker(kwargs)", s_kwargs),
++            ("Live.Clip.WarpMarker(positional)", s_positional),
++            ("namedtuple", s_namedtuple),
++            ("duck-typed object", s_duck),
++            ("plain tuple", s_tuple),
++        ]
++
++        # A known-good strategy is reused directly; any failure re-probes, since
++        # a cached answer from a different clip type should not become sticky.
++        if self._warp_marker_strategy is not None:
++            for name, build in strategies:
++                if name == self._warp_marker_strategy:
++                    try:
++                        clip.add_warp_marker(build())
++                        return name
++                    except Exception:
++                        self._warp_marker_strategy = None
++                    break
++
++        errors = []
++        for name, build in strategies:
++            try:
++                clip.add_warp_marker(build())
++            except Exception as e:
++                errors.append("{0}: {1}".format(name, e))
++                continue
++            self._warp_marker_strategy = name
++            self.log_message("warp marker strategy discovered: " + name)
++            return name
++
++        raise RuntimeError(
++            "Clip.add_warp_marker rejected every known argument shape. Tried -- "
++            + " | ".join(errors))
++
++    def _set_clip_warp_markers(self, track_index, clip_index, markers, warp_mode=None):
++        """Replace an audio clip's warp map with an explicit list of markers.
++
++        LOCAL PATCH — not in upstream, and it cannot live on the client side.
++        Clip.add_warp_marker() wants a C++ TWarpMarker, and boost.python
++        registers a from-python converter for exactly ONE Python shape. Which
++        shape that is is not documented and is not guessable: measured against
++        Live 12.2.7, dict, list, tuple AND int are all rejected with
++        "No registered converter was able to produce a C++ rvalue of type
++        NApiHelpers::TWarpMarker from this Python object of type X".
++
++        So _make_warp_marker probes the plausible constructions and caches the
++        first that works. Whatever the accepted shape turns out to be, it has to
++        be built HERE, inside Live — a socket carries JSON, which has no way to
++        express a Live API object.
++
++        Units: beat_time is beats from the sample start, sample_time is
++        SECONDS from the sample start (not frames — do not scale by the
++        sample rate).
++
++        Removal of the pre-existing markers is best effort. A freshly created
++        audio clip carries a "shadow marker" encoding the detected tempo, and
++        touching it raises "The shadow marker can't be moved." That is normal,
++        not a failure, so each removal is wrapped individually and only counted.
++        """
++        try:
++            track, clip = self._resolve_arrangement_clip(track_index, clip_index)
++
++            if len(markers) < 2:
++                raise ValueError("At least 2 warp markers are required, got {0}".format(
++                    len(markers)))
++
++            # Normalize and sort by beat_time before validating monotonicity.
++            parsed = []
++            for m in markers:
++                beat_time = float(m[0])
++                sample_time = float(m[1])
++                if beat_time < 0 or sample_time < 0:
++                    raise ValueError(
++                        "Warp marker times must be non-negative, got ({0}, {1})".format(
++                            beat_time, sample_time))
++                parsed.append((beat_time, sample_time))
++            parsed.sort(key=lambda pair: pair[0])
++
++            # A non-monotonic map corrupts the clip, so reject it outright.
++            for i in range(1, len(parsed)):
++                if parsed[i][0] <= parsed[i - 1][0]:
++                    raise ValueError(
++                        "Warp marker beat_times must be strictly increasing: "
++                        "{0} follows {1}".format(parsed[i][0], parsed[i - 1][0]))
++
++            # A warp map on an unwarped clip is meaningless.
++            clip.warping = True
++            if warp_mode is not None:
++                clip.warp_mode = int(warp_mode)
++
++            # Snapshot the old markers BEFORE adding, otherwise we would iterate
++            # over the markers we are about to insert.
++            old_beat_times = [wm.beat_time for wm in clip.warp_markers]
++
++            # Add first, remove second: Live requires the clip to keep at least
++            # one marker at all times, so the new map must be in place already.
++            added = 0
++            strategy = None
++            for beat_time, sample_time in parsed:
++                strategy = self._make_warp_marker(clip, beat_time, sample_time)
++                added += 1
++
++            # Only remove old markers that the new map does not itself occupy.
++            # remove_warp_marker() addresses a marker by beat_time, so removing
++            # an old marker that shares a beat_time with a new one (0.0 almost
++            # always collides) would delete the marker we just added.
++            new_beat_times = [pair[0] for pair in parsed]
++            removed = 0
++            failed = 0
++            for beat_time in old_beat_times:
++                if any(abs(beat_time - nbt) < 1e-9 for nbt in new_beat_times):
++                    continue
++                try:
++                    clip.remove_warp_marker(float(beat_time))
++                    removed += 1
++                except Exception:
++                    # Shadow marker and already-replaced markers land here.
++                    failed += 1
++
++            return {
++                "marker_count": len(clip.warp_markers),
++                "added": added,
++                "removed": removed,
++                "remove_failed": failed,
++                "warping": clip.warping,
++                "marker_strategy": strategy
++            }
++        except Exception as e:
++            self.log_message("Error setting clip warp markers: " + str(e))
++            raise
++
+     def _set_view(self, view_name):
+         """Switch Ableton view."""
+         try:

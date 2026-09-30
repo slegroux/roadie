@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Roadie</title>
+<meta name="description" content="Roadie: stem separation for electronic music. Split a track or set into stems, find the grid and bar 1, and load it all into a running Ableton Live session, ordered, colour-coded and tempo-matched.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Tokens follow the Sideman page (Live 12 light / classic dark) so the two
+     sites read as one family. */
+  :root {
+    color-scheme: light;
+    --ground: #DCDCD8;
+    --panel: #EDEDE9;
+    --panel-2: #E4E4E0;
+    --ink: #1F1F22;
+    --ink-2: #5C5C60;
+    --ink-3: #5E5E62;
+    --rule: #B9B9B4;
+    --accent: #C93C25;
+    --accent-ink: #FFFFFF;
+    --slot: #D3D3CF;
+    --focus: #1F1F22;
+    --display: "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #2B2B2E;
+      --panel: #353538;
+      --panel-2: #3C3C40;
+      --ink: #E8E8E4;
+      --ink-2: #A5A5A0;
+      --ink-3: #A3A39E;
+      --rule: #4A4A4E;
+      --accent: #FF6B52;
+      --accent-ink: #1F1F22;
+      --slot: #3E3E42;
+      --focus: #E8E8E4;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #2B2B2E;
+    --panel: #353538;
+    --panel-2: #3C3C40;
+    --ink: #E8E8E4;
+    --ink-2: #A5A5A0;
+    --ink-3: #A3A39E;
+    --rule: #4A4A4E;
+    --accent: #FF6B52;
+    --accent-ink: #1F1F22;
+    --slot: #3E3E42;
+    --focus: #E8E8E4;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  a:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+  h1, h2, h3 {
+    font-family: var(--display);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.02;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h2 { font-size: clamp(1.9rem, 3.4vw, 2.6rem); }
+  h3 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+  p { margin: 0; }
+  code { font-family: var(--mono); font-size: 0.9em; }
+  p code, li code, td code { background: var(--panel-2); padding: 0.06em 0.36em; border-radius: 3px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding-inline: 24px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  .measure { max-width: 62ch; }
+  section { padding-block: 72px; border-top: 1px solid var(--rule); }
+  section > .wrap > .eyebrow { display: block; margin-bottom: 12px; }
+  section > .wrap > h2 { margin-bottom: 20px; }
+
+  /* top bar */
+  .top { border-bottom: 1px solid var(--rule); background: var(--panel); }
+  .top .wrap { display: flex; align-items: center; gap: 20px; height: 56px; }
+  .wordmark { font-family: var(--display); font-weight: 800; font-size: 1.25rem; text-decoration: none; letter-spacing: -0.02em; }
+  .wordmark span { color: var(--accent); }
+  .top nav { margin-left: auto; display: flex; gap: 20px; font-size: 0.95rem; }
+  .top nav a { text-decoration: none; color: var(--ink-2); }
+  .top nav a:hover { color: var(--ink); }
+
+  /* hero */
+  .hero { padding-block: 72px 56px; }
+  .hero h1 { font-size: clamp(2.6rem, 7vw, 5rem); max-width: 14ch; }
+  .hero .lede { margin-top: 20px; font-size: 1.2rem; color: var(--ink-2); max-width: 52ch; }
+  .cmd {
+    margin-top: 32px;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 18px 20px;
+    font-family: var(--mono);
+    font-size: 0.92rem;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .cmd .c { color: var(--ink-3); }
+  .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 10px 18px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-decoration: none;
+    border: 1px solid var(--ink);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  /* arrangement mock: one lane per stem, red->blue by spectral centroid */
+  .arr {
+    margin-top: 40px;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 14px;
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 5px 12px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+  .arr .name { color: var(--ink-2); align-self: center; white-space: nowrap; }
+  .arr .lane { height: 22px; background: var(--slot); border-radius: 2px; position: relative; overflow: hidden; }
+  .arr .clip { position: absolute; top: 0; bottom: 0; left: 6%; right: 2%; border-radius: 2px; opacity: 0.92; }
+  .arr .clip.muted { opacity: 0.3; }
+  .arr .loc { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink); opacity: 0.35; }
+  .arr .ruler { grid-column: 2; height: 16px; position: relative; color: var(--ink-3); }
+  .arr .ruler span { position: absolute; transform: translateX(-2px); }
+  .arr-cap { margin-top: 10px; font-size: 0.9rem; color: var(--ink-3); }
+
+  /* pipeline */
+  .pipe { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 8px; counter-reset: step; }
+  .step { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; }
+  .step::before {
+    counter-increment: step;
+    content: "0" counter(step);
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .step h3 { margin-bottom: 8px; }
+  .step p { font-size: 0.95rem; color: var(--ink-2); }
+  .step code { font-size: 0.82em; }
+
+  /* findings */
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 22px; }
+  .card .num { font-family: var(--display); font-weight: 800; font-size: 2.2rem; color: var(--accent); line-height: 1; margin-bottom: 10px; }
+  .card h3 { margin-bottom: 8px; }
+  .card p { font-size: 0.95rem; color: var(--ink-2); }
+
+  /* tables and install */
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--ink-2); font-size: 0.85rem; }
+  .tablebox { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 10px; }
+  ol.install { padding-left: 1.2em; margin: 0; display: grid; gap: 18px; }
+  ol.install li { padding-left: 6px; }
+  ol.install .cmd { margin-top: 10px; }
+  ul.limits { margin: 0; padding-left: 1.2em; display: grid; gap: 10px; }
+  ul.limits li { max-width: 72ch; }
+
+  footer { border-top: 1px solid var(--rule); padding-block: 32px; color: var(--ink-3); font-size: 0.9rem; }
+  footer .wrap { display: flex; gap: 20px; flex-wrap: wrap; justify-content: space-between; }
+
+  @media (max-width: 820px) {
+    .pipe { grid-template-columns: 1fr 1fr; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 520px) {
+    .wrap { padding-inline: 16px; }
+    .pipe { grid-template-columns: 1fr; }
+    .top nav a.opt { display: none; }
+    .arr { grid-template-columns: 72px 1fr; }
+    .arr .ruler span.opt, .arr .ruler span:first-child { display: none; }
+    section { padding-block: 52px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="wordmark" href="#">road<span>ie</span></a>
+    <nav>
+      <a class="opt" href="#how">How it works</a>
+      <a class="opt" href="#measured">Measured</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/slegroux/roadie">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<div class="hero">
+  <div class="wrap">
+    <span class="eyebrow">Stem separation for electronic music → Ableton Live</span>
+    <h1>Your track, in stems, on the grid.</h1>
+    <p class="lede">Roadie sets up the session before you play. It splits a track or DJ set into stems tuned for electronic music, finds the tempo and which beat is bar 1, and loads everything into a running Live session on the bar line: ordered by frequency, colour-coded, levelled.</p>
+<div class="cmd"><span class="c"># your recording → stems → six-way drum split</span>
+roadie split my-set.wav -o sets/ -d
+
+<span class="c"># stems → a running Live set, with a locator per section</span>
+roadie load sets/&lt;name&gt;_stems --locators</div>
+    <div class="actions">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn" href="https://github.com/slegroux/roadie#readme">Read the README</a>
+    </div>
+
+    <div class="arr" role="img" aria-label="Mock Ableton arrangement: nine stem tracks, kick first, then ordered low to high by spectral centroid, coloured on a red-to-blue ramp, with section locators across the top.">
+      <div class="name"></div>
+      <div class="ruler">
+        <span style="left:6%">9</span><span class="opt" style="left:18%">Intro</span><span style="left:34%">Drop 1</span><span class="opt" style="left:55%">Break</span><span class="opt" style="left:70%">Drop 2</span><span style="left:90%">Outro</span>
+      </div>
+      <div class="name">drums_kick</div><div class="lane"><div class="clip" style="background:hsl(4 78% 58%)"></div></div>
+      <div class="name">bass</div><div class="lane"><div class="clip" style="background:hsl(22 82% 56%)"></div></div>
+      <div class="name">drums_toms</div><div class="lane"><div class="clip" style="background:hsl(42 85% 54%)"></div></div>
+      <div class="name">drums_snare</div><div class="lane"><div class="clip" style="background:hsl(75 60% 48%)"></div></div>
+      <div class="name">synths</div><div class="lane"><div class="clip" style="background:hsl(140 45% 48%)"></div></div>
+      <div class="name">vocals</div><div class="lane"><div class="clip" style="background:hsl(170 55% 44%)"></div></div>
+      <div class="name">drums_hh</div><div class="lane"><div class="clip" style="background:hsl(195 65% 52%)"></div></div>
+      <div class="name">drums_ride</div><div class="lane"><div class="clip" style="background:hsl(212 70% 58%)"></div></div>
+      <div class="name">drums (kit)</div><div class="lane"><div class="clip muted" style="background:hsl(228 70% 62%)"></div></div>
+    </div>
+    <p class="arr-cap">Kick pinned first, then low → high by spectral centroid. The composite kit is muted because the drum parts already sum to it.</p>
+  </div>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <span class="eyebrow">How it works</span>
+    <h2>Four stages, each skipped if its output is already there.</h2>
+    <div class="pipe">
+      <div class="step">
+        <h3>Fetch</h3>
+        <p><code>roadie split</code> takes a local file, or a URL of your own upload via <code>yt-dlp</code>, and makes a 44.1 kHz / 24-bit WAV. A lossless original separates cleaner, because separation artifacts pile on top of codec artifacts.</p>
+      </div>
+      <div class="step">
+        <h3>Separate</h3>
+        <p><code>demucs htdemucs_6s</code> for bass, drums, vocals, and a merged <code>synths</code> stem. <code>-d</code> adds a kick / snare / toms / hh / ride / crash split.</p>
+      </div>
+      <div class="step">
+        <h3>Align</h3>
+        <p><code>beat_aligner</code> fits the tempo grid from the kick and works out which beat is bar 1 from the full mix. It writes a warp map only if the tempo actually drifts.</p>
+      </div>
+      <div class="step">
+        <h3>Load</h3>
+        <p><code>roadie load</code> builds the tracks in a running Live set through <a href="https://slegroux.github.io/sideman/">Sideman</a>, with −6 dB headroom per stem and optional section locators.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="measured">
+  <div class="wrap">
+    <span class="eyebrow">Measured, not assumed</span>
+    <h2>Every default was measured on real material.</h2>
+    <p class="measure" style="color:var(--ink-2);margin-bottom:28px">Where a measurement contradicted an earlier claim, the README keeps the correction next to the setting. A few of the results:</p>
+    <div class="grid2">
+      <div class="card">
+        <div class="num">26 dB</div>
+        <h3>Window choice beats model choice</h3>
+        <p>Across five windows of one set, the four demucs models' median bass deficit sits within 0.5 dB, while the choice of window moves it by up to 26 dB. <code>htdemucs_6s</code> is kept because it holds up when the bass thins out. Never benchmark on one excerpt.</p>
+      </div>
+      <div class="card">
+        <div class="num">~35 ms</div>
+        <h3>Warp only when the set drifts</h3>
+        <p>Detected beats jitter about 35 ms RMS around the fitted grid, which is noise in the beat detector, not the track moving. Pinning a marker to every beat would warp a steady set onto that noise, so markers go at smoothed segment boundaries, and only when drift is real.</p>
+      </div>
+      <div class="card">
+        <div class="num">3 → 1</div>
+        <h3>Piano and guitar are just quieter synths</h3>
+        <p>On synth-based music, <code>htdemucs_6s</code>'s piano and guitar stems share the spectral contour of <code>other</code>. All three are summed into one float32 <code>synths</code> stem, so the stems still add back up to the mix.</p>
+      </div>
+      <div class="card">
+        <div class="num">0 dBFS</div>
+        <h3>Where a finished master peaks</h3>
+        <p>A finished master is brickwalled, so stems at unity leave no room to mix. Each stem track comes in at −6 dB, set through Live's fader taper, which was measured as <code>0.85 + dB/40</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="outputs">
+  <div class="wrap">
+    <span class="eyebrow">What you get</span>
+    <h2>From one track or set.</h2>
+    <div class="tablebox">
+      <table>
+        <thead><tr><th>File</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td><code>&lt;title&gt;_&lt;bpm&gt;bpm.wav</code></td><td>44.1 kHz / 24-bit source, tempo-tagged</td></tr>
+          <tr><td><code>…_stems/{bass,drums,vocals}.flac</code></td><td>demucs stems as 16-bit FLAC (the source is a lossy stream, so 24-bit would add nothing), sample-identical in length</td></tr>
+          <tr><td><code>…_stems/synths.wav</code></td><td>other + piano + guitar, float32 so the sum cannot clip</td></tr>
+          <tr><td><code>…_stems/drums_{kick,snare,toms,hh,ride,crash}.flac</code></td><td>six-way drum split with <code>-d</code> (~1.3× realtime, so opt-in)</td></tr>
+          <tr><td>A Live set</td><td>one track per stem, on the bar line from bar 9, plus locators with <code>--locators</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <span class="eyebrow">Install · macOS</span>
+    <h2>Three tools, one bridge.</h2>
+    <ol class="install measure">
+      <li>Command-line tools. The extras are load-bearing: demucs omits numpy from its metadata, and audio-separator needs <code>[cpu]</code> for onnxruntime.
+<div class="cmd">brew install uv ffmpeg deno aubio
+uv tool install yt-dlp
+uv tool install demucs --with numpy
+uv tool install "audio-separator[cpu]"</div></li>
+      <li>The repo. <code>install.sh</code> builds its venv from pinned requirements and puts <code>roadie</code> on your PATH.
+<div class="cmd">git clone https://github.com/slegroux/roadie
+cd roadie &amp;&amp; ./install.sh</div></li>
+      <li>Install <a href="https://slegroux.github.io/sideman/">Sideman</a>, pick it as a Control Surface in Live, and check the bridge:
+<div class="cmd">./install.sh --check</div></li>
+    </ol>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <span class="eyebrow">Known limitations</span>
+    <h2>What it won't do.</h2>
+    <ul class="limits">
+      <li><strong>Which beat is bar 1 is the weakest link.</strong> Four-on-the-floor is symmetric at the beat level, and the two detectors can disagree by two beats. Confidence is reported, and weak readings are called out. Check bar 1 by ear.</li>
+      <li><strong>No pad, arp or stab separation.</strong> Those are arrangement roles, not sources, and no separator is trained on them.</li>
+      <li><strong>Section names are rules, not recognition.</strong> Boundaries are measured and snapped to 8-bar phrases. The labels are thresholds on energy and order.</li>
+      <li><strong>Live must be running.</strong> There's no headless mode, and Live's API can't reorder tracks after creating them.</li>
+      <li><strong>Tuned on one genre.</strong> The BPM gate and model choice are calibrated on deep and melodic house. Their measurements are documented so you can re-derive them for other material.</li>
+    </ul>
+    <p class="measure" style="margin-top:28px;color:var(--ink-2)"><strong style="color:var(--ink)">Use it on recordings you have the rights to.</strong> A DJ set contains other artists' music: stems you extract are for your own practice and analysis, not for release. Downloading from YouTube is subject to YouTube's Terms of Service. For your own uploads, YouTube Studio's download gives you the original file; pass it with <code>--file</code>.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Roadie · formerly yt2live · by <a href="https://github.com/slegroux">Sylvain Le Groux</a> · GPL-3.0</span>
+    <span><a href="https://github.com/slegroux/roadie">Source</a> · <a href="https://slegroux.github.io/sideman/">Sideman</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
