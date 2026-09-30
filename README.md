@@ -2,10 +2,13 @@
 
 *Formerly yt2live.*
 
-Stem separation for electronic music, straight into Ableton Live. Give it a
-recording of your own track or set, as a local file (or, as one more input, the
-URL of your own YouTube upload); it separates the audio into stems and loads them
-into a running Live session, ordered by frequency, colour-coded and tempo-matched.
+**From finished track to Live set.** Roadie is stem separation for Ableton
+Live 12. Give it a recording of your own track or set, as a local file (or, as one
+more input, the URL of your own YouTube upload); it separates the audio into stems
+and builds the arrangement in your running Live session: one track per stem, on
+the bar line, ordered by frequency, colour-coded, levelled, with a locator per
+section. The stems are plain audio files any DAW can open; everything past the
+split is Ableton-only.
 
 Every default here was measured on real material, not taken from a benchmark
 leaderboard; where the two disagree, the measurement is documented alongside the

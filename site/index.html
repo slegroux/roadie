@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Roadie</title>
-<meta name="description" content="Roadie: stem separation for electronic music. Split a track or set into stems, find the grid and bar 1, and load it all into a running Ableton Live session, ordered, colour-coded and tempo-matched.">
+<meta name="description" content="Roadie turns a finished track or DJ set into an Ableton Live set: stems tuned for electronic music, tempo and bar 1 found, every stem on its own track on the bar line, with locators per section. For Ableton Live 12.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -83,7 +83,7 @@
   h3 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
   p { margin: 0; }
   code { font-family: var(--mono); font-size: 0.9em; }
-  p code, li code, td code { background: var(--panel-2); padding: 0.06em 0.36em; border-radius: 3px; }
+  p code, li code, td code { background: var(--panel-2); padding: 0.06em 0.36em; border-radius: 3px; white-space: nowrap; }
   .wrap { max-width: 1080px; margin: 0 auto; padding-inline: 24px; }
   .eyebrow {
     font-family: var(--mono);
@@ -212,6 +212,7 @@
   <div class="wrap">
     <a class="wordmark" href="#">road<span>ie</span></a>
     <nav>
+      <a class="opt" href="#live">In Live</a>
       <a class="opt" href="#how">How it works</a>
       <a class="opt" href="#measured">Measured</a>
       <a href="#install">Install</a>
@@ -223,9 +224,9 @@
 <main>
 <div class="hero">
   <div class="wrap">
-    <span class="eyebrow">Stem separation for electronic music → Ableton Live</span>
-    <h1>Your track, in stems, on the grid.</h1>
-    <p class="lede">Roadie sets up the session before you play. It splits a track or DJ set into stems tuned for electronic music, finds the tempo and which beat is bar 1, and loads everything into a running Live session on the bar line: ordered by frequency, colour-coded, levelled.</p>
+    <span class="eyebrow">Stem separation for Ableton Live 12</span>
+    <h1>From finished track to Live set.</h1>
+    <p class="lede">Roadie takes a finished track or DJ set and hands it back as an Ableton Live session you can play, remix or study. It splits the audio into stems tuned for electronic music, finds the tempo and which beat is bar 1, and builds the arrangement for you: one track per stem, on the bar line, ordered by frequency, colour-coded, with headroom and a locator at every section.</p>
 <div class="cmd"><span class="c"># your recording → stems → six-way drum split</span>
 roadie split my-set.wav -o sets/ -d
 
@@ -255,6 +256,33 @@ roadie load sets/&lt;name&gt;_stems --locators</div>
   </div>
 </div>
 
+<section id="live">
+  <div class="wrap">
+    <span class="eyebrow">Built for Ableton Live</span>
+    <h2>It doesn't hand you files. It builds the set.</h2>
+    <p class="measure" style="color:var(--ink-2);margin-bottom:28px">Roadie drives a running copy of Live 12 (any edition) through <a href="https://slegroux.github.io/sideman/">Sideman</a>, which reaches Live's object model directly. Everything below happens inside your open set, with no dragging, no manual warping, and no guessing where bar 1 is.</p>
+    <div class="grid2">
+      <div class="card">
+        <h3>Tracks, in order</h3>
+        <p>One audio track per stem, kick pinned first, then low to high by spectral centroid, coloured on a red-to-blue ramp. The composite drum kit is muted when the separate drum parts are present, because they already sum to it.</p>
+      </div>
+      <div class="card">
+        <h3>On the grid</h3>
+        <p>Live's tempo is set from the audio, and every clip starts on the bar line at bar 9, leaving eight bars ahead to mix into. A warp map is written only when the set's tempo actually drifts.</p>
+      </div>
+      <div class="card">
+        <h3>Locators and scenes</h3>
+        <p><code>--locators</code> drops a named locator at each section (Intro, Build, Drop, Break, Outro), snapped to 8-bar phrases from bar 1. <code>roadie scenes</code> rebuilds them as a Session View grid: one scene per section, one looping clip per stem.</p>
+      </div>
+      <div class="card">
+        <h3>Levelled to mix</h3>
+        <p>Each stem track comes in at −6 dB, set through Live's own fader curve (measured, not assumed), so your faders sit near unity and the sum has headroom. <code>--energy-map</code> adds a silent MIDI track that sketches the energy curve.</p>
+      </div>
+    </div>
+    <p class="measure" style="margin-top:24px;color:var(--ink-2)">The stems themselves are plain FLAC and WAV files that open in any DAW. The arrangement, warping, locators and levels are Live-only, and that's what Roadie is for.</p>
+  </div>
+</section>
+
 <section id="how">
   <div class="wrap">
     <span class="eyebrow">How it works</span>
@@ -274,7 +302,7 @@ roadie load sets/&lt;name&gt;_stems --locators</div>
       </div>
       <div class="step">
         <h3>Load</h3>
-        <p><code>roadie load</code> builds the tracks in a running Live set through <a href="https://slegroux.github.io/sideman/">Sideman</a>, with −6 dB headroom per stem and optional section locators.</p>
+        <p><code>roadie load</code> builds the arrangement in your open Live set: tracks, clips, tempo, levels, and locators if you ask for them.</p>
       </div>
     </div>
   </div>
@@ -332,7 +360,7 @@ roadie load sets/&lt;name&gt;_stems --locators</div>
 <section id="install">
   <div class="wrap">
     <span class="eyebrow">Install · macOS</span>
-    <h2>Three tools, one bridge.</h2>
+    <h2>Three tools and Live.</h2>
     <ol class="install measure">
       <li>Command-line tools. The extras are load-bearing: demucs omits numpy from its metadata, and audio-separator needs <code>[cpu]</code> for onnxruntime.
 <div class="cmd">brew install uv ffmpeg deno aubio
@@ -356,7 +384,7 @@ cd roadie &amp;&amp; ./install.sh</div></li>
       <li><strong>Which beat is bar 1 is the weakest link.</strong> Four-on-the-floor is symmetric at the beat level, and the two detectors can disagree by two beats. Confidence is reported, and weak readings are called out. Check bar 1 by ear.</li>
       <li><strong>No pad, arp or stab separation.</strong> Those are arrangement roles, not sources, and no separator is trained on them.</li>
       <li><strong>Section names are rules, not recognition.</strong> Boundaries are measured and snapped to 8-bar phrases. The labels are thresholds on energy and order.</li>
-      <li><strong>Live must be running.</strong> There's no headless mode, and Live's API can't reorder tracks after creating them.</li>
+      <li><strong>Ableton Live 12 only, and it must be running.</strong> Roadie loads into an open set; there's no headless mode, and no other DAW is supported. Live's API can't reorder tracks after creating them.</li>
       <li><strong>Tuned on one genre.</strong> The BPM gate and model choice are calibrated on deep and melodic house. Their measurements are documented so you can re-derive them for other material.</li>
     </ul>
     <p class="measure" style="margin-top:28px;color:var(--ink-2)"><strong style="color:var(--ink)">Use it on recordings you have the rights to.</strong> A DJ set contains other artists' music: stems you extract are for your own practice and analysis, not for release. Downloading from YouTube is subject to YouTube's Terms of Service. For your own uploads, YouTube Studio's download gives you the original file; pass it with <code>--file</code>.</p>
