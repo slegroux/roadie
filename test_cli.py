@@ -7,6 +7,7 @@ suite and VIRTUAL_ENV is set to keep their .venv re-exec guard out of the way.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 
@@ -14,6 +15,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROADIE = os.path.join(HERE, "roadie")
+STEMS2ALS = os.path.join(HERE, "stems2als.sh")
 SUBCOMMANDS = ("split", "load", "open", "sections", "scenes")
 
 
@@ -78,7 +80,7 @@ def test_stems2als_picks_the_highest_live_version_not_the_last_by_name(tmp_path)
     for name in ("Ableton Live 9 Suite.app", "Ableton Live 12 Suite.app",
                  "Ableton Live 11 Lite.app"):
         (tmp_path / name).mkdir()
-    script = os.path.join(HERE, "stems2als.sh")
+    script = STEMS2ALS
     snippet = ("set -euo pipefail; source <(sed -n '/^newest_live ()/,/^}/p' %s); "
                "newest_live \"$1\"" % script)
     r = run("bash", "-c", snippet, "_", str(tmp_path))
@@ -86,6 +88,139 @@ def test_stems2als_picks_the_highest_live_version_not_the_last_by_name(tmp_path)
     assert r.stdout == str(tmp_path / "Ableton Live 12 Suite.app")
     r = run("bash", "-c", snippet, "_", str(tmp_path / "nothing"))
     assert r.returncode == 0 and r.stdout == ""
+
+
+# SAFETY: Live may be running on this machine, and a real stems2als run opens a
+# set in it. Every call below therefore (1) always carries a standalone
+# --dry-run, last, (2) points HOME and --template at nothing, so a regression
+# that got past the dry-run exit would fail at "no template" instead of
+# launching Live. Never run stems2als.sh from a test without both.
+def _als(tmp_path, *argv):
+    env = _env()
+    env["HOME"] = str(tmp_path / "nohome")
+    cmd = [STEMS2ALS, "--template", str(tmp_path / "nothing.als")] + list(argv) + ["--dry-run"]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                          env=env, check=False)
+
+
+def _stems(tmp_path, name="set_126bpm_stems"):
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    return str(d)
+
+
+def _loader_args(r):
+    """The stems2live argv from a dry run's printed command, past the script."""
+    argv = shlex.split(r.stdout)
+    names = [os.path.basename(a) for a in argv]
+    assert "stems2live.py" in names, r.stdout + r.stderr
+    return argv[names.index("stems2live.py") + 1:]
+
+
+def test_stems2als_analyze_forwards_locators_energy_map_and_session(tmp_path):
+    stems = _stems(tmp_path)
+    r = _als(tmp_path, stems, "--analyze")
+    assert r.returncode == 0, r.stderr
+    assert _loader_args(r) == [stems, "--locators", "--energy-map", "--session"]
+
+
+@pytest.mark.parametrize("flags, want", [
+    (["--locators"], ["--locators"]),
+    (["--energy-map"], ["--energy-map"]),
+    (["--session"], ["--session"]),
+    (["--locators", "--keep-locators"], ["--locators", "--keep-locators"]),
+    (["--start-bar", "1"], ["--start-bar", "1"]),
+    (["--tempo", "125.8", "--detector", "madmom"],
+     ["--tempo", "125.8", "--detector", "madmom"]),
+])
+def test_stems2als_forwards_individual_loader_flags(tmp_path, flags, want):
+    stems = _stems(tmp_path)
+    r = _als(tmp_path, stems, *flags)
+    assert r.returncode == 0, r.stderr
+    assert _loader_args(r)[1:] == want
+
+
+def test_stems2als_analyze_with_an_explicit_flag_does_not_repeat_it(tmp_path):
+    r = _als(tmp_path, _stems(tmp_path), "--analyze", "--locators", "--session")
+    assert r.returncode == 0, r.stderr
+    args = _loader_args(r)
+    for flag in ("--locators", "--energy-map", "--session"):
+        assert args.count(flag) == 1, args
+
+
+def test_stems2als_flags_may_come_before_the_stems_dir(tmp_path):
+    stems = _stems(tmp_path)
+    r = _als(tmp_path, "--analyze", "--start-bar", "1", stems)
+    assert r.returncode == 0, r.stderr
+    assert _loader_args(r) == [stems, "--locators", "--energy-map", "--session",
+                               "--start-bar", "1"]
+
+
+def test_stems2als_stems_path_with_a_space_survives_the_quoting(tmp_path):
+    stems = _stems(tmp_path, "my set_126bpm_stems")
+    r = _als(tmp_path, stems, "--analyze")
+    assert r.returncode == 0, r.stderr
+    assert _loader_args(r)[0] == stems
+
+
+def test_stems2als_dry_run_needs_no_template_and_writes_nothing(tmp_path):
+    r = _als(tmp_path, _stems(tmp_path), "--analyze", "-o", str(tmp_path / "newdir"))
+    assert r.returncode == 0, r.stderr
+    assert "stems2live.py" in r.stdout
+    assert not list(tmp_path.rglob("*.als"))
+    assert not (tmp_path / "newdir").exists()
+
+
+def test_stems2als_dry_run_reports_an_existing_project_like_a_real_run(tmp_path):
+    stems = _stems(tmp_path)
+    (tmp_path / "set_126bpm.als").write_text("x")
+    r = _als(tmp_path, stems)
+    assert r.returncode == 1
+    assert "a project already exists" in r.stderr
+
+
+@pytest.mark.parametrize("argv", [
+    ["--start-bar"], ["--tempo"], ["--detector"], ["-n"], ["-o"], ["--template"],
+    ["--start-bar", "--analyze"],
+])
+def test_stems2als_value_flag_never_swallows_the_next_flag(tmp_path, argv):
+    """`--start-bar --dry-run` once took --dry-run as the bar number and did a
+    real run: copied the template and opened the set in the running Live."""
+    r = _als(tmp_path, _stems(tmp_path), *argv)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "needs a value" in r.stderr
+    assert not list(tmp_path.rglob("*.als"))
+
+
+@pytest.mark.parametrize("argv, msg", [
+    (["--start-bar", "0"], "--start-bar"),
+    (["--start-bar", "abc"], "--start-bar"),
+    (["--start-bar", "2.5"], "--start-bar"),
+    (["--detector", "foo"], "--detector"),
+    (["--tempo", "0"], "--tempo"),
+    (["--tempo", "abc"], "--tempo"),
+])
+def test_stems2als_rejects_bad_values_before_touching_anything(tmp_path, argv, msg):
+    r = _als(tmp_path, _stems(tmp_path), *argv)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert msg in r.stderr
+    assert not list(tmp_path.rglob("*.als"))
+
+
+def test_stems2als_still_rejects_an_unknown_flag(tmp_path):
+    r = _als(tmp_path, _stems(tmp_path), "--bogus")
+    assert r.returncode == 2
+    assert "unknown flag: --bogus" in r.stderr
+
+
+def test_stems2als_help_lists_the_open_flags():
+    # Exempt from the _als guards: --help exits in the parse loop, before any
+    # stems dir is read. Add a stems dir to this call and it needs them back.
+    r = run(STEMS2ALS, "--help")
+    assert r.returncode == 0, r.stderr
+    for flag in ("--analyze", "--locators", "--energy-map", "--session",
+                 "--keep-locators", "--start-bar", "--dry-run"):
+        assert flag in r.stdout, flag
 
 
 def _fake_tools(tmp_path):

@@ -2,6 +2,8 @@
 # Make a new Ableton project from a folder of stems, in one command.
 #
 #   stems2als.sh <stems_dir> [-n NAME] [-o DIR] [--tempo BPM] [--detector D] [--template PATH]
+#                [--analyze] [--locators] [--energy-map] [--session] [--keep-locators]
+#                [--start-bar N] [--dry-run]
 #
 #   -n NAME       project name. Default: the stems folder's name minus "_stems".
 #   -o DIR        where the .als goes. Default: the stems folder's parent, so
@@ -16,6 +18,25 @@
 #                 chance level the bar phase is a guess and the set can land a
 #                 half-bar out. That is when a trained detector earns its keep.
 #   --template P  .als to copy. Default: ~/Music/Ableton/User Library/Templates/empty.als
+#
+#   --analyze     the whole reading in one flag: --locators --energy-map --session.
+#                 The labels (Intro/Build/Drop/Break/Outro, Main/Quiet/Mid when no
+#                 rule fits) are RULES over loudness, position and contrast, not
+#                 recognition. The boundaries are the trustworthy part.
+#   --locators    a named locator per detected section, snapped to 8-bar phrases.
+#   --energy-map  a silent MIDI track whose piano roll maps who plays where.
+#   --session     a Session View grid, one scene per section, on the same beat grid.
+#   --keep-locators  with --locators, add to existing locators instead of clearing.
+#   --start-bar N where the audio starts in the arrangement. Default: stems2live's (9).
+#   These five are forwarded to stems2live unchanged, and a flag given both
+#   directly and through --analyze is passed once.
+#   --dry-run     print the stems2live command and stop: no template copy, no .als,
+#                 no Live, no socket wait. Exists so the forwarding can be checked
+#                 without Live running. Values are validated first and an existing
+#                 project of the same name is reported (exit 1), as a real run would.
+#                 A value flag followed by anything starting with "-" is an error
+#                 (exit 2), never a value, so --dry-run can't be swallowed into a
+#                 real run. The cost: a name or folder can't start with "-".
 #
 # Live is found as the newest /Applications/Ableton Live*.app; set ABLETON_APP
 # to an app name or path to pick another.
@@ -58,15 +79,35 @@ if [[ -x "$REPO/.venv/bin/python" ]]; then
 fi
 LOADER="$REPO/stems2live.py"
 
-STEMS="" NAME="" OUTDIR="" TEMPO="" DETECTOR=""
+STEMS="" NAME="" OUTDIR="" TEMPO="" DETECTOR="" START_BAR=""
+LOCATORS="" ENERGY_MAP="" SESSION="" KEEP_LOCATORS="" DRY_RUN=""
+
+# A value flag must not swallow the next flag: `--start-bar --dry-run` used to
+# take "--dry-run" as the bar number, turn the dry run OFF, and go on to open a
+# real set in whatever Live was running. So a value flag refuses a missing value
+# or one that looks like a flag, and --dry-run is also found by a pre-scan, so
+# no parsing slip can turn "touch nothing" into a real run.
+need_val () {
+  [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "$1 needs a value" >&2; exit 2; }
+}
+for arg in "$@"; do
+  if [[ "$arg" == "--dry-run" ]]; then DRY_RUN=1; fi
+done
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n) NAME="${2:-}"; shift 2 ;;
-    -o) OUTDIR="${2:-}"; shift 2 ;;
-    --tempo) TEMPO="${2:-}"; shift 2 ;;
-    --detector) DETECTOR="${2:-}"; shift 2 ;;
-    --template) TEMPLATE="${2:-}"; shift 2 ;;
+    -n) need_val "$@"; NAME="$2"; shift 2 ;;
+    -o) need_val "$@"; OUTDIR="$2"; shift 2 ;;
+    --tempo) need_val "$@"; TEMPO="$2"; shift 2 ;;
+    --detector) need_val "$@"; DETECTOR="$2"; shift 2 ;;
+    --template) need_val "$@"; TEMPLATE="$2"; shift 2 ;;
+    --analyze) LOCATORS=1; ENERGY_MAP=1; SESSION=1; shift ;;
+    --locators) LOCATORS=1; shift ;;
+    --energy-map) ENERGY_MAP=1; shift ;;
+    --session) SESSION=1; shift ;;
+    --keep-locators) KEEP_LOCATORS=1; shift ;;
+    --start-bar) need_val "$@"; START_BAR="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) STEMS="$1"; shift ;;
@@ -75,6 +116,70 @@ done
 
 [[ -n "$STEMS" ]] || { usage; exit 2; }
 [[ -d "$STEMS" ]] || { echo "no such stems dir: $STEMS" >&2; exit 1; }
+
+STEMS=$(cd "$STEMS" && pwd)
+
+# Checked before anything is touched. stems2live rejects these too, but only
+# after the .als is copied and Live has opened it, which leaves a stray project
+# behind and a "project already exists" on the retry.
+if [[ -n "$START_BAR" && ! "$START_BAR" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--start-bar must be a bar number >= 1, got: $START_BAR" >&2; exit 2
+fi
+case "$DETECTOR" in
+  ""|heuristic|madmom) ;;
+  *) echo "--detector must be heuristic or madmom, got: $DETECTOR" >&2; exit 2 ;;
+esac
+if [[ -n "$TEMPO" ]] && ! [[ "$TEMPO" =~ ^[0-9]+(\.[0-9]+)?$ && "$TEMPO" =~ [1-9] ]]; then
+  echo "--tempo must be a number > 0, got: $TEMPO" >&2; exit 2
+fi
+
+# Built here, not at the end, so --dry-run can print exactly what a real run
+# would hand to stems2live. Flags are booleans above, so --analyze plus an
+# explicit --locators still yields one --locators.
+LOADER_ARGS=("$STEMS")
+[[ -n "$TEMPO" ]] && LOADER_ARGS+=(--tempo "$TEMPO")
+[[ -n "$DETECTOR" ]] && LOADER_ARGS+=(--detector "$DETECTOR")
+[[ -n "$LOCATORS" ]] && LOADER_ARGS+=(--locators)
+[[ -n "$ENERGY_MAP" ]] && LOADER_ARGS+=(--energy-map)
+[[ -n "$SESSION" ]] && LOADER_ARGS+=(--session)
+[[ -n "$KEEP_LOCATORS" ]] && LOADER_ARGS+=(--keep-locators)
+[[ -n "$START_BAR" ]] && LOADER_ARGS+=(--start-bar "$START_BAR")
+
+BASE=$(basename "$STEMS"); BASE="${BASE%_stems}"
+[[ -n "$NAME" ]] || NAME="$BASE"
+
+# Carry the BPM into the project TITLE. This reads the rounded tag out of the
+# stems folder name, which is fine HERE because it is only ever a label.
+# It must NOT be used as the session tempo — that is measured from the audio by
+# stems2live, and the rounded value is 0.17-0.44 BPM off in practice. Keep those
+# two uses separate; conflating them is the bug this script shipped with.
+if [[ "$NAME" != *bpm && "$BASE" =~ _([0-9]{2,3})bpm ]]; then
+  NAME="${NAME}_${BASH_REMATCH[1]}bpm"
+fi
+
+# Default beside the stems folder, NOT $PWD. Running `stems2als .` from inside
+# the stems dir would otherwise drop the .als among the audio files, where Live
+# then treats the folder as the project root.
+OUT="${OUTDIR:-$(dirname "$STEMS")}"
+[[ ! -d "$OUT" ]] || OUT=$(cd "$OUT" && pwd)   # no mkdir yet: a dry run creates nothing
+ALS="$OUT/$NAME.als"
+
+if [[ -e "$ALS" ]]; then
+  echo "a project already exists: $ALS" >&2
+  echo "  open it:      open \"$ALS\"" >&2
+  echo "  or rename:    stems2als \"$STEMS\" -n <other-name>" >&2
+  echo "  or replace:   rm \"$ALS\" && stems2als \"$STEMS\"" >&2
+  exit 1
+fi
+
+# Before the template check on purpose: nothing below here is needed to show the
+# command, and none of it should run (template copy, Live, socket). The project-
+# exists check above needs no template, so a dry run reports it too.
+if [[ -n "$DRY_RUN" ]]; then
+  printf '%q' "$PY"; printf ' %q' "$LOADER" "${LOADER_ARGS[@]}"; echo
+  exit 0
+fi
+
 [[ -s "$TEMPLATE" ]] || { echo "no template at: $TEMPLATE" >&2; exit 1; }
 command -v "$PY" >/dev/null || { echo "missing: $PY" >&2; exit 1; }
 [[ -s "$LOADER" ]] || { echo "missing loader: $LOADER" >&2; exit 1; }
@@ -96,19 +201,6 @@ APP="${ABLETON_APP:-}"
 [[ -n "$APP" ]] || APP="$(newest_live /Applications)"
 [[ -n "$APP" ]] || { echo "no Ableton Live found in /Applications; set ABLETON_APP" >&2; exit 1; }
 
-STEMS=$(cd "$STEMS" && pwd)
-BASE=$(basename "$STEMS"); BASE="${BASE%_stems}"
-[[ -n "$NAME" ]] || NAME="$BASE"
-
-# Carry the BPM into the project TITLE. This reads the rounded tag out of the
-# stems folder name, which is fine HERE because it is only ever a label.
-# It must NOT be used as the session tempo — that is measured from the audio by
-# stems2live, and the rounded value is 0.17-0.44 BPM off in practice. Keep those
-# two uses separate; conflating them is the bug this script shipped with.
-if [[ "$NAME" != *bpm && "$BASE" =~ _([0-9]{2,3})bpm ]]; then
-  NAME="${NAME}_${BASH_REMATCH[1]}bpm"
-fi
-
 # NOT read from the folder name, deliberately. yt2stems tags filenames with a
 # ROUNDED integer BPM (_126bpm) because that reads better; the real tempo of the
 # set it was built against is 125.829. Feeding the rounded value to Live is
@@ -119,19 +211,8 @@ if [[ -n "$TEMPO" ]]; then
   echo "==> tempo $TEMPO (explicit; overrides the measured value)"
 fi
 
-# Default beside the stems folder, NOT $PWD. Running `stems2als .` from inside
-# the stems dir would otherwise drop the .als among the audio files, where Live
-# then treats the folder as the project root.
-OUT="${OUTDIR:-$(dirname "$STEMS")}"; mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
-ALS="$OUT/$NAME.als"
-
-if [[ -e "$ALS" ]]; then
-  echo "a project already exists: $ALS" >&2
-  echo "  open it:      open \"$ALS\"" >&2
-  echo "  or rename:    stems2als \"$STEMS\" -n <other-name>" >&2
-  echo "  or replace:   rm \"$ALS\" && stems2als \"$STEMS\"" >&2
-  exit 1
-fi
+# Fixed above, before the dry-run exit; only the directory is made here.
+mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd); ALS="$OUT/$NAME.als"
 
 cp "$TEMPLATE" "$ALS"
 echo "==> $ALS  (from $(basename "$TEMPLATE"))"
@@ -163,9 +244,6 @@ echo
 # moment avoids tracks landing in the outgoing set.
 sleep 3
 
-LOADER_ARGS=("$STEMS")
-[[ -n "$TEMPO" ]] && LOADER_ARGS+=(--tempo "$TEMPO")
-[[ -n "$DETECTOR" ]] && LOADER_ARGS+=(--detector "$DETECTOR")
 "$PY" "$LOADER" "${LOADER_ARGS[@]}"
 
 echo

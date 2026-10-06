@@ -82,6 +82,27 @@ to the stems, opens it in the newest `/Applications/Ableton Live*.app`
 It cannot save for you — Live's Object Model has no save command — but because
 the `.als` already exists on disk, ⌘S saves in place with no dialog.
 
+It forwards these flags from `roadie load` unchanged: `--locators`, `--energy-map`,
+`--session`, `--keep-locators`, `--start-bar N`, plus `--tempo` and `--detector`.
+(`roadie load`'s other flags, such as `--no-align` and `--headroom`, are not
+forwarded; `roadie open` rejects them as unknown.)
+`--analyze` is shorthand for the first three, so one command gives a ready-to-save
+project with named section locators, the energy-map track and the Session View
+grid:
+
+```bash
+roadie open <stems_dir> --analyze                  # locators + energy map + session grid
+roadie open <stems_dir> --locators --start-bar 1   # or pick the pieces
+roadie open <stems_dir> --analyze --dry-run        # print the loader command, touch nothing
+```
+
+The locator names are a rule-based reading of energy, not recognition: Intro and
+Outro by position, Build/Drop/Break by loudness contrast with the neighbours,
+and Main/Quiet/Mid where no rule fits. The boundaries are the part to trust;
+rename any label that reads wrong. `--dry-run` stops after checking the stems
+folder, the flag values and whether the project already exists (exit 1, as a real
+run would): no template copy, no Live, no socket wait.
+
 `roadie scenes <stems_dir>` builds the Session View grid on its own, over tracks
 `roadie load` already created (it decorates, it does not create tracks).
 `--dry-run` prints the scene/clip plan without writing; `--replace` overwrites an
