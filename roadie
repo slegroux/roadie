@@ -6,10 +6,15 @@
 #   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
+#   roadie stats                     summarise the local usage log
 #
 # `roadie <command> --help` shows that command's own options. Every argument
 # after the command is passed through untouched, except that `split` turns a
 # local path into `--file <path>` (a URL goes through as is).
+#
+# Each run on a source or stems dir appends one line to a local usage log
+# (~/.local/state/roadie/usage.log; ROADIE_LOG=<file> moves it, ROADIE_LOG=
+# turns it off). Nothing is sent anywhere.
 
 set -euo pipefail
 
@@ -25,6 +30,35 @@ while [[ -L "$SELF" ]]; do
 done
 REPO="$(cd -P "$(dirname "$SELF")" && pwd)"
 
+LOG="${ROADIE_LOG-${XDG_STATE_HOME:-${HOME:-}/.local/state}/roadie/usage.log}"
+
+# One tab-separated line per run: time, command, exit code, seconds, target.
+# Best effort — a log that cannot be written must never fail the command.
+log_run () {
+  [[ -n "$LOG" && -n "$2" ]] || return 0
+  { mkdir -p "$(dirname "$LOG")" &&
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$3" "$4" \
+      "$(printf '%s' "$2" | tr -d '\000-\037')" >> "$LOG"; } 2>/dev/null || true
+}
+
+# run_logged <command> <target> <program> [args...] — runs the program in place
+# of the old `exec`, then logs it and exits with its status.
+run_logged () {
+  local name="$1" target="$2" rc=0 t0=$SECONDS
+  shift 2
+  "$@" || rc=$?
+  log_run "$name" "$target" "$rc" $(( SECONDS - t0 ))
+  exit "$rc"
+}
+
+# The first argument that is a directory, made absolute: the stems dir.
+first_dir () {
+  local a
+  for a in "$@"; do
+    if [[ -d "$a" ]]; then (cd -P "$a" && pwd); return; fi
+  done
+}
+
 [[ $# -gt 0 ]] || { usage; exit 0; }
 cmd="$1"; shift
 
@@ -37,12 +71,12 @@ case "$cmd" in
     # given https:// if it had none. Anything else is taken as a file, so a
     # typo gets yt2stems' "no such file" rather than a network fetch. `--`
     # ends option parsing here and is not passed on (yt2stems has no `--`).
-    args=() src_done=0 opts_done=0
+    args=() src_done=0 opts_done=0 src=
     while [[ $# -gt 0 ]]; do
       if [[ $opts_done -eq 0 ]]; then
         case "$1" in
           --) opts_done=1; shift; continue ;;
-          --file|-i) args+=("$1" "${2:-}"); src_done=1; shift $(( $# > 1 ? 2 : 1 )); continue ;;
+          --file|-i) args+=("$1" "${2:-}"); src_done=1; src="${2:-}"; shift $(( $# > 1 ? 2 : 1 )); continue ;;
           -o|-m) args+=("$1" "${2:-}"); shift $(( $# > 1 ? 2 : 1 )); continue ;;
           -*) args+=("$1"); shift; continue ;;
         esac
@@ -50,20 +84,37 @@ case "$cmd" in
       if [[ $src_done -eq 1 ]]; then
         args+=("$1")
       elif [[ -e "$1" ]]; then
-        args+=(--file "$1")
+        args+=(--file "$1"); src="$1"
       elif [[ "$1" == *://* ]]; then
-        args+=("$1")
+        args+=("$1"); src="$1"
       elif [[ "$1" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/ ]]; then
-        args+=("https://$1")
+        args+=("https://$1"); src="https://$1"
       else
-        args+=(--file "$1")
+        args+=(--file "$1"); src="$1"
       fi
       src_done=1; shift
     done
-    exec "$REPO/yt2stems.sh" ${args[@]+"${args[@]}"} ;;
-  load)     exec "$REPO/stems2live.py" "$@" ;;
-  open)     exec "$REPO/stems2als.sh" "$@" ;;
-  sections) exec "$REPO/sections.py" "$@" ;;
-  scenes)   exec "$REPO/session_view.py" "$@" ;;
+    # A local source is logged by absolute path; --help and bare errors have none.
+    if [[ -n "$src" && "$src" != *://* && -e "$src" ]]; then
+      src="$(cd -P "$(dirname "$src")" && pwd)/$(basename "$src")"
+    fi
+    run_logged split "$src" "$REPO/yt2stems.sh" ${args[@]+"${args[@]}"} ;;
+  load)     run_logged load     "$(first_dir "$@")" "$REPO/stems2live.py" "$@" ;;
+  open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
+  sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
+  scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
+  stats)
+    if [[ -z "$LOG" ]]; then echo "usage log is off (ROADIE_LOG is empty)"; exit 0; fi
+    if [[ ! -s "$LOG" ]]; then echo "no usage logged yet ($LOG)"; exit 0; fi
+    awk -F'\t' -v log="$LOG" '
+      { runs[$2]++; if ($3 != 0) bad[$2]++
+        else if (!(($2, $5) in seen)) { seen[$2, $5] = 1; distinct[$2]++ }
+        if (first == "") first = $1; last = $1; n++ }
+      END {
+        printf "roadie usage — %s\n  %d runs, %s to %s\n", log, n, first, last
+        split("split load open sections scenes", order, " ")
+        for (i = 1; i in order; i++) { c = order[i]; if (!(c in runs)) continue
+          printf "  %-9s %3d runs, %d failed — %d distinct %s\n", c, runs[c], bad[c], distinct[c],
+            (c == "split" ? "sources" : "stems dirs") } }' "$LOG" ;;
   *) echo "roadie: unknown command: $cmd" >&2; usage >&2; exit 2 ;;
 esac

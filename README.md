@@ -39,11 +39,19 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
 | `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
+| `roadie stats` | runs and distinct tracks from the local usage log | — |
 
 `roadie <command> --help` shows that command's own options. Every argument after
 the command passes through untouched, except that `split` turns a bare local path
 into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
+
+**Usage log.** Each `roadie` run on a source or a stems dir appends one
+tab-separated line (time, command, exit code, seconds, absolute path or URL) to
+`~/.local/state/roadie/usage.log`. It stays on your machine; nothing is sent.
+`roadie stats` summarises it. `ROADIE_LOG=<file>` moves it, `ROADIE_LOG=` turns it
+off. Runs that never reach a script (`--help`, a mistyped directory) are not
+logged, and the scripts run directly (`yt2stems`, `stems2live`) bypass it.
 
 ---
 
