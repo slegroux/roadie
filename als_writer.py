@@ -28,14 +28,21 @@ KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
     import, or the measured warp map when the track drifts.
 """
 
+import os
+import sys
+
+# Re-exec with the local .venv python if present, like the other scripts, so
+# numpy/soundfile/librosa resolve when this is run through the roadie command.
+_real_script = os.path.realpath(__file__)
+_venv_py = os.path.join(os.path.dirname(_real_script), ".venv", "bin", "python")
+if os.path.exists(_venv_py) and sys.executable != _venv_py and "VIRTUAL_ENV" not in os.environ:
+    os.execv(_venv_py, [_venv_py] + sys.argv)
+
 import argparse
 import copy
 import gzip
-import math
-import os
 import re
 import string
-import sys
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
