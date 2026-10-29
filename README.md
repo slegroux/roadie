@@ -46,24 +46,38 @@ the command passes through untouched, except that `split` turns a bare local pat
 into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
 
-**Default output folder.** `roadie split` writes to `-o DIR` if given, else to the
-`out` setting in `~/.config/roadie/config`, else to the current directory:
+## Configuration
+
+Roadie reads one optional file, `~/.config/roadie/config` (`$XDG_CONFIG_HOME` is
+honoured). It is plain `key = value` text: one setting per line, `#` starts a
+comment, a leading `~` expands to your home directory. The file is parsed, never
+executed, and a missing file is fine.
 
 ```
 # ~/.config/roadie/config
 out = ~/Projects/Music/slgMusProd/Studies
 ```
 
-`~` expands to your home directory, `#` starts a comment, and
-`ROADIE_CONFIG=<file>` points at a different file. The setting applies only through
-the `roadie` command, not to `yt2stems` run directly.
+| setting | meaning | default |
+|---|---|---|
+| `out` | folder `roadie split` writes the WAV and `_stems` folder into | the current directory |
+
+Precedence, highest first: the command-line flag (`roadie split -o DIR`), then the
+config file, then the built-in default. Config applies only through the `roadie`
+command; the underlying scripts run directly (`yt2stems`, `stems2live`) ignore it.
+
+Two environment variables sit beside the file:
+
+| variable | effect |
+|---|---|
+| `ROADIE_CONFIG=<file>` | read this config file instead; set it empty to ignore config |
+| `ROADIE_LOG=<file>` | write the usage log here; set it empty to turn the log off |
 
 **Usage log.** Each `roadie` run on a source or a stems dir appends one
 tab-separated line (time, command, exit code, seconds, absolute path or URL) to
-`~/.local/state/roadie/usage.log`. It stays on your machine; nothing is sent.
-`roadie stats` summarises it. `ROADIE_LOG=<file>` moves it, `ROADIE_LOG=` turns it
-off. Runs that never reach a script (`--help`, a mistyped directory) are not
-logged, and the scripts run directly (`yt2stems`, `stems2live`) bypass it.
+`~/.local/state/roadie/usage.log` (`$XDG_STATE_HOME` is honoured). It stays on your
+machine; nothing is sent. `roadie stats` summarises it. Runs that never reach a
+script (`--help`, a mistyped directory) are not logged.
 
 ---
 
