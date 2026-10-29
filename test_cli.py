@@ -33,6 +33,7 @@ def run(*argv):
 def _no_real_log(tmp_path, monkeypatch):
     """Keep every test run out of the user's real usage log."""
     monkeypatch.setenv("ROADIE_LOG", str(tmp_path / "usage.log"))
+    monkeypatch.setenv("ROADIE_CONFIG", str(tmp_path / "no-config"))
 
 
 @pytest.mark.parametrize("args", [(), ("-h",), ("--help",)])
@@ -232,3 +233,38 @@ def test_stats_counts_runs_and_distinct_targets(tmp_path):
 def test_stats_with_no_log_says_so(tmp_path):
     assert "no usage logged yet" in _logged(tmp_path, "stats").stdout
     assert "off" in _logged(tmp_path, "stats", ROADIE_LOG="").stdout
+
+
+# --- config file: default output dir ----------------------------------------
+
+def _split_out(tmp_path, *argv, config=None, home=None):
+    """Run `roadie split` against the fake yt-dlp and return what it printed."""
+    env, _ = _fake_tools(tmp_path)
+    env["ROADIE_LOG"] = ""
+    env["ROADIE_CONFIG"] = str(tmp_path / "config")
+    if home:
+        env["HOME"] = home
+    if config is not None:
+        (tmp_path / "config").write_text(config)
+    r = subprocess.run([ROADIE, "split", "youtu.be/abc", *argv], capture_output=True,
+                       text=True, timeout=60, env=env, cwd=str(tmp_path), check=False)
+    return r.stdout + r.stderr
+
+
+def test_split_uses_out_from_the_config_when_o_is_not_given(tmp_path):
+    out = tmp_path / "studies"
+    _split_out(tmp_path, config="# where stems go\nout = %s\n" % out)
+    assert out.is_dir()
+
+
+def test_an_explicit_o_beats_the_config(tmp_path):
+    cfg, flag = tmp_path / "from-config", tmp_path / "from-flag"
+    _split_out(tmp_path, "-o", str(flag), config="out=%s\n" % cfg)
+    assert flag.is_dir() and not cfg.exists()
+
+
+def test_config_tilde_expands_to_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _split_out(tmp_path, config="out = ~/Studies\n", home=str(home))
+    assert (home / "Studies").is_dir()

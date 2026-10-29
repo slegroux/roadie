@@ -15,6 +15,9 @@
 # Each run on a source or stems dir appends one line to a local usage log
 # (~/.local/state/roadie/usage.log; ROADIE_LOG=<file> moves it, ROADIE_LOG=
 # turns it off). Nothing is sent anywhere.
+#
+# `split` writes to -o DIR, else to `out = DIR` in ~/.config/roadie/config
+# (ROADIE_CONFIG=<file> moves it), else to the current directory.
 
 set -euo pipefail
 
@@ -31,6 +34,22 @@ done
 REPO="$(cd -P "$(dirname "$SELF")" && pwd)"
 
 LOG="${ROADIE_LOG-${XDG_STATE_HOME:-${HOME:-}/.local/state}/roadie/usage.log}"
+
+CONFIG="${ROADIE_CONFIG-${XDG_CONFIG_HOME:-${HOME:-}/.config}/roadie/config}"
+
+# config_get <key> — the first `key = value` in the config file; a leading ~
+# in the value expands to $HOME. Parsed, never sourced. Prints nothing if unset.
+config_get () {
+  [[ -n "$CONFIG" && -r "$CONFIG" ]] || return 0
+  local k v
+  while IFS='=' read -r k v || [[ -n "$k" ]]; do
+    k="${k//[[:space:]]/}"
+    [[ "$k" == "$1" ]] || continue
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    if [[ "$v" == "~" || "$v" == "~/"* ]]; then v="${HOME:-}${v#\~}"; fi
+    printf '%s' "$v"; return
+  done < "$CONFIG"
+}
 
 # One tab-separated line per run: time, command, exit code, seconds, target.
 # Best effort — a log that cannot be written must never fail the command.
@@ -71,13 +90,13 @@ case "$cmd" in
     # given https:// if it had none. Anything else is taken as a file, so a
     # typo gets yt2stems' "no such file" rather than a network fetch. `--`
     # ends option parsing here and is not passed on (yt2stems has no `--`).
-    args=() src_done=0 opts_done=0 src=
+    args=() src_done=0 opts_done=0 src= out_given=0
     while [[ $# -gt 0 ]]; do
       if [[ $opts_done -eq 0 ]]; then
         case "$1" in
           --) opts_done=1; shift; continue ;;
           --file|-i) args+=("$1" "${2:-}"); src_done=1; src="${2:-}"; shift $(( $# > 1 ? 2 : 1 )); continue ;;
-          -o|-m) args+=("$1" "${2:-}"); shift $(( $# > 1 ? 2 : 1 )); continue ;;
+          -o|-m) args+=("$1" "${2:-}"); [[ "$1" == -o ]] && out_given=1; shift $(( $# > 1 ? 2 : 1 )); continue ;;
           -*) args+=("$1"); shift; continue ;;
         esac
       fi
@@ -94,6 +113,10 @@ case "$cmd" in
       fi
       src_done=1; shift
     done
+    if [[ $out_given -eq 0 ]]; then
+      cfg_out="$(config_get out)"
+      [[ -z "$cfg_out" ]] || args+=(-o "$cfg_out")
+    fi
     # A local source is logged by absolute path; --help and bare errors have none.
     if [[ -n "$src" && "$src" != *://* && -e "$src" ]]; then
       src="$(cd -P "$(dirname "$src")" && pwd)/$(basename "$src")"

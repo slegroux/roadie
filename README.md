@@ -46,6 +46,18 @@ the command passes through untouched, except that `split` turns a bare local pat
 into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
 
+**Default output folder.** `roadie split` writes to `-o DIR` if given, else to the
+`out` setting in `~/.config/roadie/config`, else to the current directory:
+
+```
+# ~/.config/roadie/config
+out = ~/Projects/Music/slgMusProd/Studies
+```
+
+`~` expands to your home directory, `#` starts a comment, and
+`ROADIE_CONFIG=<file>` points at a different file. The setting applies only through
+the `roadie` command, not to `yt2stems` run directly.
+
 **Usage log.** Each `roadie` run on a source or a stems dir appends one
 tab-separated line (time, command, exit code, seconds, absolute path or URL) to
 `~/.local/state/roadie/usage.log`. It stays on your machine; nothing is sent.
