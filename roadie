@@ -106,12 +106,12 @@ case "$cmd" in
   stats)
     if [[ -z "$LOG" ]]; then echo "usage log is off (ROADIE_LOG is empty)"; exit 0; fi
     if [[ ! -s "$LOG" ]]; then echo "no usage logged yet ($LOG)"; exit 0; fi
-    awk -F'\t' -v log="$LOG" '
+    awk -F'\t' -v logfile="$LOG" '
       { runs[$2]++; if ($3 != 0) bad[$2]++
         else if (!(($2, $5) in seen)) { seen[$2, $5] = 1; distinct[$2]++ }
         if (first == "") first = $1; last = $1; n++ }
       END {
-        printf "roadie usage — %s\n  %d runs, %s to %s\n", log, n, first, last
+        printf "roadie usage — %s\n  %d runs, %s to %s\n", logfile, n, first, last
         split("split load open sections scenes", order, " ")
         for (i = 1; i in order; i++) { c = order[i]; if (!(c in runs)) continue
           printf "  %-9s %3d runs, %d failed — %d distinct %s\n", c, runs[c], bad[c], distinct[c],
