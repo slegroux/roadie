@@ -712,6 +712,26 @@ def _mmss(t):
     return "%d:%04.1f" % (int(t) // 60, t % 60)
 
 
+def write_sections_json(stems_dir, res, start_offset, locators):
+    """Save the analysis as <stems_dir>/sections.json so it outlives the run.
+
+    Only for a stems DIRECTORY (the other accepted input is one audio file, which
+    has nowhere of its own to put it). Best effort: an unwritable folder costs the
+    file, not the analysis. Returns the path written, or None."""
+    if not os.path.isdir(stems_dir):
+        return None
+    path = os.path.join(stems_dir, "sections.json")
+    out = dict(res, start_offset_beats=float(start_offset), locators=locators)
+    try:
+        with open(path, "w") as f:
+            json.dump(out, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        print("sections: could not write %s: %s" % (path, e), file=sys.stderr)
+        return None
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Detect song sections and emit Ableton locator positions")
@@ -736,6 +756,8 @@ def main():
                          "Leaving this at 0 is correct ONLY for an unaligned run "
                          "(default: 0)")
     ap.add_argument("--json", action="store_true", help="Output JSON results")
+    ap.add_argument("--no-write", action="store_true",
+                    help="do not save sections.json into the stems folder")
     args = ap.parse_args()
 
     period, grid_t0, downbeat = cli_grid(args.stems_dir, args.tempo,
@@ -745,6 +767,8 @@ def main():
         period=period, grid_t0=grid_t0, downbeat_sec=downbeat)
     locators = sections_to_locators(res["sections"], res["period"],
                                     args.start_offset)
+    saved = None if args.no_write else write_sections_json(
+        args.stems_dir, res, args.start_offset, locators)
 
     if args.json:
         res["start_offset_beats"] = float(args.start_offset)
@@ -769,6 +793,9 @@ def main():
               % (s["bar"], _mmss(s["time_sec"]), loc["time"],
                  s["rel_energy"], s["label"]))
     print()
+    if saved:
+        print("Saved:               %s" % saved)
+        print()
     print("Boundaries are MEASURED (spectral change: MFCC + chroma + RMS, "
           "agglomerative\nclustering, snapped to 8-bar phrases). Labels are "
           "RULES over energy and order —\nno model recognises a 'drop'; it is "

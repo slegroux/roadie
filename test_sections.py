@@ -647,3 +647,29 @@ def test_a_transition_never_starts_before_the_arrangement():
     n = transition_notes([{"bar": 1, "beat": -4.0, "kind": "fill",
                            "ratio": 2.0, "into": "Intro"}])
     assert n[0]["start_time"] >= 0.0
+
+
+def test_write_sections_json_saves_the_analysis_into_the_stems_dir(tmp_path):
+    import json
+    import sections
+    res = {"bpm": 125.0, "sections": [{"bar": 1, "label": "Intro"}]}
+    locs = [{"time": 32.0, "name": "Intro"}]
+    path = sections.write_sections_json(str(tmp_path), res, 4.0, locs)
+    assert path == str(tmp_path / "sections.json")
+    got = json.loads((tmp_path / "sections.json").read_text())
+    assert got["sections"] == res["sections"] and got["locators"] == locs
+    assert got["start_offset_beats"] == 4.0
+
+
+def test_write_sections_json_skips_a_single_audio_file_and_a_bad_dir(tmp_path):
+    import sections
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    assert sections.write_sections_json(str(f), {}, 0, []) is None
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        assert sections.write_sections_json(str(ro), {}, 0, []) is None
+    finally:
+        ro.chmod(0o700)
