@@ -14,7 +14,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROADIE = os.path.join(HERE, "roadie")
-SUBCOMMANDS = ("split", "load", "open", "sections", "scenes", "stats")
+SUBCOMMANDS = ("split", "load", "open", "sections", "scenes", "als", "stats")
 
 
 def _env():

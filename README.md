@@ -39,12 +39,27 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
 | `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
+| `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 
 `roadie <command> --help` shows that command's own options. Every argument after
 the command passes through untouched, except that `split` turns a bare local path
 into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
+
+`roadie als <stems_dir>` writes `<name>.als` next to the stems folder (`-o` to
+choose, `-f` to overwrite). It copies the audio tracks of your empty template
+(`~/Music/Ableton/User Library/Templates/empty.als`, `--template` overrides), one
+per stem, each with a warped clip on the same bar line `roadie load` uses, the
+measured tempo, `--headroom` dB of fader, and a locator per detected section
+(`--no-locators` skips the detection). The `drums` composite is muted when the
+`drums_*` parts are there. `roadie sections` also saves `sections.json` into the
+stems folder (`--no-write` skips it).
+
+The `.als` format is gzipped XML. The track and clip layout match a project Live
+12.2.7 saved itself, but the first file you generate has not been opened in Live
+by this code, so open it once and check: file paths resolve, clip colours are
+palette indices copied from that project, and `OriginalCrc` is written as 0.
 
 ## Configuration
 

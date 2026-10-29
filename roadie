@@ -6,6 +6,7 @@
 #   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
+#   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
 #   roadie stats                     summarise the local usage log
 #
 # `roadie <command> --help` shows that command's own options. Every argument
@@ -126,6 +127,7 @@ case "$cmd" in
   open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
   scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
+  als)      run_logged als      "$(first_dir "$@")" "$REPO/als_writer.py" "$@" ;;
   stats)
     if [[ -z "$LOG" ]]; then echo "usage log is off (ROADIE_LOG is empty)"; exit 0; fi
     if [[ ! -s "$LOG" ]]; then echo "no usage logged yet ($LOG)"; exit 0; fi
@@ -135,7 +137,7 @@ case "$cmd" in
         if (first == "") first = $1; last = $1; n++ }
       END {
         printf "roadie usage — %s\n  %d runs, %s to %s\n", logfile, n, first, last
-        split("split load open sections scenes", order, " ")
+        split("split load open sections scenes als", order, " ")
         for (i = 1; i in order; i++) { c = order[i]; if (!(c in runs)) continue
           printf "  %-9s %3d runs, %d failed — %d distinct %s\n", c, runs[c], bad[c], distinct[c],
             (c == "split" ? "sources" : "stems dirs") } }' "$LOG" ;;
