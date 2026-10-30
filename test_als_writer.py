@@ -162,6 +162,23 @@ def test_sample_reference_points_at_the_file(template, stems):
     assert v(clip, "SampleRef/DefaultSampleRate") == str(RATE)
 
 
+def test_crc16_matches_the_catalog_check_value():
+    assert aw.crc16(b"123456789") == 0xFEE8          # CRC-16/UMTS
+
+
+def test_live_crc_reads_only_the_first_16_kib(tmp_path):
+    head = bytes(range(256)) * 64                     # exactly 16384 bytes
+    a, b = tmp_path / "a.bin", tmp_path / "b.bin"
+    a.write_bytes(head + b"tail one")
+    b.write_bytes(head + b"a different tail")
+    assert aw.live_crc(str(a)) == aw.live_crc(str(b)) == aw.crc16(head)
+
+
+def test_the_clip_carries_the_files_size_and_crc(template, stems):
+    clip = audio_tracks(build(template, stems))[0].find(".//AudioClip")
+    assert v(clip, "SampleRef/FileRef/OriginalCrc") == str(aw.live_crc(stems[0][1]))
+
+
 def test_a_muted_stem_gets_a_disabled_clip(template, stems):
     root = build(template, stems, mute={"drums"})
     got = {v(t, "Name/EffectiveName"): v(t.find(".//AudioClip"), "Disabled")

@@ -57,9 +57,12 @@ measured tempo, `--headroom` dB of fader, and a locator per detected section
 stems folder (`--no-write` skips it).
 
 The `.als` format is gzipped XML. The track and clip layout match a project Live
-12.2.7 saved itself, but the first file you generate has not been opened in Live
-by this code, so open it once and check: file paths resolve, clip colours are
-palette indices copied from that project, and `OriginalCrc` is written as 0.
+12.2.7 saved itself. Live also stores each sample's size and a 16-bit checksum
+(`OriginalCrc`, CRC-16 of the first 16 KiB) and reports the file missing if they
+disagree; `roadie als` computes both, a rule that reproduces every reference in a
+project Live saved. Clip colours are palette indices copied from that project, so
+treat them as approximate. Keep the `.als` next to its `_stems` folder: samples
+are found by a path relative to the `.als`, then by the absolute path.
 
 ## Configuration
 

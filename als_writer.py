@@ -19,9 +19,13 @@ be unique across the whole set, so every cloned track gets fresh ones counted up
 from the set's NextPointeeId, which is then moved past them. Track ids are a
 separate pool, taken as max + 1.
 
+FILE CHECKSUM. Live stores each sample's size and a 16-bit CRC and calls the
+file missing when they disagree, even if the Path resolves. The CRC is CRC-16
+(poly 0x8005, init 0, not reflected) of the first 16384 bytes; this reproduces
+all 122 references, FLAC and WAV, in a project Live saved. Written as 0, the
+first version of this file opened as "media files are missing".
+
 KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
-  * OriginalCrc is written as 0. Live's checksum is not reproducible here; the
-    absolute Path is what finds the file.
   * Clip colours are palette INDICES (not RGB like the bridge's), taken per stem
     name from a project Live produced. Unknown names get 0.
   * Clips use warp mode 0 (Beats) with the two-marker tempo map Live writes on
@@ -142,7 +146,7 @@ CLIP = string.Template("""<AudioClip Id="${clip_id}" Time="${start}">
 <LivePackName Value="" />
 <LivePackId Value="" />
 <OriginalFileSize Value="${size}" />
-<OriginalCrc Value="0" />
+<OriginalCrc Value="${crc}" />
 </FileRef>
 <LastModDate Value="${mtime}" />
 <SourceContext />
@@ -195,6 +199,22 @@ def num(x):
     """A number the way Live writes it: no trailing zeros, no exponent."""
     t = ("%.12f" % float(x)).rstrip("0").rstrip(".")
     return "0" if t in ("", "-0") else t
+
+
+def crc16(data):
+    """CRC-16/UMTS (poly 0x8005, init 0, no reflection) of `data`."""
+    crc = 0
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def live_crc(path):
+    """The OriginalCrc Live stores for a sample: crc16 of its first 16 KiB."""
+    with open(path, "rb") as f:
+        return crc16(f.read(16384))
 
 
 def attr(s):
@@ -251,7 +271,7 @@ def make_clip(name, path, relpath, start, trim_beats, period, warp_map, colour,
         clip_id=clip_id, start=num(start), end=num(start + length),
         trim=num(trim_beats), total=num(total), name=attr(name),
         colour=colour, disabled="true" if disabled else "false",
-        relpath=attr(relpath), path=attr(path), size=os.path.getsize(path),
+        relpath=attr(relpath), path=attr(path), size=os.path.getsize(path), crc=live_crc(path),
         mtime=int(os.path.getmtime(path)), frames=frames, rate=rate,
         markers=markers)
     return ET.fromstring(xml)
