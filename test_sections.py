@@ -673,3 +673,99 @@ def test_write_sections_json_skips_a_single_audio_file_and_a_bad_dir(tmp_path):
         assert sections.write_sections_json(str(ro), {}, 0, []) is None
     finally:
         ro.chmod(0o700)
+
+
+# --- stem-activity method ------------------------------------------------------
+# Synthetic stems at 120 BPM (a 2 s bar), gated per bar, so the expected sections
+# are known exactly. A muffled kick (-22 dB) must count as no kick.
+
+SR_STEMS = 4000
+BAR_SEC = 2.0
+
+
+def _layout(lead=0):
+    """stem -> [(first_bar, last_bar_exclusive, amplitude)], structure shifted by `lead`."""
+    L = lead
+    return {
+        "drums_kick": [(0, 48 + L, 1.0), (48 + L, 56 + L, 0.08), (80 + L, 112 + L, 1.0)],
+        "drums_hh": [(0, 48 + L, 0.8), (64 + L, 128 + L, 0.8)],
+        "bass": [(16 + L, 48 + L, 0.9), (64 + L, 112 + L, 0.9)],
+        "synths": [(16 + L, 128 + L, 0.7)],
+    }
+
+
+def _write_stems(folder, layout, n_bars):
+    folder.mkdir(exist_ok=True)
+    t = np.arange(int(n_bars * BAR_SEC * SR_STEMS)) / SR_STEMS
+    for name, spans in layout.items():
+        gain = np.zeros(len(t))
+        for a, b, amp in spans:
+            gain[int(a * BAR_SEC * SR_STEMS):int(b * BAR_SEC * SR_STEMS)] = amp
+        tone = np.sin(2 * np.pi * (60 + 7 * len(name)) * t)
+        sf.write(str(folder / (name + ".wav")), (gain * tone).astype("float32"), SR_STEMS)
+    return str(folder)
+
+
+def _by_stems(folder):
+    from sections import analyze_sections_by_stems
+    return analyze_sections_by_stems(folder, period=0.5, grid_t0=0.0, downbeat_sec=0.0)
+
+
+def test_stems_method_finds_the_known_boundaries_and_names_them(tmp_path):
+    res = _by_stems(_write_stems(tmp_path / "s", _layout(), 128))
+    secs = res["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0, 16, 48, 64, 80, 112]
+    assert [s["label"] for s in secs] == [
+        "Intro", "Drop 1", "Breakdown", "Build", "Drop 2", "Outro"]
+    assert res["method"] == "stems" and res["phrase_offset_bars"] == 0
+
+
+def test_a_muffled_kick_counts_as_no_kick(tmp_path):
+    secs = _by_stems(_write_stems(tmp_path / "s", _layout(), 128))["sections"]
+    breakdown = next(s for s in secs if s["label"] == "Breakdown")
+    assert "kick" not in breakdown["stems"]          # bars 48-55 carry the kick at -22 dB
+
+
+def test_the_phrase_offset_is_estimated_when_structure_sits_off_the_cycle(tmp_path):
+    res = _by_stems(_write_stems(tmp_path / "s", _layout(lead=4), 132))
+    assert res["phrase_offset_bars"] == 4
+    assert [s["beat"] // 4 for s in res["sections"]] == [0, 20, 52, 68, 84, 116]
+
+
+def test_boundaries_are_kept_when_not_near_the_phrase_grid():
+    from sections import _snap_bars
+    # 0-offset grid: lines at 8, 16, ... ; 21 is 3 away from 24 and 5 from 16
+    assert _snap_bars([17, 21], 0, 8, 100) == [16, 21]
+
+
+def test_estimate_phrase_offset_prefers_zero_on_a_near_tie():
+    from sections import estimate_phrase_offset
+    nov = np.zeros(64)
+    nov[[8, 16, 24]] = 1.0
+    nov[[12, 20]] = 0.95
+    assert estimate_phrase_offset(nov, 8) == 0
+
+
+def test_stems_method_needs_a_kick_source_and_bass(tmp_path):
+    from sections import analyze_sections_by_stems, analyze_sections
+    no_bass = _write_stems(tmp_path / "a", {"drums_kick": [(0, 32, 1.0)]}, 32)
+    assert analyze_sections_by_stems(no_bass, 0.5, 0.0, 0.0) is None
+    with pytest.raises(ValueError, match="kick source"):
+        analyze_sections(no_bass, period=0.5, grid_t0=0.0, method="stems")
+
+
+def test_unknown_method_is_rejected(tmp_path):
+    from sections import analyze_sections
+    d = _write_stems(tmp_path / "a", _layout(), 128)
+    with pytest.raises(ValueError, match="method must be"):
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="vibes")
+
+
+def test_live_bars_translate_file_time_to_the_arrangement_ruler():
+    from sections import live_bars
+    # Gerlach "Off": clips at Live bar 9, downbeat 1.9325 s; the stems' kick leaves at
+    # file time 115.2125 s, which the user confirmed by ear is Live bar 69.
+    res = {"period": 0.48, "grid_t0": 0.0125, "bpm": 125.0,
+           "sections": [{"time_sec": 0.0125}, {"time_sec": 115.2125}]}
+    assert live_bars(res, 1.9325, 9) == [9.0, 69.0]
+    assert live_bars(res, None, 9) is None

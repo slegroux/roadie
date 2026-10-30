@@ -347,10 +347,261 @@ def downbeat_phase(period, grid_t0, downbeat_sec):
     return k % BEATS_PER_BAR
 
 
+# --- stem-activity method ----------------------------------------------------
+#
+# WHY A SECOND METHOD. The spectral method above reads the SUMMED mix. In
+# melodic techno a section change is mostly a change in who is playing: the kick
+# leaves for a breakdown, the bass and hats come back as a build, the kick
+# returns as the drop. A sum blurs exactly that. When the separated stems exist
+# their per-bar levels carry it directly, and they are free: the stems are
+# already on disk and reading them is a few seconds, with no model to run.
+#
+# Measured on one track so far (Gerlach "Off", 125 BPM, confirmed by ear): the
+# quiet section starts at Live bar 69 and the drop at Live bar 101; the spectral
+# method placed them 4 bars late. Treat the thresholds below as starting values
+# from two tracks, not as tuned constants.
+
+STEM_FLOOR_DB = 30.0      # activity 0 = this far under a stem's own loud level
+STEM_ON = 0.5             # activity above which a stem counts as playing...
+STEM_OFF = 0.3            # ...and below which it has stopped (hysteresis)
+STEM_MIN_RUN = 4          # bars a presence state must hold to count
+STEM_SNAP_BARS = 1        # snap a boundary to the phrase grid only this close
+STEM_NOVELTY_BARS = 4     # window either side when scoring the phrase offset
+
+# Stem files that make up each role, in preference order within a role.
+STEM_ROLES = {
+    "kick": ("drums_kick",),
+    "bass": ("bass",),
+    "hats": ("drums_hh", "drums_ride"),
+    "synths": ("synths",),
+}
+# Presence of these drives the boundaries; vocals are reported, not cut on —
+# they chop in and out too often to mark a section.
+STEM_CUT_ROLES = ("kick", "bass", "hats", "synths")
+
+
+def _bar_db(path, edge_times):
+    """Level of each bar of one stem, in dB. `edge_times` has n_bars + 1 entries."""
+    import soundfile as sf
+    x, sr = sf.read(path, dtype="float32", always_2d=True)
+    x = x.mean(axis=1)
+    idx = np.clip(np.round(np.asarray(edge_times) * sr).astype(np.int64), 0, len(x))
+    starts, ends = idx[:-1], idx[1:]
+    sq = np.concatenate(([0.0], np.cumsum(x.astype(np.float64) ** 2)))
+    n = np.maximum(ends - starts, 1)
+    ms = (sq[ends] - sq[starts]) / n
+    return 10.0 * np.log10(ms + 1e-12)
+
+
+def _activity(db):
+    """0..1: 1 at the stem's own loud level, 0 at STEM_FLOOR_DB under it."""
+    top = float(np.percentile(db, 95))
+    return np.clip((db - top + STEM_FLOOR_DB) / STEM_FLOOR_DB, 0.0, 1.0)
+
+
+def _hysteresis(x, on=STEM_ON, off=STEM_OFF):
+    state, out = bool(x[0] > on), np.zeros(len(x), bool)
+    for i, v in enumerate(x):
+        if state and v < off:
+            state = False
+        elif not state and v > on:
+            state = True
+        out[i] = state
+    return out
+
+
+def _despeckle(b, n=STEM_MIN_RUN):
+    """Absorb runs shorter than `n` bars into the run before them."""
+    b = b.copy()
+    i = 0
+    while i < len(b):
+        j = i
+        while j < len(b) and b[j] == b[i]:
+            j += 1
+        if j - i < n and 0 < i and j < len(b):
+            b[i:j] = b[i - 1]
+        i = j
+    return b
+
+
+def _novelty(F, w=STEM_NOVELTY_BARS):
+    """How much the stem mix changes at each bar: |mean(next w) - mean(prev w)|."""
+    out = np.zeros(len(F))
+    for i in range(1, len(F)):
+        out[i] = np.linalg.norm(F[i:i + w].mean(axis=0) - F[max(0, i - w):i].mean(axis=0))
+    return out
+
+
+def estimate_phrase_offset(novelty, phrase_bars=PHRASE_BARS):
+    """Which bar (0..phrase_bars-1) of the 8-bar cycle the changes land on.
+
+    Phrase lines are NOT assumed to start at bar 0 of the detected grid: on the
+    test track the structure sat 4 bars off the downbeat's own 8-bar cycle. Every
+    bar votes for its position in the cycle with its novelty, a neighbour votes
+    half. Ties go to 0 (the downbeat's own grid) unless another offset clearly
+    wins, so a track whose structure does start on the downbeat is unchanged.
+    """
+    score = np.zeros(phrase_bars)
+    for i, v in enumerate(novelty):
+        r = i % phrase_bars
+        score[r] += v
+        score[(r + 1) % phrase_bars] += 0.5 * v
+        score[(r - 1) % phrase_bars] += 0.5 * v
+    best = int(np.argmax(score))
+    if score[0] >= 0.9 * score[best]:
+        best = 0
+    return best
+
+
+def _snap_bars(cuts, offset, phrase_bars, n_bars):
+    """Snap bar indices to the phrase grid when close; keep them when not."""
+    out = []
+    for c in sorted(set(cuts)):
+        line = offset + phrase_bars * int(round((c - offset) / float(phrase_bars)))
+        cand = line if (abs(c - line) <= STEM_SNAP_BARS and 0 < line < n_bars) else c
+        if cand > 0 and (not out or cand - out[-1] >= STEM_MIN_RUN):
+            out.append(cand)
+    return out
+
+
+def stem_labels(rows):
+    """Name sections from which stems play. Rules, like `arrangement_labels`.
+
+      - first section Intro, last Outro
+      - no kick: Breakdown, except that a kickless section straight before the
+        kick returns, once hats are back, is a Build
+      - kick back after a kickless stretch: Drop if the bass is with it, else Build
+      - kick throughout, bass enters: Drop; bass already there: Main
+      - kick without bass ahead of a section that has it: Build
+    A muffled breakdown kick (well under the stem's loud level) counts as no kick.
+    """
+    n = len(rows)
+    if n == 0:
+        return []
+    if n == 1:
+        return ["Intro"]
+    out = [None] * n
+    out[0], out[-1] = "Intro", "Outro"
+    for i in range(1, n - 1):
+        r, prev, nxt = rows[i], rows[i - 1], rows[i + 1]
+        if not r["kick"]:
+            out[i] = "Build" if (nxt["kick"] and r["hats"] and i > 1) else "Breakdown"
+        elif not prev["kick"]:
+            out[i] = "Drop" if r["bass"] else "Build"
+        elif r["bass"]:
+            out[i] = "Main" if prev["bass"] else "Drop"
+        else:
+            out[i] = "Build" if nxt["bass"] else "Main"
+    counts = {}
+    for name in out:
+        counts[name] = counts.get(name, 0) + 1
+    seen = {}
+    for i, name in enumerate(out):
+        if counts[name] > 1:
+            seen[name] = seen.get(name, 0) + 1
+            out[i] = "%s %d" % (name, seen[name])
+    return out
+
+
+def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
+                              phrase_bars=PHRASE_BARS):
+    """Sections from per-bar stem activity. Same result shape as `analyze_sections`.
+
+    Returns None when the folder lacks what this needs (a kick source and a bass
+    stem), so `method="auto"` can fall back to the spectral method.
+    """
+    import soundfile as sf
+    paths = stem_paths(stems_dir) if os.path.isdir(stems_dir) else {}
+    kick_src = [n for n in ("drums_kick", "drums") if n in paths][:1]
+    if not kick_src or "bass" not in paths:
+        return None
+    period, grid_t0 = float(period), float(grid_t0)
+    if grid_t0 < 0:                       # same re-anchor as build_beat_grid_times
+        grid_t0 += int(np.ceil(-grid_t0 / period)) * period
+    info = sf.info(next(iter(paths.values())))
+    duration = info.frames / float(info.samplerate)
+    n_beats = int(np.floor((duration - grid_t0) / period))
+    phase = downbeat_phase(period, grid_t0, downbeat_sec)
+    n_bars = (n_beats - phase) // BEATS_PER_BAR
+    if n_bars < 2 * phrase_bars:
+        raise ValueError("track is only %d bars, shorter than two %d-bar phrases; "
+                         "nothing to segment" % (n_bars, phrase_bars))
+    edges = grid_t0 + period * (phase + BEATS_PER_BAR * np.arange(n_bars + 1))
+
+    parts = [n for n in paths if n.startswith("drums_")]
+    used = [n for n in paths if not (n == "drums" and parts)]
+    db = {n: _bar_db(paths[n], edges) for n in used}
+    if "drums_kick" not in paths:         # only the composite: it stands in for the kick
+        db["drums_kick"] = _bar_db(paths["drums"], edges)
+    act = {n: _activity(v) for n, v in db.items()}
+
+    def role(name):
+        have = [act[n] for n in STEM_ROLES[name] if n in act]
+        return np.max(np.stack(have), axis=0) if have else np.zeros(n_bars)
+
+    A = {r: role(r) for r in STEM_CUT_ROLES}
+    present = {r: _despeckle(_hysteresis(A[r])) for r in STEM_CUT_ROLES}
+    vocals = _despeckle(_hysteresis(act["vocals"])) if "vocals" in act else np.zeros(n_bars, bool)
+
+    state = np.stack([present[r] for r in STEM_CUT_ROLES], axis=1)
+    change = [i for i in range(1, n_bars) if (state[i] != state[i - 1]).any()]
+    nov = _novelty(np.stack([A[r] for r in STEM_CUT_ROLES], axis=1))
+    offset = estimate_phrase_offset(nov, phrase_bars)
+    cuts = _snap_bars(change, offset, phrase_bars, n_bars)
+    bounds = [0] + cuts + [n_bars]
+
+    power = sum(10.0 ** (db[n] / 10.0) for n in used)
+    rms = np.sqrt(power)
+    mean_rms = float(np.mean(rms))
+    if mean_rms <= 0:
+        raise RuntimeError("stems are silent; no energy to label sections by")
+
+    rows, sections = [], []
+    for i, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+        mean_state = state[a:b].mean(axis=0) > 0.5
+        flags = dict(zip(STEM_CUT_ROLES, (bool(x) for x in mean_state)))
+        rows.append(flags)
+        beat = phase + BEATS_PER_BAR * a
+        rel = float(np.mean(rms[a:b])) / mean_rms
+        names = [r for r in STEM_CUT_ROLES if flags[r]]
+        if vocals[a:b].mean() > 0.5:
+            names.append("vocals")
+        sections.append({
+            "beat": int(beat),
+            "bar": int(beat // BEATS_PER_BAR) + 1,
+            "time_sec": float(round(period * beat + grid_t0, 3)),
+            "duration_beats": int(BEATS_PER_BAR * (b - a)) if b < n_bars
+            else int(n_beats - beat),
+            "rel_energy": float(round(rel, 3)),
+            "level": label_for(rel, i),
+            "stems": names,
+        })
+    for sec, name in zip(sections, stem_labels(rows)):
+        sec["label"] = name
+
+    return {
+        "bpm": float(round(60.0 / period, 3)),
+        "period": float(round(period, 6)),
+        "grid_t0": float(round(grid_t0, 4)),
+        "duration_sec": float(round(duration, 2)),
+        "beat_count": int(n_beats),
+        "phrase_bars": int(phrase_bars),
+        "segments_requested": len(sections),
+        "mix_stems": list(used),
+        "sections": sections,
+        "method": "stems",
+        "phrase_offset_bars": int(offset),
+    }
+
+
 def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
                      period=None, grid_t0=None, sr=ANALYSIS_SR,
-                     downbeat_sec=None):
+                     downbeat_sec=None, method="auto"):
     """Full section analysis. Returns a dict with `sections` plus the grid it used.
+
+    `method` picks the detector: "stems" reads per-bar stem activity (needs a
+    kick source and a bass stem), "spectral" clusters the summed mix, "auto" (the
+    default) uses stems when the folder has them and spectral otherwise.
 
     `downbeat_sec` is beat_aligner's detected downbeat, in source-file seconds.
     Boundaries snap to phrases counted from it (see `snap_boundaries`). Without
@@ -363,7 +614,7 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
     meant to mark, and re-running aubio to rediscover a number the caller already
     has is a minute of wasted decoding.
     """
-    if librosa is None:
+    if librosa is None and method != "stems":
         raise RuntimeError("librosa is required for section detection")
 
     paths = stem_paths(stems_dir) if os.path.isdir(stems_dir) else \
@@ -378,6 +629,18 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
             raise RuntimeError("could not extract beats from %s" % primary)
         period, grid_t0, _k, _inliers = fit_beat_grid(beats)
     period, grid_t0 = float(period), float(grid_t0)
+
+    if method not in ("auto", "stems", "spectral"):
+        raise ValueError("method must be auto, stems or spectral, got %r" % (method,))
+    if method in ("auto", "stems"):
+        res = analyze_sections_by_stems(stems_dir, period, grid_t0,
+                                        downbeat_sec=downbeat_sec,
+                                        phrase_bars=phrase_bars)
+        if res is not None:
+            return res
+        if method == "stems":
+            raise ValueError("the stems method needs a kick source (drums_kick or "
+                             "drums) and a bass stem in %s" % stems_dir)
 
     # The same summed mono mix beat_aligner uses for phase, including its rule
     # that the `drums` composite is dropped when `drums_*` parts are present —
@@ -446,7 +709,8 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
 
 
 def detect_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
-                    period=None, grid_t0=None, sr=ANALYSIS_SR, downbeat_sec=None):
+                    period=None, grid_t0=None, sr=ANALYSIS_SR, downbeat_sec=None,
+                    method="auto"):
     """Section boundaries for a stems folder, as a list of dicts.
 
     Each dict carries `beat` (grid beats from the sample start), `bar` (counted
@@ -457,7 +721,7 @@ def detect_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
     return analyze_sections(stems_dir, phrase_bars=phrase_bars,
                             n_segments=n_segments, period=period,
                             grid_t0=grid_t0, sr=sr,
-                            downbeat_sec=downbeat_sec)["sections"]
+                            downbeat_sec=downbeat_sec, method=method)["sections"]
 
 
 def section_energy(stems_dir, sections, sr=ANALYSIS_SR, exclude=("drums",)):
@@ -708,6 +972,27 @@ def cli_grid(stems_dir, tempo=None, grid_t0=None, downbeat_sec=None,
     return period, grid_t0, downbeat_sec
 
 
+def live_bars(res, downbeat_sec, start_bar):
+    """Live arrangement bar of each section, or None when no downbeat is known.
+
+    The `bar` field counts from the start of the audio file. Clips go into Live
+    on a bar line with the lead-in trimmed (`stems2live.bar_aligned_placement`),
+    so the file's own beat grid sits at `start - trim / period` in the arrangement
+    and a section at `time_sec` lands at Live bar 1 + that / 4. This is the number
+    to look for in Live's ruler.
+    """
+    if downbeat_sec is None:
+        return None
+    from stems2live import bar_aligned_placement
+    period = res["period"]
+    start, trim, _ = bar_aligned_placement(
+        {"period": period, "grid_t0": res["grid_t0"], "downbeat_sec": downbeat_sec},
+        start_bar, res["bpm"])
+    shift = start - trim / period
+    return [round(1.0 + (shift + sec["time_sec"] / period) / BEATS_PER_BAR, 2)
+            for sec in res["sections"]]
+
+
 def _mmss(t):
     return "%d:%04.1f" % (int(t) // 60, t % 60)
 
@@ -756,6 +1041,13 @@ def main():
                          "Leaving this at 0 is correct ONLY for an unaligned run "
                          "(default: 0)")
     ap.add_argument("--json", action="store_true", help="Output JSON results")
+    ap.add_argument("--start-bar", type=int, default=9,
+                    help="Live bar the clips start on, as `roadie load` / `roadie als` "
+                         "place them (default 9); sets the Live bar column")
+    ap.add_argument("--method", choices=("auto", "stems", "spectral"), default="auto",
+                    help="stems: per-bar stem activity (needs kick + bass stems); "
+                         "spectral: cluster the summed mix; auto (default): stems "
+                         "when the folder has them")
     ap.add_argument("--no-write", action="store_true",
                     help="do not save sections.json into the stems folder")
     args = ap.parse_args()
@@ -764,9 +1056,12 @@ def main():
                                          args.grid_t0, args.downbeat)
     res = analyze_sections(
         args.stems_dir, phrase_bars=args.phrase_bars, n_segments=args.segments,
-        period=period, grid_t0=grid_t0, downbeat_sec=downbeat)
+        period=period, grid_t0=grid_t0, downbeat_sec=downbeat, method=args.method)
     locators = sections_to_locators(res["sections"], res["period"],
                                     args.start_offset)
+    live = live_bars(res, downbeat, args.start_bar)
+    for sec, lb in zip(res["sections"], live or []):
+        sec["live_bar"] = lb
     saved = None if args.no_write else write_sections_json(
         args.stems_dir, res, args.start_offset, locators)
 
@@ -776,6 +1071,11 @@ def main():
         print(json.dumps(res, indent=2))
         return
 
+    print("Method:              %s" % ("per-bar stem activity" if res.get("method") == "stems"
+                                         else "spectral clustering of the summed mix"))
+    if res.get("method") == "stems":
+        print("Phrase offset:       %d bar(s) into the %d-bar cycle"
+              % (res["phrase_offset_bars"], res["phrase_bars"]))
     print("Mix Stems:           %s" % "+".join(res["mix_stems"]))
     print("Tempo:               %.3f BPM (period %.6f s, t0 %.4f s)"
           % (res["bpm"], res["period"], res["grid_t0"]))
@@ -787,20 +1087,33 @@ def main():
     print("Locator Offset:      +%.4f beats (arrangement time = offset + sec/period)"
           % args.start_offset)
     print()
-    print("  bar      time     locator     rel   label")
-    for s, loc in zip(res["sections"], locators):
-        print("  %-6d %8s  %9.3f  %6.2f   %s"
-              % (s["bar"], _mmss(s["time_sec"]), loc["time"],
-                 s["rel_energy"], s["label"]))
+    stems_view = res.get("method") == "stems"
+    print("  Live   file     time     locator     rel   label"
+          + ("          playing" if stems_view else ""))
+    for i, (s, loc) in enumerate(zip(res["sections"], locators)):
+        lb = ("%g" % live[i]) if live else "-"
+        print("  %-6s %-5d %8s  %9.3f  %6.2f   %-13s%s"
+              % (lb, s["bar"], _mmss(s["time_sec"]), loc["time"], s["rel_energy"],
+                 s["label"], " ".join(s["stems"]) if stems_view else ""))
+    if live:
+        print("\n  'Live' is the bar in Live's ruler with clips starting at bar %d "
+              "(--start-bar); 'file' counts from the start of the audio."
+              % args.start_bar)
     print()
     if saved:
         print("Saved:               %s" % saved)
         print()
-    print("Boundaries are MEASURED (spectral change: MFCC + chroma + RMS, "
-          "agglomerative\nclustering, snapped to 8-bar phrases). Labels are "
-          "RULES over energy and order —\nno model recognises a 'drop'; it is "
-          "loud-after-quiet. Expect odd names on tracks\nthat open loud or drop "
-          "without a preceding break.")
+    if stems_view:
+        print("Boundaries are MEASURED (which stems play, bar by bar; a muffled kick "
+              "counts as\nno kick), snapped to the 8-bar cycle when within a bar of it. "
+              "Labels are RULES over\nwhich stems are present — no model recognises a "
+              "'drop'. Check the first one or two\nboundaries by ear.")
+    else:
+        print("Boundaries are MEASURED (spectral change: MFCC + chroma + RMS, "
+              "agglomerative\nclustering, snapped to 8-bar phrases). Labels are "
+              "RULES over energy and order —\nno model recognises a 'drop'; it is "
+              "loud-after-quiet. Expect odd names on tracks\nthat open loud or drop "
+              "without a preceding break.")
 
 
 if __name__ == "__main__":
