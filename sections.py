@@ -356,12 +356,15 @@ def downbeat_phase(period, grid_t0, downbeat_sec):
 # their per-bar levels carry it directly, and they are free: the stems are
 # already on disk and reading them is a few seconds, with no model to run.
 #
-# Measured on one track so far (Gerlach "Off", 125 BPM, confirmed by ear): the
-# quiet section starts at Live bar 69 and the drop at Live bar 101; the spectral
-# method placed them 4 bars late. Treat the thresholds below as starting values
-# from two tracks, not as tuned constants.
+# Checked by ear on ONE track so far (Gerlach "Off", 125 BPM): the quiet section
+# starts at Live bar 69 and the drop at Live bar 101; the spectral method placed
+# them 4 bars late. A second track (Sainte Vie "Cenote") was looked at without
+# ground truth. Treat the thresholds below as starting values, not tuned constants.
 
 STEM_FLOOR_DB = 30.0      # activity 0 = this far under a stem's own loud level
+STEM_SILENT_DB = -50.0    # a stem whose loud level is under this is treated as absent
+                          # (an empty ride, bleed-only vocals): relative activity
+                          # would otherwise read its noise as "playing" in every bar
 STEM_ON = 0.5             # activity above which a stem counts as playing...
 STEM_OFF = 0.3            # ...and below which it has stopped (hysteresis)
 STEM_MIN_RUN = 4          # bars a presence state must hold to count
@@ -381,21 +384,40 @@ STEM_CUT_ROLES = ("kick", "bass", "hats", "synths")
 
 
 def _bar_db(path, edge_times):
-    """Level of each bar of one stem, in dB. `edge_times` has n_bars + 1 entries."""
+    """Level of each bar of one stem, in dB. `edge_times` has n_bars + 1 entries.
+
+    Streamed in blocks so a long set does not have to fit in memory: each block's
+    squared samples are added to the bar they fall in.
+    """
     import soundfile as sf
-    x, sr = sf.read(path, dtype="float32", always_2d=True)
-    x = x.mean(axis=1)
-    idx = np.clip(np.round(np.asarray(edge_times) * sr).astype(np.int64), 0, len(x))
-    starts, ends = idx[:-1], idx[1:]
-    sq = np.concatenate(([0.0], np.cumsum(x.astype(np.float64) ** 2)))
-    n = np.maximum(ends - starts, 1)
-    ms = (sq[ends] - sq[starts]) / n
-    return 10.0 * np.log10(ms + 1e-12)
+    with sf.SoundFile(path) as f:
+        idx = np.clip(np.round(np.asarray(edge_times) * f.samplerate).astype(np.int64),
+                      0, f.frames)
+        n_bars = len(idx) - 1
+        sums = np.zeros(n_bars)
+        off = 0
+        for block in f.blocks(blocksize=1 << 20, dtype="float32", always_2d=True):
+            x = block.mean(axis=1).astype(np.float64)
+            bar = np.searchsorted(idx, np.arange(off, off + len(x)), side="right") - 1
+            ok = (bar >= 0) & (bar < n_bars)
+            sums += np.bincount(bar[ok], weights=x[ok] ** 2, minlength=n_bars)
+            off += len(x)
+    n = np.maximum(np.diff(idx), 1)
+    return 10.0 * np.log10(sums / n + 1e-12)
 
 
 def _activity(db):
-    """0..1: 1 at the stem's own loud level, 0 at STEM_FLOOR_DB under it."""
-    top = float(np.percentile(db, 95))
+    """0..1: 1 at the stem's own loud level, 0 at STEM_FLOOR_DB under it.
+
+    Returns None for a stem that is effectively silent: relative activity has no
+    meaning when the stem's loud level is itself near silence, and would read the
+    noise floor as "playing" in every bar. The loud level is taken over the bars
+    above STEM_SILENT_DB, so a stem that plays in only a few bars still has one.
+    """
+    loud = db[db > STEM_SILENT_DB]
+    if not len(loud):
+        return None
+    top = float(np.percentile(loud, 95))
     return np.clip((db - top + STEM_FLOOR_DB) / STEM_FLOOR_DB, 0.0, 1.0)
 
 
@@ -411,14 +433,17 @@ def _hysteresis(x, on=STEM_ON, off=STEM_OFF):
 
 
 def _despeckle(b, n=STEM_MIN_RUN):
-    """Absorb runs shorter than `n` bars into the run before them."""
+    """Absorb runs shorter than `n` bars into a neighbour: a short run at the start
+    joins the run after it, any other short run joins the one before it."""
     b = b.copy()
     i = 0
     while i < len(b):
         j = i
         while j < len(b) and b[j] == b[i]:
             j += 1
-        if j - i < n and 0 < i and j < len(b):
+        if j - i < n and j < len(b) and i == 0:
+            b[i:j] = b[j]
+        elif j - i < n and i > 0:
             b[i:j] = b[i - 1]
         i = j
     return b
@@ -459,7 +484,8 @@ def _snap_bars(cuts, offset, phrase_bars, n_bars):
     for c in sorted(set(cuts)):
         line = offset + phrase_bars * int(round((c - offset) / float(phrase_bars)))
         cand = line if (abs(c - line) <= STEM_SNAP_BARS and 0 < line < n_bars) else c
-        if cand > 0 and (not out or cand - out[-1] >= STEM_MIN_RUN):
+        if (cand >= STEM_MIN_RUN and n_bars - cand >= STEM_MIN_RUN
+                and (not out or cand - out[-1] >= STEM_MIN_RUN)):
             out.append(cand)
     return out
 
@@ -467,9 +493,11 @@ def _snap_bars(cuts, offset, phrase_bars, n_bars):
 def stem_labels(rows):
     """Name sections from which stems play. Rules, like `arrangement_labels`.
 
-      - first section Intro, last Outro
+      - first section Intro; last section Outro, unless the kick and bass are both
+        still playing in it (a track that ends on the full groove has no outro)
       - no kick: Breakdown, except that a kickless section straight before the
-        kick returns, once hats are back, is a Build
+        kick returns, once hats are back, is a Build (never the section right
+        after the Intro: a kickless start is a Breakdown, not a build to nothing)
       - kick back after a kickless stretch: Drop if the bass is with it, else Build
       - kick throughout, bass enters: Drop; bass already there: Main
       - kick without bass ahead of a section that has it: Build
@@ -481,9 +509,15 @@ def stem_labels(rows):
     if n == 1:
         return ["Intro"]
     out = [None] * n
-    out[0], out[-1] = "Intro", "Outro"
-    for i in range(1, n - 1):
-        r, prev, nxt = rows[i], rows[i - 1], rows[i + 1]
+    out[0] = "Intro"
+    if not (rows[-1]["kick"] and rows[-1]["bass"]):
+        out[-1] = "Outro"
+    nothing = {"kick": False, "bass": False, "hats": False, "synths": False}
+    for i in range(1, n):
+        if out[i] is not None:
+            continue
+        r, prev = rows[i], rows[i - 1]
+        nxt = rows[i + 1] if i + 1 < n else nothing
         if not r["kick"]:
             out[i] = "Build" if (nxt["kick"] and r["hats"] and i > 1) else "Breakdown"
         elif not prev["kick"]:
@@ -512,14 +546,24 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
     """
     import soundfile as sf
     paths = stem_paths(stems_dir) if os.path.isdir(stems_dir) else {}
-    kick_src = [n for n in ("drums_kick", "drums") if n in paths][:1]
-    if not kick_src or "bass" not in paths:
+    parts = [n for n in paths if n.startswith("drums_")]
+    # The kick comes from drums_kick; the whole-kit composite stands in for it only
+    # when there are no drum parts at all. With parts but no kick the composite would
+    # read any hats or snare as a kick, so that folder is left to the spectral method.
+    if "drums_kick" in paths:
+        kick_path = paths["drums_kick"]
+    elif "drums" in paths and not parts:
+        kick_path = paths["drums"]
+    else:
+        return None
+    if "bass" not in paths:
         return None
     period, grid_t0 = float(period), float(grid_t0)
     if grid_t0 < 0:                       # same re-anchor as build_beat_grid_times
         grid_t0 += int(np.ceil(-grid_t0 / period)) * period
-    info = sf.info(next(iter(paths.values())))
-    duration = info.frames / float(info.samplerate)
+    used = [n for n in paths if not (n == "drums" and parts)]
+    lengths = [sf.info(paths[n]) for n in used]
+    duration = min(i.frames / float(i.samplerate) for i in lengths)
     n_beats = int(np.floor((duration - grid_t0) / period))
     phase = downbeat_phase(period, grid_t0, downbeat_sec)
     n_bars = (n_beats - phase) // BEATS_PER_BAR
@@ -528,12 +572,14 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
                          "nothing to segment" % (n_bars, phrase_bars))
     edges = grid_t0 + period * (phase + BEATS_PER_BAR * np.arange(n_bars + 1))
 
-    parts = [n for n in paths if n.startswith("drums_")]
-    used = [n for n in paths if not (n == "drums" and parts)]
     db = {n: _bar_db(paths[n], edges) for n in used}
-    if "drums_kick" not in paths:         # only the composite: it stands in for the kick
-        db["drums_kick"] = _bar_db(paths["drums"], edges)
-    act = {n: _activity(v) for n, v in db.items()}
+    act = {n: a for n, a in ((n, _activity(v)) for n, v in db.items()) if a is not None}
+    if kick_path == paths.get("drums"):   # composite-only folder: it stands in for the kick
+        if "drums" not in act:
+            return None
+        act["drums_kick"] = act["drums"]
+    if "drums_kick" not in act or "bass" not in act:
+        return None                       # the kick or the bass stem is silent
 
     def role(name):
         have = [act[n] for n in STEM_ROLES[name] if n in act]
@@ -550,10 +596,10 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
     cuts = _snap_bars(change, offset, phrase_bars, n_bars)
     bounds = [0] + cuts + [n_bars]
 
-    power = sum(10.0 ** (db[n] / 10.0) for n in used)
+    power = sum(10.0 ** (db[n] / 10.0) for n in used if n in act)
     rms = np.sqrt(power)
     mean_rms = float(np.mean(rms))
-    if mean_rms <= 0:
+    if mean_rms < 1e-5:
         raise RuntimeError("stems are silent; no energy to label sections by")
 
     rows, sections = [], []
@@ -587,7 +633,7 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
         "beat_count": int(n_beats),
         "phrase_bars": int(phrase_bars),
         "segments_requested": len(sections),
-        "mix_stems": list(used),
+        "mix_stems": [n for n in used if n in act],
         "sections": sections,
         "method": "stems",
         "phrase_offset_bars": int(offset),
@@ -614,9 +660,6 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
     meant to mark, and re-running aubio to rediscover a number the caller already
     has is a minute of wasted decoding.
     """
-    if librosa is None and method != "stems":
-        raise RuntimeError("librosa is required for section detection")
-
     paths = stem_paths(stems_dir) if os.path.isdir(stems_dir) else \
         {"mix": stems_dir}
     if not paths:
@@ -633,14 +676,26 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
     if method not in ("auto", "stems", "spectral"):
         raise ValueError("method must be auto, stems or spectral, got %r" % (method,))
     if method in ("auto", "stems"):
-        res = analyze_sections_by_stems(stems_dir, period, grid_t0,
-                                        downbeat_sec=downbeat_sec,
-                                        phrase_bars=phrase_bars)
+        try:
+            res = analyze_sections_by_stems(stems_dir, period, grid_t0,
+                                            downbeat_sec=downbeat_sec,
+                                            phrase_bars=phrase_bars)
+        except ValueError:                # too short for the stems method
+            if method == "stems":
+                raise
+            res = None                    # auto: the spectral method states its own limit
         if res is not None:
+            if n_segments:
+                import warnings
+                warnings.warn("--segments applies only to the spectral method; "
+                              "ignored by the stems method", stacklevel=2)
             return res
         if method == "stems":
-            raise ValueError("the stems method needs a kick source (drums_kick or "
-                             "drums) and a bass stem in %s" % stems_dir)
+            raise ValueError("the stems method needs a kick source (drums_kick, or "
+                             "drums when there are no drum parts) and a bass stem "
+                             "that are not silent in %s" % stems_dir)
+    if librosa is None:
+        raise RuntimeError("librosa is required for the spectral section method")
 
     # The same summed mono mix beat_aligner uses for phase, including its rule
     # that the `drums` composite is dropped when `drums_*` parts are present —
@@ -715,8 +770,10 @@ def detect_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
 
     Each dict carries `beat` (grid beats from the sample start), `bar` (counted
     from the downbeat), `time_sec` (source-file seconds), `duration_beats`,
-    `rel_energy` and `label`. Boundaries are strictly increasing and every one
-    sits `phrase_bars` multiples after the downbeat. See `analyze_sections` for the grid metadata.
+    `rel_energy` and `label`. Boundaries are strictly increasing. With the spectral
+    method every one sits `phrase_bars` multiples after the downbeat; the stems
+    method snaps to an estimated phrase cycle only when within a bar of it and
+    allows sections as short as 4 bars. See `analyze_sections` for the grid metadata.
     """
     return analyze_sections(stems_dir, phrase_bars=phrase_bars,
                             n_segments=n_segments, period=period,
