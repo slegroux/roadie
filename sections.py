@@ -371,6 +371,10 @@ STEM_MIN_RUN = 4          # bars a presence state must hold to count
 STEM_SNAP_BARS = 1        # snap a boundary to the phrase grid only this close
 STEM_NOVELTY_BARS = 4     # window either side when scoring the phrase offset
 
+class SectionsTooShort(ValueError):
+    """The track has too few bars for the method to segment."""
+
+
 # Stem files that make up each role, in preference order within a role.
 STEM_ROLES = {
     "kick": ("drums_kick",),
@@ -409,16 +413,20 @@ def _bar_db(path, edge_times):
 def _activity(db):
     """0..1: 1 at the stem's own loud level, 0 at STEM_FLOOR_DB under it.
 
-    Returns None for a stem that is effectively silent: relative activity has no
-    meaning when the stem's loud level is itself near silence, and would read the
-    noise floor as "playing" in every bar. The loud level is taken over the bars
-    above STEM_SILENT_DB, so a stem that plays in only a few bars still has one.
+    Bars at or under STEM_SILENT_DB are silent whatever the stem's own level: relative
+    activity would otherwise read a -59 dB noise floor as "playing" the moment a
+    single bar of the stem is loud. Returns None for a stem with fewer than
+    STEM_MIN_RUN bars above that floor (an empty ride, bleed-only vocals), which has
+    no loud level worth the name. The loud level is taken over the bars above the
+    floor, so a stem that plays in only a few bars still has one.
     """
-    loud = db[db > STEM_SILENT_DB]
-    if not len(loud):
+    audible = db > STEM_SILENT_DB
+    if audible.sum() < STEM_MIN_RUN:
         return None
-    top = float(np.percentile(loud, 95))
-    return np.clip((db - top + STEM_FLOOR_DB) / STEM_FLOOR_DB, 0.0, 1.0)
+    top = float(np.percentile(db[audible], 95))
+    act = np.clip((db - top + STEM_FLOOR_DB) / STEM_FLOOR_DB, 0.0, 1.0)
+    act[~audible] = 0.0
+    return act
 
 
 def _hysteresis(x, on=STEM_ON, off=STEM_OFF):
@@ -493,8 +501,10 @@ def _snap_bars(cuts, offset, phrase_bars, n_bars):
 def stem_labels(rows):
     """Name sections from which stems play. Rules, like `arrangement_labels`.
 
-      - first section Intro; last section Outro, unless the kick and bass are both
-        still playing in it (a track that ends on the full groove has no outro)
+      - first section Intro; last section Outro when the kick or bass has gone, or
+        when it is a strict subset of the section before it (something left, nothing
+        joined: a DJ outro that keeps only kick and bass). A track that simply ends
+        on the full groove has no outro.
       - no kick: Breakdown, except that a kickless section straight before the
         kick returns, once hats are back, is a Build (never the section right
         after the Intro: a kickless start is a Breakdown, not a build to nothing)
@@ -510,9 +520,16 @@ def stem_labels(rows):
         return ["Intro"]
     out = [None] * n
     out[0] = "Intro"
-    if not (rows[-1]["kick"] and rows[-1]["bass"]):
+
+    def roles(r):
+        return {k for k in STEM_CUT_ROLES if r[k]}
+
+    last = rows[-1]
+    if not (last["kick"] and last["bass"]) or roles(last) < roles(rows[-2]):
         out[-1] = "Outro"
-    nothing = {"kick": False, "bass": False, "hats": False, "synths": False}
+    # A last section that is not the Outro has kick and bass on, so neither branch
+    # below that looks ahead reads `nxt` for it; the empty row only keeps it defined.
+    nothing = {k: False for k in STEM_CUT_ROLES}
     for i in range(1, n):
         if out[i] is not None:
             continue
@@ -568,8 +585,8 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
     phase = downbeat_phase(period, grid_t0, downbeat_sec)
     n_bars = (n_beats - phase) // BEATS_PER_BAR
     if n_bars < 2 * phrase_bars:
-        raise ValueError("track is only %d bars, shorter than two %d-bar phrases; "
-                         "nothing to segment" % (n_bars, phrase_bars))
+        raise SectionsTooShort("track is only %d bars, shorter than two %d-bar "
+                               "phrases; nothing to segment" % (n_bars, phrase_bars))
     edges = grid_t0 + period * (phase + BEATS_PER_BAR * np.arange(n_bars + 1))
 
     db = {n: _bar_db(paths[n], edges) for n in used}
@@ -680,7 +697,7 @@ def analyze_sections(stems_dir, phrase_bars=PHRASE_BARS, n_segments=None,
             res = analyze_sections_by_stems(stems_dir, period, grid_t0,
                                             downbeat_sec=downbeat_sec,
                                             phrase_bars=phrase_bars)
-        except ValueError:                # too short for the stems method
+        except SectionsTooShort:          # too short for the stems method
             if method == "stems":
                 raise
             res = None                    # auto: the spectral method states its own limit

@@ -775,13 +775,30 @@ def test_a_silent_stem_is_ignored_not_read_as_always_playing(tmp_path):
     assert "drums_ride" not in res["mix_stems"]
 
 
+def test_a_noise_floor_with_one_loud_bar_does_not_mask_the_real_stems(tmp_path):
+    base = _by_stems(_write_stems(tmp_path / "a", _layout(), 128))
+    layout = _layout()
+    layout["drums_ride"] = [(0, 128, 0.0016), (100, 101, 0.0056)]     # -59 dB noise, one -48 dB bar
+    res = _by_stems(_write_stems(tmp_path / "b", layout, 128))
+    assert [s["beat"] for s in res["sections"]] == [s["beat"] for s in base["sections"]]
+    assert [s["label"] for s in res["sections"]] == [s["label"] for s in base["sections"]]
+    assert "drums_ride" not in res["mix_stems"]
+
+
 def test_a_stem_that_plays_in_few_bars_still_has_a_loud_level(tmp_path):
     from sections import _activity
     db = np.full(100, -90.0)
-    db[40:43] = -20.0                        # 3% of the bars; the 95th percentile alone is silence
+    db[40:44] = -20.0                        # 4% of the bars; the 95th percentile alone is silence
     act = _activity(db)
     assert act is not None and act[41] == 1.0 and act[0] == 0.0
     assert _activity(np.full(50, -80.0)) is None
+    one_loud = np.full(50, -59.0)
+    one_loud[10] = -48.0                     # a bleed floor plus a single loud bar is still no stem
+    assert _activity(one_loud) is None
+    mostly_bleed = np.full(50, -59.0)
+    mostly_bleed[10:14] = -20.0
+    act = _activity(mostly_bleed)
+    assert act[11] == 1.0 and act[30] == 0.0  # the bleed bars are silent, not 'playing at -39 dB under the top'
 
 
 def test_short_runs_at_either_end_do_not_become_tiny_sections(tmp_path):
@@ -863,3 +880,21 @@ def test_stem_labels_covers_every_branch():
     assert stem_labels(rows) == ["Intro", "Drop 1", "Main", "Breakdown", "Build 1",
                                  "Drop 2", "Build 2", "Drop 3", "Outro"]
     assert stem_labels([]) == [] and stem_labels([row(1, 1)]) == ["Intro"]
+
+
+def test_a_dj_outro_that_keeps_only_kick_and_bass_is_still_an_outro(tmp_path):
+    layout = _layout()
+    layout["drums_kick"][-1] = (80, 128, 1.0)       # kick and bass run to the end
+    layout["bass"][-1] = (64, 128, 0.9)
+    layout["drums_hh"][-1] = (64, 112, 0.8)         # hats and synths leave at bar 112
+    layout["synths"] = [(16, 112, 0.7)]
+    secs = _by_stems(_write_stems(tmp_path / "s", layout, 128))["sections"]
+    assert [s["beat"] // 4 for s in secs][-1] == 112
+    assert secs[-1]["label"] == "Outro" and set(secs[-1]["stems"]) == {"kick", "bass"}
+
+
+def test_too_short_is_its_own_error_and_auto_hands_over(tmp_path):
+    from sections import SectionsTooShort, analyze_sections_by_stems
+    d = _write_stems(tmp_path / "s", {"drums_kick": [(0, 10, 1.0)], "bass": [(0, 10, 0.9)]}, 10)
+    with pytest.raises(SectionsTooShort):
+        analyze_sections_by_stems(d, 0.5, 0.0, 0.0)

@@ -538,16 +538,17 @@ grid and downbeat cached in `alignment.json` when there is one, and otherwise
 says that bar 1 is assumed at the first grid beat.
 
 **Two detectors, chosen by `--method` (default `auto`).** With the separated stems
-on disk (a kick source, `drums_kick` or the `drums` composite, plus `bass`) it reads
+on disk (`drums_kick`, or the `drums` composite when there are no drum parts, plus `bass`) it reads
 **per-bar stem activity**: each stem's level per bar, relative to that stem's own loud
 level, with a hysteresis threshold for "playing". Boundaries are where the set of
 playing stems changes (kick, bass, hats, synths; vocals are reported, not cut on). A
 **muffled breakdown kick** (about 22 dB under its loud level) counts as no kick. The
 8-bar phrase cycle is **estimated from where the changes land** instead of assumed
 to start at the detected downbeat, and a boundary is snapped to it only when it is
-within a bar. Names are rules over which stems play: no kick is a Breakdown, kick and
+within a bar. A stem that is effectively silent (under -50 dB, like an empty ride) is ignored. Names are rules over which stems play: no kick is a Breakdown, kick and
 bass returning is a Drop, a kickless section with the hats back just before that is a
-Build. Without those stems, or with `--method spectral`, it uses the spectral method
+Build, and the last section is an Outro once the kick or bass has gone, or when it is a
+stripped-down copy of the one before (a track that ends on the full groove has none). Without those stems, or with `--method spectral`, it uses the spectral method
 below. Checked by ear on one track (Gerlach, "Off"): quiet at Live bar 69, drop at 101,
 where the spectral method placed them four bars late.
 
