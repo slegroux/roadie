@@ -1008,14 +1008,57 @@ def sections_to_locators(sections, period, start_offset_beats, name_prefix=""):
     `period` must be the period the SET tempo was taken from. Live song time is
     beats, so seconds are divided by that period; using a different one makes the
     error grow with time instead of staying constant.
+
+    Names read "Drop 1 (bass in) \u00b7 64": the label, which stems came or went
+    against the section before, and the length in bars (`locator_title`).
     """
     if period <= 0:
         raise ValueError("beat period must be positive, got %r" % period)
     offset = float(start_offset_beats)
     return [{
         "time": float(round(offset + s["time_sec"] / period, 4)),
-        "name": "%s%s" % (name_prefix, s["label"]),
-    } for s in sections]
+        "name": "%s%s" % (name_prefix, locator_title(s, prev)),
+    } for prev, s in zip([None] + list(sections), sections)]
+
+
+# Stems named in a locator comment, most telling first. A change in one of these
+# is what the stem-activity method cut the section on, so it is what to say.
+COMMENT_ORDER = ("kick", "bass", "hats", "synths", "vocals")
+COMMENT_MAX = 2
+
+
+def section_comment(prev, section):
+    """What changed against the section before: "kick out", "bass in, hats out".
+
+    Needs the `stems` list only the stem-activity method fills in; a section
+    without it, or the first section, has nothing to compare and gets "".
+    """
+    if prev is None or "stems" not in section or "stems" not in prev:
+        return ""
+    now, before = set(section["stems"]), set(prev["stems"])
+    changes = []
+    for role in COMMENT_ORDER:
+        if role in now and role not in before:
+            changes.append("%s in" % role)
+        elif role in before and role not in now:
+            changes.append("%s out" % role)
+    return ", ".join(changes[:COMMENT_MAX])
+
+
+def locator_title(section, prev=None):
+    """"Drop 1 (bass in) · 64": label, what changed, and the length in bars.
+
+    The length and the comment are each left off when the section does not carry
+    what they come from, so a bare {time_sec, label} section still names itself
+    by its label alone.
+    """
+    title = section["label"]
+    comment = section_comment(prev, section)
+    if comment:
+        title += " (%s)" % comment
+    if "duration_beats" in section:
+        title += " \u00b7 %d" % max(1, int(round(section["duration_beats"] / BEATS_PER_BAR)))
+    return title
 
 
 def cli_grid(stems_dir, tempo=None, grid_t0=None, downbeat_sec=None,
