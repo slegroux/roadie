@@ -316,8 +316,18 @@ def clone_track(proto, track_id, ids, name, colour, gain, clips):
 
 
 def set_tempo(root, bpm):
-    root.find("LiveSet/MainTrack/DeviceChain/Mixer/Tempo/Manual").set(
-        "Value", num(round(bpm, 3)))
+    """Set the song tempo in both places Live keeps it: the fader's manual value
+    and the tempo automation lane's starting event. Live plays the automation
+    lane, so setting only the manual value leaves the song at the template's 120."""
+    bpm = num(round(bpm, 3))
+    main = root.find("LiveSet/MainTrack")
+    tempo = main.find("DeviceChain/Mixer/Tempo")
+    tempo.find("Manual").set("Value", bpm)
+    target = tempo.find("AutomationTarget").get("Id")
+    for env in main.iter("AutomationEnvelope"):
+        if env.find("EnvelopeTarget/PointeeId").get("Value") == target:
+            for ev in env.iter("FloatEvent"):
+                ev.set("Value", bpm)
 
 
 def set_locators(root, locators):

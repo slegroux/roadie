@@ -47,7 +47,20 @@ TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
       <ReturnTrack Id="2" />
     </Tracks>
     <MainTrack Id="3">
-      <DeviceChain><Mixer><Tempo><Manual Value="120" /></Tempo></Mixer></DeviceChain>
+      <AutomationEnvelopes><Envelopes>
+        <AutomationEnvelope Id="0">
+          <EnvelopeTarget><PointeeId Value="7" /></EnvelopeTarget>
+          <Automation><Events><EnumEvent Id="0" Time="-63072000" Value="201" /></Events></Automation>
+        </AutomationEnvelope>
+        <AutomationEnvelope Id="1">
+          <EnvelopeTarget><PointeeId Value="8" /></EnvelopeTarget>
+          <Automation><Events><FloatEvent Id="0" Time="-63072000" Value="120" /></Events></Automation>
+        </AutomationEnvelope>
+      </Envelopes></AutomationEnvelopes>
+      <DeviceChain><Mixer><Tempo>
+        <Manual Value="120" />
+        <AutomationTarget Id="8" />
+      </Tempo></Mixer></DeviceChain>
     </MainTrack>
     <Locators><Locators><Locator Id="0"><Time Value="9" /></Locator></Locators></Locators>
   </LiveSet>
@@ -107,7 +120,7 @@ def test_ids_are_unique_and_next_pointee_id_moves_past_them(template, stems):
     root = build(template, stems)
     ids = [int(e.get("Id")) for e in root.iter()
            if "Id" in e.attrib and (e.tag.endswith("Target") or e.tag == "Pointee")]
-    assert len(ids) == len(set(ids)) == 3 * 3
+    assert len(ids) == len(set(ids)) == 3 * 3 + 1      # +1: the main track's tempo target
     assert int(v(root, "LiveSet/NextPointeeId")) > max(ids)
     track_ids = [int(t.get("Id")) for t in root.find("LiveSet/Tracks")]
     assert len(track_ids) == len(set(track_ids))
@@ -190,6 +203,10 @@ def test_tempo_and_locators_are_set(template, stems):
     locs = [{"time": 32.0, "name": "Intro"}, {"time": 96.0, "name": "Drop 1"}]
     root = build(template, stems, bpm=125.0042, locators=locs)
     assert v(root, "LiveSet/MainTrack/DeviceChain/Mixer/Tempo/Manual") == "125.004"
+    # Live plays the tempo automation lane, not the manual value alone.
+    events = [e.get("Value") for e in root.iter("FloatEvent")]
+    assert events == ["125.004"]
+    assert [e.get("Value") for e in root.iter("EnumEvent")] == ["201"]    # other lanes untouched
     got = [(v(l, "Time"), v(l, "Name")) for l in root.find("LiveSet/Locators/Locators")]
     assert got == [("32", "Intro"), ("96", "Drop 1")]        # the template's own is gone
 
@@ -244,3 +261,10 @@ def test_the_real_template_builds_with_unique_ids(stems):
     assert len(ids) == len(set(ids))
     assert int(root.find("LiveSet/NextPointeeId").get("Value")) > max(map(int, ids))
     assert len(audio_tracks(root)) == 3
+    aw.set_tempo(root, 125.004)
+    main = root.find("LiveSet/MainTrack")
+    target = main.find("DeviceChain/Mixer/Tempo/AutomationTarget").get("Id")
+    lane = [e for e in main.iter("AutomationEnvelope")
+            if e.find("EnvelopeTarget/PointeeId").get("Value") == target]
+    assert lane and all(ev.get("Value") == "125.004"
+                        for e in lane for ev in e.iter("FloatEvent"))
