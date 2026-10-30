@@ -673,3 +673,235 @@ def test_write_sections_json_skips_a_single_audio_file_and_a_bad_dir(tmp_path):
         assert sections.write_sections_json(str(ro), {}, 0, []) is None
     finally:
         ro.chmod(0o700)
+
+
+# --- stem-activity method ------------------------------------------------------
+# Synthetic stems at 120 BPM (a 2 s bar), gated per bar, so the expected sections
+# are known exactly. A muffled kick (-22 dB) must count as no kick.
+
+SR_STEMS = 4000
+BAR_SEC = 2.0
+
+
+def _layout(lead=0):
+    """stem -> [(first_bar, last_bar_exclusive, amplitude)], structure shifted by `lead`."""
+    L = lead
+    return {
+        "drums_kick": [(0, 48 + L, 1.0), (48 + L, 56 + L, 0.08), (80 + L, 112 + L, 1.0)],
+        "drums_hh": [(0, 48 + L, 0.8), (64 + L, 128 + L, 0.8)],
+        "bass": [(16 + L, 48 + L, 0.9), (64 + L, 112 + L, 0.9)],
+        "synths": [(16 + L, 128 + L, 0.7)],
+    }
+
+
+def _write_stems(folder, layout, n_bars):
+    folder.mkdir(exist_ok=True)
+    t = np.arange(int(n_bars * BAR_SEC * SR_STEMS)) / SR_STEMS
+    for name, spans in layout.items():
+        gain = np.zeros(len(t))
+        for a, b, amp in spans:
+            gain[int(a * BAR_SEC * SR_STEMS):int(b * BAR_SEC * SR_STEMS)] = amp
+        tone = np.sin(2 * np.pi * (60 + 7 * len(name)) * t)
+        sf.write(str(folder / (name + ".wav")), (gain * tone).astype("float32"), SR_STEMS)
+    return str(folder)
+
+
+def _by_stems(folder):
+    from sections import analyze_sections_by_stems
+    return analyze_sections_by_stems(folder, period=0.5, grid_t0=0.0, downbeat_sec=0.0)
+
+
+def test_stems_method_finds_the_known_boundaries_and_names_them(tmp_path):
+    res = _by_stems(_write_stems(tmp_path / "s", _layout(), 128))
+    secs = res["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0, 16, 48, 64, 80, 112]
+    assert [s["label"] for s in secs] == [
+        "Intro", "Drop 1", "Breakdown", "Build", "Drop 2", "Outro"]
+    assert res["method"] == "stems" and res["phrase_offset_bars"] == 0
+
+
+def test_a_muffled_kick_counts_as_no_kick(tmp_path):
+    secs = _by_stems(_write_stems(tmp_path / "s", _layout(), 128))["sections"]
+    at_48 = next(s for s in secs if s["beat"] // 4 == 48)    # bars 48-55 carry the kick at -22 dB
+    assert at_48["label"] == "Breakdown" and "kick" not in at_48["stems"]
+    assert 56 not in [s["beat"] // 4 for s in secs]          # ...and do not split off a section of their own
+
+
+def test_the_phrase_offset_is_estimated_when_structure_sits_off_the_cycle(tmp_path):
+    res = _by_stems(_write_stems(tmp_path / "s", _layout(lead=4), 132))
+    assert res["phrase_offset_bars"] == 4
+    assert [s["beat"] // 4 for s in res["sections"]] == [0, 20, 52, 68, 84, 116]
+
+
+def test_a_change_one_bar_off_the_estimated_cycle_snaps_onto_it(tmp_path):
+    layout = _layout(lead=4)
+    layout["drums_kick"][-1] = (83, 116, 1.0)       # the kick returns a bar early
+    res = _by_stems(_write_stems(tmp_path / "s", layout, 132))
+    assert res["phrase_offset_bars"] == 4
+    assert [s["beat"] // 4 for s in res["sections"]] == [0, 20, 52, 68, 84, 116]   # 83 -> 84
+
+
+def test_boundaries_are_kept_when_not_near_the_phrase_grid():
+    from sections import _snap_bars
+    # 0-offset grid: lines at 8, 16, ... ; 21 is 3 away from 24 and 5 from 16
+    assert _snap_bars([17, 21], 0, 8, 100) == [16, 21]
+
+
+def test_estimate_phrase_offset_prefers_zero_on_a_near_tie():
+    from sections import estimate_phrase_offset
+    nov = np.zeros(64)
+    nov[[12, 20, 28]] = 1.0                  # offset 4 scores 3.0 ...
+    nov[[8, 16, 24]] = 0.95                  # ... offset 0 scores 2.85, within 10%
+    assert estimate_phrase_offset(nov, 8) == 0
+
+
+def test_estimate_phrase_offset_takes_a_clear_winner():
+    from sections import estimate_phrase_offset
+    nov = np.zeros(64)
+    nov[[12, 20, 28]] = 1.0
+    nov[[8, 16, 24]] = 0.5
+    assert estimate_phrase_offset(nov, 8) == 4
+
+
+def test_a_silent_stem_is_ignored_not_read_as_always_playing(tmp_path):
+    layout = _layout()
+    layout["drums_ride"] = []                # an empty ride, as drum splits often produce
+    layout["vocals"] = []
+    base = _by_stems(_write_stems(tmp_path / "a", _layout(), 128))
+    res = _by_stems(_write_stems(tmp_path / "b", layout, 128))
+    assert [s["beat"] for s in res["sections"]] == [s["beat"] for s in base["sections"]]
+    assert [s["label"] for s in res["sections"]] == [s["label"] for s in base["sections"]]
+    assert not any("vocals" in s["stems"] for s in res["sections"])
+    assert "drums_ride" not in res["mix_stems"]
+
+
+def test_a_noise_floor_with_one_loud_bar_does_not_mask_the_real_stems(tmp_path):
+    base = _by_stems(_write_stems(tmp_path / "a", _layout(), 128))
+    layout = _layout()
+    layout["drums_ride"] = [(0, 128, 0.0016), (100, 101, 0.0056)]     # -59 dB noise, one -48 dB bar
+    res = _by_stems(_write_stems(tmp_path / "b", layout, 128))
+    assert [s["beat"] for s in res["sections"]] == [s["beat"] for s in base["sections"]]
+    assert [s["label"] for s in res["sections"]] == [s["label"] for s in base["sections"]]
+    assert "drums_ride" not in res["mix_stems"]
+
+
+def test_a_stem_that_plays_in_few_bars_still_has_a_loud_level(tmp_path):
+    from sections import _activity
+    db = np.full(100, -90.0)
+    db[40:44] = -20.0                        # 4% of the bars; the 95th percentile alone is silence
+    act = _activity(db)
+    assert act is not None and act[41] == 1.0 and act[0] == 0.0
+    assert _activity(np.full(50, -80.0)) is None
+    one_loud = np.full(50, -59.0)
+    one_loud[10] = -48.0                     # a bleed floor plus a single loud bar is still no stem
+    assert _activity(one_loud) is None
+    mostly_bleed = np.full(50, -59.0)
+    mostly_bleed[10:14] = -20.0
+    act = _activity(mostly_bleed)
+    assert act[11] == 1.0 and act[30] == 0.0  # the bleed bars are silent, not 'playing at -39 dB under the top'
+
+
+def test_short_runs_at_either_end_do_not_become_tiny_sections(tmp_path):
+    layout = _layout()
+    layout["bass"] = [(0, 1, 0.9)] + layout["bass"]                    # a one-bar pickup
+    layout["drums_kick"] = layout["drums_kick"] + [(126, 128, 1.0)]    # two bars of kick at the end
+    secs = _by_stems(_write_stems(tmp_path / "s", layout, 128))["sections"]
+    starts = [s["beat"] // 4 for s in secs]
+    assert starts == [0, 16, 48, 64, 80, 112]
+    assert all(b - a >= 4 for a, b in zip(starts, starts[1:] + [128]))
+
+
+def test_snap_bars_keeps_cuts_away_from_both_ends():
+    from sections import _snap_bars
+    assert _snap_bars([1, 126, 40], 0, 8, 128) == [40]
+
+
+def test_despeckle_absorbs_short_runs_at_the_start_and_the_end():
+    from sections import _despeckle
+    b = np.array([1] * 2 + [0] * 10 + [1] * 10 + [0] * 3, bool)
+    assert _despeckle(b).tolist() == [0] * 12 + [1] * 10 + [1] * 3
+
+
+def test_a_folder_with_drum_parts_but_no_kick_is_left_to_the_spectral_method(tmp_path):
+    from sections import analyze_sections_by_stems
+    d = _write_stems(tmp_path / "s", {"drums": [(0, 32, 1.0)], "drums_hh": [(0, 32, 0.8)],
+                                      "bass": [(0, 32, 0.9)]}, 32)
+    assert analyze_sections_by_stems(d, 0.5, 0.0, 0.0) is None
+
+
+def test_an_all_silent_kick_or_bass_is_not_a_usable_folder(tmp_path):
+    from sections import analyze_sections_by_stems
+    d = _write_stems(tmp_path / "s", {"drums_kick": [], "bass": [(0, 32, 0.9)]}, 32)
+    assert analyze_sections_by_stems(d, 0.5, 0.0, 0.0) is None
+
+
+def test_stems_method_needs_a_kick_source_and_bass(tmp_path):
+    from sections import analyze_sections_by_stems, analyze_sections
+    no_bass = _write_stems(tmp_path / "a", {"drums_kick": [(0, 32, 1.0)]}, 32)
+    assert analyze_sections_by_stems(no_bass, 0.5, 0.0, 0.0) is None
+    with pytest.raises(ValueError, match="kick source"):
+        analyze_sections(no_bass, period=0.5, grid_t0=0.0, method="stems")
+
+
+def test_unknown_method_is_rejected(tmp_path):
+    from sections import analyze_sections
+    d = _write_stems(tmp_path / "a", _layout(), 128)
+    with pytest.raises(ValueError, match="method must be"):
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="vibes")
+
+
+def test_live_bars_translate_file_time_to_the_arrangement_ruler():
+    from sections import live_bars
+    # Gerlach "Off": clips at Live bar 9, downbeat 1.9325 s; the stems' kick leaves at
+    # file time 115.2125 s, which the user confirmed by ear is Live bar 69.
+    res = {"period": 0.48, "grid_t0": 0.0125, "bpm": 125.0,
+           "sections": [{"time_sec": 0.0125}, {"time_sec": 115.2125}]}
+    assert live_bars(res, 1.9325, 9) == [9.0, 69.0]
+    assert live_bars(res, None, 9) is None
+
+
+def test_a_track_that_ends_on_the_full_groove_has_no_outro(tmp_path):
+    layout = _layout()
+    layout["drums_kick"][-1] = (80, 128, 1.0)
+    layout["bass"][-1] = (64, 128, 0.9)
+    labels = [s["label"] for s in _by_stems(_write_stems(tmp_path / "s", layout, 128))["sections"]]
+    assert labels[-1] == "Drop 2" and "Outro" not in labels
+
+
+def test_stem_labels_covers_every_branch():
+    from sections import stem_labels
+    def row(k, b, h=False):
+        return {"kick": k, "bass": b, "hats": h, "synths": True}
+    rows = [row(1, 0, 1), row(1, 1, 1), row(1, 1, 1), row(0, 0), row(0, 1, 1), row(1, 1, 1),
+            row(1, 0, 1), row(1, 1, 1), row(0, 1)]
+    # 1 Drop (bass enters), 2 Main, 3 Breakdown, 4 Build (kickless, hats, kick next),
+    # 5 Drop (kick returns with bass), 6 Build (kick, no bass, bass next),
+    # 7 Drop (bass enters again), 8 Outro (the kick has gone)
+    assert stem_labels(rows) == ["Intro", "Drop 1", "Main", "Breakdown", "Build 1",
+                                 "Drop 2", "Build 2", "Drop 3", "Outro"]
+    assert stem_labels([]) == [] and stem_labels([row(1, 1)]) == ["Intro"]
+
+
+def test_a_dj_outro_that_keeps_only_kick_and_bass_is_still_an_outro(tmp_path):
+    layout = _layout()
+    layout["drums_kick"][-1] = (80, 128, 1.0)       # kick and bass run to the end
+    layout["bass"][-1] = (64, 128, 0.9)
+    layout["drums_hh"][-1] = (64, 112, 0.8)         # hats and synths leave at bar 112
+    layout["synths"] = [(16, 112, 0.7)]
+    secs = _by_stems(_write_stems(tmp_path / "s", layout, 128))["sections"]
+    assert [s["beat"] // 4 for s in secs][-1] == 112
+    assert secs[-1]["label"] == "Outro" and set(secs[-1]["stems"]) == {"kick", "bass"}
+
+
+def test_too_short_is_its_own_error_and_auto_hands_over(tmp_path):
+    from sections import SectionsTooShort, analyze_sections_by_stems
+    d = _write_stems(tmp_path / "s", {"drums_kick": [(0, 10, 1.0)], "bass": [(0, 10, 0.9)]}, 10)
+    with pytest.raises(SectionsTooShort):
+        analyze_sections_by_stems(d, 0.5, 0.0, 0.0)
+    from sections import analyze_sections
+    with pytest.raises(SectionsTooShort):
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="stems")
+    # auto hands over to the spectral method, which states its own limit (in beats)
+    with pytest.raises(ValueError, match="beats") as e:
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="auto")
+    assert not isinstance(e.value, SectionsTooShort)

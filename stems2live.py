@@ -1165,8 +1165,8 @@ def main():
                       "pinned to bar 1" % clamped)
             # Boundaries are measured; the names are rules over energy and
             # order. Saying so is cheaper than a user trusting "Drop" too far.
-            print("           boundaries measured from spectral change; names "
-                  "are energy/order rules")
+            print("           boundaries are measured (stem activity, or spectral "
+                  "change without stems); names are rules")
 
     # ENERGY MAP before the session grid, because it inserts a track at index 0
     # and every index after it shifts by one. Doing it here means the session
