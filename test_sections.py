@@ -898,3 +898,10 @@ def test_too_short_is_its_own_error_and_auto_hands_over(tmp_path):
     d = _write_stems(tmp_path / "s", {"drums_kick": [(0, 10, 1.0)], "bass": [(0, 10, 0.9)]}, 10)
     with pytest.raises(SectionsTooShort):
         analyze_sections_by_stems(d, 0.5, 0.0, 0.0)
+    from sections import analyze_sections
+    with pytest.raises(SectionsTooShort):
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="stems")
+    # auto hands over to the spectral method, which states its own limit (in beats)
+    with pytest.raises(ValueError, match="beats") as e:
+        analyze_sections(d, period=0.5, grid_t0=0.0, method="auto")
+    assert not isinstance(e.value, SectionsTooShort)

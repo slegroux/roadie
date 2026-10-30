@@ -545,7 +545,7 @@ playing stems changes (kick, bass, hats, synths; vocals are reported, not cut on
 **muffled breakdown kick** (about 22 dB under its loud level) counts as no kick. The
 8-bar phrase cycle is **estimated from where the changes land** instead of assumed
 to start at the detected downbeat, and a boundary is snapped to it only when it is
-within a bar. A stem that is effectively silent (under -50 dB, like an empty ride) is ignored. Names are rules over which stems play: no kick is a Breakdown, kick and
+within a bar. A stem that is effectively silent (under -50 dB, or audible in fewer than 4 bars, like an empty ride) is ignored. Names are rules over which stems play: no kick is a Breakdown, kick and
 bass returning is a Drop, a kickless section with the hats back just before that is a
 Build, and the last section is an Outro once the kick or bass has gone, or when it is a
 stripped-down copy of the one before (a track that ends on the full groove has none). Without those stems, or with `--method spectral`, it uses the spectral method
