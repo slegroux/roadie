@@ -170,6 +170,7 @@ def test_sample_reference_points_at_the_file(template, stems):
     name, path = stems[0]
     assert v(clip, "SampleRef/FileRef/Path") == path
     assert v(clip, "SampleRef/FileRef/RelativePath") == "song_125bpm_stems/drums_kick.wav"
+    assert v(clip, "SampleRef/FileRef/RelativePathType") == "1"      # relative to the .als
     assert v(clip, "SampleRef/FileRef/OriginalFileSize") == str(os.path.getsize(path))
     assert v(clip, "SampleRef/DefaultDuration") == str(RATE * 2)
     assert v(clip, "SampleRef/DefaultSampleRate") == str(RATE)

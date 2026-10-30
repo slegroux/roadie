@@ -25,6 +25,12 @@ file missing when they disagree, even if the Path resolves. The CRC is CRC-16
 all 122 references, FLAC and WAV, in a project Live saved. Written as 0, the
 first version of this file opened as "media files are missing".
 
+SAMPLE PATHS. RelativePathType 3 means "inside the project folder" (Live writes
+it for Samples/...); a set that is not in a Live project has no such base, and
+Live reported every stem missing. Type 1, a path relative to the .als file, is
+what Live 12 writes for a sample beside or above the set (e.g. a glacier.als
+referencing ../Teho - Glacier 3000.mp3), so that is what this writes.
+
 KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
   * Clip colours are palette INDICES (not RGB like the bridge's), taken per stem
     name from a project Live produced. Unknown names get 0.
@@ -139,7 +145,7 @@ CLIP = string.Template("""<AudioClip Id="${clip_id}" Time="${start}">
 </ScaleInformation>
 <SampleRef>
 <FileRef>
-<RelativePathType Value="3" />
+<RelativePathType Value="1" />
 <RelativePath Value="${relpath}" />
 <Path Value="${path}" />
 <Type Value="2" />

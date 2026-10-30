@@ -61,8 +61,9 @@ The `.als` format is gzipped XML. The track and clip layout match a project Live
 (`OriginalCrc`, CRC-16 of the first 16 KiB) and reports the file missing if they
 disagree; `roadie als` computes both, a rule that reproduces every reference in a
 project Live saved. Clip colours are palette indices copied from that project, so
-treat them as approximate. Keep the `.als` next to its `_stems` folder: samples
-are found by a path relative to the `.als`, then by the absolute path.
+treat them as approximate. Samples are referenced by a path relative to the
+`.als` (the way Live 12 does for files outside a project), so keep the `.als`
+next to its `_stems` folder.
 
 ## Configuration
 
