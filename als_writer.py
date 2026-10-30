@@ -410,6 +410,9 @@ def main(argv=None):
                     help="empty Live set to copy (default: %(default)s)")
     ap.add_argument("--tempo", type=float, default=None,
                     help="override the measured tempo")
+    ap.add_argument("--no-tempo-check", action="store_true",
+                    help="keep the beat detector's tempo without asking the kick "
+                         "stem whether it is right")
     ap.add_argument("--start-bar", type=int, default=9,
                     help="bar the clips start on (default 9)")
     ap.add_argument("--headroom", type=float, default=6.0,
@@ -441,7 +444,8 @@ def main(argv=None):
     from beat_aligner import analyze_alignment
     from stems2live import (arrange_stems, bar_aligned_placement, centroid,
                             section_grid)
-    grid = analyze_alignment(stems_dir, override_tempo=args.tempo)
+    grid = analyze_alignment(stems_dir, override_tempo=args.tempo,
+                             tempo_check=not args.no_tempo_check)
     bpm = args.tempo or grid["bpm"]
     period = float(grid["period"])
     warp_map = grid.get("warp_map") or []

@@ -88,7 +88,8 @@ DEFAULT_DETECTOR = "heuristic"
 # whenever a change to this module would alter the numbers — an unversioned
 # cache would serve stale answers with no way to tell.
 CACHE_NAME = "alignment.json"
-CACHE_VERSION = 3   # 3: phrase alignment removed; no phrase_bars in the key
+CACHE_VERSION = 4   # 4: tempo cross-check against the kick stem (tempo_check in the key)
+                    # 3: phrase alignment removed; no phrase_bars in the key
 
 # Analysis sample rate for the summed mix. madmom resamples internally anyway,
 # internally anyway, and the heuristic's top band is 1 kHz, so nothing above
@@ -1091,7 +1092,7 @@ def build_warp_map(beat_times, seed_period, segment_sec=30.0,
 
 
 def _cache_fingerprint(paths, override_tempo, detector,
-                       use_structural=True):
+                       use_structural=True, tempo_check=True):
     """Identity of an analysis: the inputs plus every parameter that changes it.
 
     Sizes and mtimes rather than content hashes — the stems are hundreds of MB
@@ -1109,6 +1110,8 @@ def _cache_fingerprint(paths, override_tempo, detector,
         # Changes the ANSWER, not just the reporting — structure can override the
         # detector's phase — so it has to be part of the identity.
         "use_structural": bool(use_structural),
+        # Changes the tempo itself when the detector and the stems disagree.
+        "tempo_check": bool(tempo_check),
     }
 
 
@@ -1167,8 +1170,83 @@ def write_cache(stems_dir, fingerprint, result):
         sys.stderr.write("could not write %s (%s)\n" % (path, e))
 
 
+# The beat detector can settle a little off the tempo the music is really at: on
+# one 9-minute track it reported 121.12 where the kick, hats, snare and bass all
+# lock to 120.00, and the set opened in Live at the wrong tempo with the grid two
+# bars out by the end. A file-name label ("122bpm") is no better evidence. The
+# check below asks the audio directly, and only on the kick stem.
+TEMPO_CHECK_WINDOW = 3.0    # BPM either side of the detected tempo that is searched
+TEMPO_CHECK_STEP = 0.02     # BPM resolution of the search
+TEMPO_CHECK_TOL = 0.3       # the two must differ by more than this to count
+TEMPO_CHECK_RATIO = 1.5     # and the measured tempo must score this much better
+TEMPO_CHECK_HOP = 128       # onset-envelope hop, samples at ANALYSIS_SR
+TEMPO_CHECK_STEMS = ("drums_kick", "drums")
+
+
+def _comb_scores(env, fr, bpms, lo_s, hi_s):
+    """Best comb score per tempo: the mean onset strength on a regular grid.
+
+    For each tempo the grid is slid through every phase and the best phase is
+    kept, so a wrong tempo cannot score well: over a long span its grid walks off
+    the beats however it is placed. `fr` is the envelope's frames per second.
+    """
+    out = np.zeros(len(bpms))
+    for j, bpm in enumerate(bpms):
+        p = 60.0 / bpm * fr
+        n = max(1, int((hi_s - lo_s) * fr / p))
+        phases = np.arange(0.0, p, 0.25)[:, None]
+        idx = np.round(lo_s * fr + phases + np.arange(n)[None, :] * p).astype(int)
+        idx = np.clip(idx, 0, len(env) - 1)
+        out[j] = env[idx].mean(axis=1).max()
+    return out
+
+
+def check_tempo(paths, detected_bpm):
+    """Does the kick stem lock to the detected tempo? Returns a dict, or None.
+
+    The track is cut into two halves and each is searched on its own; a tempo is
+    only reported when both halves agree on it, which a drifting or patchy track
+    does not. `measured_bpm` is where they agree, `ratio` how much better that
+    scores than the detected tempo (the weaker half counts), and `disagrees` is
+    the verdict: far enough apart AND clearly better. None when there is no kick
+    stem to ask, the stem is silent, or the halves disagree with each other.
+    """
+    if not (librosa and sf):
+        return None
+    stem = next((paths[n] for n in TEMPO_CHECK_STEMS if n in paths), None)
+    if stem is None:
+        return None
+    y, sr = librosa.load(stem, sr=ANALYSIS_SR, mono=True)
+    if len(y) < 40 * sr or float(np.max(np.abs(y))) < 1e-4:
+        return None
+    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=TEMPO_CHECK_HOP)
+    fr = sr / float(TEMPO_CHECK_HOP)
+    dur = len(y) / float(sr)
+    bpms = np.arange(detected_bpm - TEMPO_CHECK_WINDOW,
+                     detected_bpm + TEMPO_CHECK_WINDOW + TEMPO_CHECK_STEP / 2,
+                     TEMPO_CHECK_STEP)
+    at = int(np.argmin(np.abs(bpms - detected_bpm)))
+    bests, ratios = [], []
+    for lo, hi in ((0.1, 0.5), (0.5, 0.9)):
+        sc = _comb_scores(env, fr, bpms, lo * dur, hi * dur)
+        k = int(np.argmax(sc))
+        bests.append(float(bpms[k]))
+        ratios.append(float(sc[k] / max(sc[at], 1e-9)))
+    if abs(bests[0] - bests[1]) > 2.5 * TEMPO_CHECK_STEP:
+        return None
+    measured = round(sum(bests) / 2.0, 2)
+    ratio = min(ratios)
+    return {
+        "detected_bpm": float(round(detected_bpm, 3)),
+        "measured_bpm": float(measured),
+        "ratio": float(round(ratio, 2)),
+        "disagrees": bool(abs(measured - detected_bpm) > TEMPO_CHECK_TOL
+                          and ratio >= TEMPO_CHECK_RATIO),
+    }
+
+
 def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_DETECTOR,
-                      use_cache=True, use_structural=True):
+                      use_cache=True, use_structural=True, tempo_check=True):
     """Main analysis pipeline for tempo, downbeat, offset, and drift.
 
     Two signals, two jobs. TEMPO is fitted to the kick stem, where the pulse is
@@ -1187,6 +1265,12 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
 
     `use_cache=False` forces recomputation, which is what --no-cache is for when
     the aligner itself has changed.
+
+    `tempo_check` asks the kick stem whether it really locks to the detected
+    tempo (`check_tempo`). When it clearly does not, the grid is refitted at the
+    tempo the stem does lock to, the change is said on stderr, and the result's
+    `tempo_check` records both numbers. A tempo given with `override_tempo` is
+    never second-guessed.
     """
     if detector not in DETECTORS:
         raise ValueError("unknown detector %r; choose from %s"
@@ -1210,7 +1294,7 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
     fingerprint = None
     if cacheable:
         fingerprint = _cache_fingerprint(paths, override_tempo, detector,
-                                         use_structural)
+                                         use_structural, tempo_check)
         if use_cache:
             cached = read_cache(stems_dir_or_audio, fingerprint)
             if cached is not None:
@@ -1246,6 +1330,24 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
     force_period = 60.0 / float(override_tempo) if override_tempo else None
     period, t0, k, inliers = fit_beat_grid(beats, force_period=force_period)
     bpm = 60.0 / period
+
+    # 2b. Ask the kick stem whether that tempo is right. Skipped when the user
+    #     gave one: a tempo they chose is not ours to overrule.
+    tempo_info = None
+    if tempo_check and override_tempo is None:
+        tempo_info = check_tempo(paths, bpm)
+        tempo_info_applied = bool(tempo_info and tempo_info["disagrees"])
+        if tempo_info_applied:
+            sys.stderr.write(
+                "tempo: the beat detector says %.3f BPM but the kick stem locks to "
+                "%.2f; using %.2f (--no-tempo-check keeps the detector's)\n"
+                % (tempo_info["detected_bpm"], tempo_info["measured_bpm"],
+                   tempo_info["measured_bpm"]))
+            period, t0, k, inliers = fit_beat_grid(
+                beats, force_period=60.0 / tempo_info["measured_bpm"])
+            bpm = 60.0 / period
+        if tempo_info is not None:
+            tempo_info["applied"] = tempo_info_applied
 
     # Beats that actually fit the grid: their indices and their ideal times.
     # Drift deliberately uses NEITHER — see step 7.
@@ -1388,7 +1490,8 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
         "grid_t0": float(round(t0, 4)),
         "inlier_count": int(inliers.sum()),
         "inlier_fraction": float(round(inlier_fraction, 4)),
-        "drift_pct": float(drift_pct)
+        "drift_pct": float(drift_pct),
+        "tempo_check": tempo_info,
     }
 
     if cacheable:
@@ -1419,13 +1522,20 @@ def main():
                          "is the only cue here that is not percussive, so it is "
                          "what breaks a half-bar tie when the detector is split "
                          "— turn it off only to see the raw detector answer")
+    ap.add_argument("--no-tempo-check", action="store_true",
+                    help="keep the beat detector's tempo without asking the kick "
+                         "stem whether it is right. The check only changes the "
+                         "tempo when the stem clearly locks to a different one "
+                         "(more than %.1f BPM away and scoring %.1fx better)"
+                         % (TEMPO_CHECK_TOL, TEMPO_CHECK_RATIO))
     ap.add_argument("--json", action="store_true", help="Output JSON results")
     args = ap.parse_args()
 
     res = analyze_alignment(args.target, override_tempo=args.tempo,
                             detector=args.detector,
                             use_cache=not args.no_cache,
-                            use_structural=not args.no_structural)
+                            use_structural=not args.no_structural,
+                            tempo_check=not args.no_tempo_check)
     if args.json:
         print(json.dumps(res, indent=2))
     else:
@@ -1436,6 +1546,11 @@ def main():
         print(f"Harmonic Source:     {res['harmonic_source']}")
         print(f"Detector:            {res['detector']}")
         print(f"Detected Tempo:      {res['bpm']:.3f} BPM")
+        tc = res.get("tempo_check")
+        if tc and tc.get("applied"):
+            print(f"  ^^ the beat detector said {tc['detected_bpm']:.3f}; the kick stem "
+                  f"locks to {tc['measured_bpm']:.2f} ({tc['ratio']:.1f}x better), "
+                  f"so that is the tempo used")
         print(f"Grid Beats:          {res['inlier_count']} of {res['beat_count']} detections")
         print(f"First Downbeat:      {res['downbeat_sec']:.4f}s (phase beat {res['downbeat_phase'] + 1})")
         print(f"Phase Confidence:    {conf:.3f}  ({verdict}; {PHASE_CHANCE:.2f} = chance, "

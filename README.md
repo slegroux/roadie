@@ -481,6 +481,20 @@ p10–p90 spread rejected two of three *correct* answers — IQR is the stable
 statistic here. **Calibrated on one track**; widen it if a steady set comes back
 untagged.
 
+**The tempo is checked against the kick stem.** The beat detector can settle a
+little off: on one 9-minute track it said 121.12 where the kick, hats, snare and
+bass all lock to 120.00, so the set opened in Live at the wrong tempo and the
+grid ran two bars out by the end. After fitting the grid, `beat_aligner` asks the
+kick stem (`drums_kick`, else `drums`) which tempo within 3 BPM of the detected
+one it really locks to, scoring each half of the track on its own. When both
+halves agree, the measured tempo is more than 0.3 BPM from the detected one and
+it scores at least 1.5x better, the grid is refitted at the measured tempo and
+the change is said on stderr; the result's `tempo_check` holds both numbers.
+`--tempo` is never second-guessed, and `--no-tempo-check` (on `beat_aligner`,
+`roadie load` and `roadie als`) keeps the detector's answer. A tempo in a file
+name is a label, not evidence: on five reference tracks four were 2 BPM above
+what the audio locks to.
+
 ### Warping: only when the tempo actually drifts
 
 A warp map is written **only if drift is detected**. A set that holds one tempo is
@@ -530,6 +544,12 @@ Drop 2  bar  89      Main 2   bar 137      Outro    bar 153
 
 That is with the default `--start-bar 9`: the clips start at bar 9, and every
 section starts a whole number of 8-bar phrases after it.
+
+**Names carry the length and what changed.** With the stem-activity method each
+locator reads `Drop 1 (bass in) · 64`: the label, up to two stems that came or went
+against the section before (`kick out`, `bass in, hats out`), and the section's
+length in bars. The comment and the length are left off when the section does not
+carry what they come from, so the spectral method gives `Drop 1 · 64`.
 
 Existing locators are cleared first; `--keep-locators` adds to them instead.
 `roadie sections <stems_dir>` runs the detection standalone (`--json` available,

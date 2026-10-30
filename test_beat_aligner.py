@@ -822,3 +822,95 @@ class TestAlignmentCache:
         moved = {n: os.path.join(renamed, os.path.basename(p)) for n, p in paths.items()}
         assert ba.read_cache(renamed, ba._cache_fingerprint(moved, None, "heuristic")) \
             == {"bpm": 125.003}
+
+
+# --------------------------------------------------------------------------
+# tempo cross-check against the kick stem
+# --------------------------------------------------------------------------
+
+def _kick_stem(directory, bpm, seconds=100.0, sr=22050, name="drums_kick"):
+    """A kick-like thump on every beat at `bpm`, written as <name>.wav."""
+    import soundfile as sf
+    n = int(seconds * sr)
+    y = np.zeros(n + 4096)
+    thump = np.sin(2 * np.pi * 55 * np.arange(2205) / sr) * np.exp(-np.arange(2205) / 600.0)
+    for t in np.arange(0.3, seconds, 60.0 / bpm):
+        i = int(t * sr)
+        y[i:i + len(thump)] += thump
+    path = os.path.join(directory, name + ".wav")
+    sf.write(path, y[:n] * 0.8, sr, subtype="PCM_16")
+    return path
+
+
+@pytest.fixture
+def kick122(tmp_path):
+    path = _kick_stem(str(tmp_path), 122.0)
+    return {"drums_kick": path}
+
+
+class TestTempoCheck:
+    def test_finds_the_tempo_the_kick_locks_to(self, kick122):
+        r = ba.check_tempo(kick122, 121.1)
+        assert r["measured_bpm"] == pytest.approx(122.0, abs=0.03)
+        assert r["disagrees"] is True
+        assert r["detected_bpm"] == 121.1
+
+    def test_agrees_when_the_detector_is_right(self, kick122):
+        r = ba.check_tempo(kick122, 122.0)
+        assert r["disagrees"] is False
+
+    def test_a_difference_under_the_tolerance_is_not_a_disagreement(self, kick122):
+        r = ba.check_tempo(kick122, 122.0 + ba.TEMPO_CHECK_TOL * 0.5)
+        assert r["disagrees"] is False
+
+    def test_no_kick_stem_means_no_verdict(self, tmp_path):
+        bass = _kick_stem(str(tmp_path), 122.0, name="bass")
+        assert ba.check_tempo({"bass": bass}, 121.1) is None
+
+    def test_a_silent_kick_stem_means_no_verdict(self, tmp_path):
+        import soundfile as sf
+        path = os.path.join(str(tmp_path), "drums_kick.wav")
+        sf.write(path, np.zeros(22050 * 60), 22050, subtype="PCM_16")
+        assert ba.check_tempo({"drums_kick": path}, 121.1) is None
+
+    def test_halves_that_disagree_give_no_verdict(self, tmp_path):
+        """A track that changes tempo has no single tempo to correct to."""
+        import soundfile as sf
+        a = _kick_stem(str(tmp_path), 122.0, seconds=60.0, name="a")
+        b = _kick_stem(str(tmp_path), 118.0, seconds=60.0, name="b")
+        ya, sr = sf.read(a)
+        yb, _ = sf.read(b)
+        path = os.path.join(str(tmp_path), "drums_kick.wav")
+        sf.write(path, np.concatenate([ya, yb]), sr, subtype="PCM_16")
+        assert ba.check_tempo({"drums_kick": path}, 120.0) is None
+
+
+class TestTempoCheckEndToEnd:
+    @pytest.fixture
+    def wrong_detector(self, synthetic, monkeypatch):
+        """Real audio at 124 BPM, a detector that settled on 122.9."""
+        stems, _t, _p, pre_roll, _ph = synthetic(bpm=124.0, bars=48)
+        wrong, _, _ = beat_times(bpm=122.9, n_beats=48 * 4, pre_roll=pre_roll)
+        monkeypatch.setattr(ba, "estimate_aubio_beats", lambda path: wrong)
+        return stems
+
+    def test_the_stem_overrules_a_detector_that_is_off(self, wrong_detector):
+        res = ba.analyze_alignment(wrong_detector)
+        assert res["bpm"] == pytest.approx(124.0, abs=0.03)
+        assert res["tempo_check"]["applied"] is True
+        assert res["tempo_check"]["detected_bpm"] == pytest.approx(122.9, abs=0.05)
+
+    def test_it_can_be_switched_off(self, wrong_detector):
+        res = ba.analyze_alignment(wrong_detector, tempo_check=False)
+        assert res["bpm"] == pytest.approx(122.9, abs=0.05)
+        assert res["tempo_check"] is None
+
+    def test_a_tempo_given_by_the_user_is_never_second_guessed(self, wrong_detector):
+        res = ba.analyze_alignment(wrong_detector, override_tempo=126.0)
+        assert res["bpm"] == 126.0
+        assert res["tempo_check"] is None
+
+    def test_the_cache_does_not_hand_back_the_unchecked_answer(self, wrong_detector):
+        off = ba.analyze_alignment(wrong_detector, tempo_check=False)
+        on = ba.analyze_alignment(wrong_detector)
+        assert off["bpm"] != pytest.approx(on["bpm"], abs=0.5)
