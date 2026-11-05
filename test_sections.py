@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sections import (BEATS_PER_BAR, FULL_REL, QUIET_REL, _letter,
                       analyze_sections, build_beat_grid_times,
                       choose_segment_count, detect_sections, label_for,
-                      sections_to_locators, snap_boundaries, stem_paths)
+                      sections_to_locators, snap_boundaries, stem_paths,
+                      locator_title, section_comment)
 
 PHRASE_BEATS = 32  # 8 bars
 
@@ -140,6 +141,47 @@ def test_locators_carry_the_label_as_the_name():
     assert sections_to_locators(secs, 0.48, 0.0)[0]["name"] == "C full"
     assert sections_to_locators(secs, 0.48, 0.0, name_prefix="s: ")[0]["name"] \
         == "s: C full"
+
+
+def _sec(label, beats, *stems):
+    return {"time_sec": 0.0, "label": label, "duration_beats": beats,
+            "stems": list(stems)}
+
+
+def test_locator_title_appends_the_length_in_bars():
+    assert locator_title(_sec("Drop 1", 256)) == "Drop 1 \u00b7 64"
+    assert locator_title({"time_sec": 0.0, "label": "A", "duration_beats": 47}) \
+        == "A \u00b7 12"
+
+
+def test_locator_title_says_what_changed_against_the_previous_section():
+    drop = _sec("Drop 1", 256, "kick", "bass", "hats", "synths")
+    brk = _sec("Breakdown 1", 128, "bass", "hats", "synths")
+    assert section_comment(drop, brk) == "kick out"
+    assert locator_title(brk, drop) == "Breakdown 1 (kick out) \u00b7 32"
+    assert section_comment(brk, drop) == "kick in"
+
+
+def test_comment_names_at_most_two_changes_most_telling_first():
+    a = _sec("A", 64, "kick", "hats")
+    b = _sec("B", 64, "bass", "synths", "vocals")
+    assert section_comment(a, b) == "kick out, bass in"
+
+
+def test_no_comment_for_the_first_section_or_without_stems():
+    first = _sec("Intro", 80, "kick", "hats")
+    assert section_comment(None, first) == ""
+    plain = {"time_sec": 0.0, "label": "Intro", "duration_beats": 80}
+    assert section_comment(first, plain) == ""
+    assert section_comment(plain, first) == ""
+    assert locator_title(plain) == "Intro \u00b7 20"
+
+
+def test_locators_carry_comment_and_bars_in_the_name():
+    secs = [dict(_sec("Intro", 64, "kick", "hats"), time_sec=0.0),
+            dict(_sec("Drop", 128, "kick", "bass", "hats"), time_sec=30.0)]
+    names = [l["name"] for l in sections_to_locators(secs, 0.5, 0.0)]
+    assert names == ["Intro \u00b7 16", "Drop (bass in) \u00b7 32"]
 
 
 def test_locators_reject_a_bad_period():
