@@ -11,12 +11,13 @@
 #              compound on top of codec artifacts, so a purchased WAV/FLAC gives
 #              cleaner stems than a 133kbps YouTube transcode ever will.
 #   -o DIR     write here (created if missing). Default: current directory.
-#   -a         group by artist: write into DIR/<Artist>/, the artist being the
-#              title before its first " - " (first credited name of several
-#              falls out of the last-name match below). An existing folder named
-#              for the artist, or for their last name, is reused: "Marc Holstege
-#              - Mangata" lands in an existing Holstege/. A title with no " - "
-#              stays in DIR.
+#   -a         studies layout: one folder per track, grouped by artist —
+#              DIR/<Artist>/<Title>/ holds the WAV, the _stems folder and (via
+#              `roadie als`/`open`, which write beside the stems) the .als.
+#              Artist and title split at the first " - ". An existing folder
+#              named for the artist, or for their last name, is reused: "Marc
+#              Holstege - Mangata" lands in an existing Holstege/Mangata/. A name
+#              with no " - " gets DIR/<Title>/.
 #   -s         also split into stems (needs demucs).
 #   -d         then split the drums stem into kick/snare/toms/hh/ride/crash
 #              (implies -s; needs audio-separator). SLOW — see below.
@@ -186,11 +187,12 @@ else
 fi
 [[ -n "$NAME" ]] || { echo "couldn't resolve a name from the input" >&2; exit 1; }
 
-# -a: before WAV/DEST are built, so the resume checks below look in the artist
+# -a: before WAV/DEST are built, so the resume checks below look in the track
 # folder. Names are --restrict-filenames shaped here, so " - " is "_-_".
 if [[ $BY_ARTIST -eq 1 ]]; then
+  title="$NAME"
   if [[ "$NAME" == *_-_* ]]; then
-    artist="${NAME%%_-_*}"; artist="${artist//_/ }"
+    artist="${NAME%%_-_*}"; artist="${artist//_/ }"; title="${NAME#*_-_}"
     lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
     want=$(lc "$artist") last=$(lc "${artist##* }") pick="$artist"
     for d in "$OUT"/*/; do
@@ -199,10 +201,11 @@ if [[ $BY_ARTIST -eq 1 ]]; then
       if [[ "$lb" == "$want" ]]; then pick="$b"; break; fi
       [[ "$lb" == "$last" ]] && pick="$b"
     done
-    OUT="$OUT/$pick"; mkdir -p "$OUT"
+    OUT="$OUT/$pick"
   else
-    echo "no ' - ' in the title, so no artist folder: writing to $OUT (-o picks one)" >&2
+    echo "no ' - ' in the title, so no artist folder: writing under $OUT (-o picks one)" >&2
   fi
+  OUT="$OUT/${title//_/ }"; mkdir -p "$OUT"
 fi
 
 WAV="$OUT/$NAME.wav"

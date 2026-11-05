@@ -116,7 +116,7 @@ case "$cmd" in
     done
     if [[ $out_given -eq 0 ]]; then
       cfg_out="$(config_get out)"
-      # The configured folder is a studies library: group it by artist (-a).
+      # The configured folder is a studies library: <Artist>/<Title>/ per track (-a).
       [[ -z "$cfg_out" ]] || args+=(-o "$cfg_out" -a)
     fi
     # A local source is logged by absolute path; --help and bare errors have none.

@@ -258,11 +258,11 @@ def test_split_uses_out_from_the_config_when_o_is_not_given(tmp_path):
 
 
 @pytest.mark.parametrize("title, existing, folder", [
-    ("Marc Holstege - Mangata", "Holstege", "Holstege"),   # last-name folder reused
-    ("Kevin de Vries - Dance", None, "Kevin de Vries"),     # new artist folder
-    ("Teho live at Glacier", None, None),                   # no artist: stays in out
+    ("Marc Holstege - Mangata", "Holstege", "Holstege/Mangata"),  # last-name folder reused
+    ("Kevin de Vries - Dance", None, "Kevin de Vries/Dance"),      # new artist folder
+    ("Teho live at Glacier", None, "Teho live at Glacier"),       # no artist: title only
 ])
-def test_split_with_config_out_groups_by_artist(tmp_path, title, existing, folder):
+def test_split_with_config_out_makes_artist_and_track_folders(tmp_path, title, existing, folder):
     env, _ = _fake_tools(tmp_path)
     env["ROADIE_LOG"] = ""
     env["ROADIE_CONFIG"] = str(tmp_path / "config")
@@ -274,7 +274,7 @@ def test_split_with_config_out_groups_by_artist(tmp_path, title, existing, folde
     src.write_bytes(b"RIFF")
     r = subprocess.run([ROADIE, "split", str(src)], capture_output=True, text=True,
                        timeout=60, env=env, cwd=str(tmp_path), check=False)
-    want = out / folder if folder else out
+    want = out / folder
     assert "==> %s\n" % want in r.stdout, r.stdout + r.stderr
 
 
