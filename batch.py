@@ -282,6 +282,11 @@ class StepFailed(Exception):
     pass
 
 
+DONE_MARKER = ".roadie-batch-ok"   # on pCloud, written after a passing rclone check
+READY_SUFFIX = ".ready"            # beside a work dir whose analysis finished
+EXIT_FLOOR = 4
+
+
 class UploadFailed(Exception):
     pass
 
@@ -318,7 +323,7 @@ def kill_group(proc):
         pass
 
 
-def run_cmd(argv, timeout, log, capture=False):
+def run_cmd(argv, timeout, log, capture=False, env=None):
     """Run argv in its own session, output to the log file; kill the whole group on timeout."""
     with open(log, "ab") as lf:
         lf.write(("\n$ %s\n" % shlex.join(argv)).encode("utf-8"))
@@ -326,7 +331,7 @@ def run_cmd(argv, timeout, log, capture=False):
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE if capture else lf,
-                                    stderr=lf, start_new_session=True)
+                                    stderr=lf, start_new_session=True, env=env)
         except OSError as e:
             lf.write(("cannot run: %s\n" % e).encode("utf-8"))
             return Result(127, False, b"")
@@ -391,8 +396,8 @@ class Runner:
         print("%-16s %s (%.0fs)%s" % (status, row["name"], secs, " " + error if error else ""),
               flush=True)
 
-    def step(self, row, name, argv, timeout):
-        r = run_cmd(argv, timeout, self.log_path(row))
+    def step(self, row, name, argv, timeout, env=None):
+        r = run_cmd(argv, timeout, self.log_path(row), env=env)
         if r.timed_out:
             raise StepFailed("%s: timeout after %ds" % (name, timeout))
         if r.rc != 0:
@@ -423,44 +428,55 @@ class Runner:
         return "topped up: " + (", ".join(did) if did else "nothing missing")
 
     def do_new(self, row):
+        # Done on pCloud means the marker is there: it is written only after `rclone
+        # check` passed, so a half-finished upload is never mistaken for a finished one.
         dest = row["dest"]
         r = run_cmd([rclone_cmd(), "lsf", dest + "/"], LSF_TIMEOUT, self.log_path(row), capture=True)
-        if r.rc == 0:
-            names = r.out.decode("utf-8", "replace").splitlines()
-            if any(n.endswith("_stems/") for n in names) and any(n.endswith(".als") for n in names):
-                return "already on pCloud"
+        if r.rc == 0 and DONE_MARKER in r.out.decode("utf-8", "replace").splitlines():
+            return "already on pCloud"
         os.makedirs(self.work_root, exist_ok=True)
-        if disk_free(self.work_root) < self.floor:
-            raise StopFloor()
         work = os.path.join(self.work_root, row["id"])
-        if os.path.lexists(work):
-            safe_rmtree(work, self.work_root)
-        os.makedirs(work)
-        try:
-            dur = float(row["duration_sec"] or 0)
-            tmo = int(SPLIT_FACTOR * dur + SPLIT_PAD) if dur > 0 else SPLIT_NODUR
-            self.step(row, "split", [roadie_cmd(), "split", "--file", row["src"], "-d", "-o", work], tmo)
-            stems = [d for d in os.listdir(work)
-                     if d.endswith("_stems") and os.path.isdir(os.path.join(work, d))]
-            if len(stems) != 1:
-                raise StepFailed("split: expected one *_stems dir, found %d" % len(stems))
-            stems = os.path.join(work, stems[0])
-            self.step(row, "sections", [roadie_cmd(), "sections", stems], POST_TIMEOUT)
-            self.step(row, "als", [roadie_cmd(), "als", stems], POST_TIMEOUT)
-            for f in sorted(os.listdir(work)):
-                p = os.path.join(work, f)
-                if f.lower().endswith(".wav") and os.path.isfile(p) and not os.path.islink(p):
+        ready = work + READY_SUFFIX          # local analysis finished; only the upload is left
+        if not (os.path.isfile(ready) and os.path.isdir(work)):
+            if disk_free(self.work_root) < self.floor:
+                raise StopFloor()
+            for p in (work, ready):
+                if os.path.lexists(p):
                     safe_rmtree(p, self.work_root)
-        except StepFailed:
-            safe_rmtree(work, self.work_root)
-            raise
+            os.makedirs(work)
+            tmp = os.path.join(work, "tmp")  # demucs temp inside the work dir, so cleanup reaches it
+            os.makedirs(tmp)
+            try:
+                dur = float(row["duration_sec"] or 0)
+                tmo = int(SPLIT_FACTOR * dur + SPLIT_PAD) if dur > 0 else SPLIT_NODUR
+                self.step(row, "split", [roadie_cmd(), "split", "--file", row["src"], "-d", "-o", work],
+                          tmo, env=dict(os.environ, TMPDIR=tmp))
+                safe_rmtree(tmp, self.work_root)
+                stems = [d for d in os.listdir(work)
+                         if d.endswith("_stems") and os.path.isdir(os.path.join(work, d))]
+                if len(stems) != 1:
+                    raise StepFailed("split: expected one *_stems dir, found %d" % len(stems))
+                stems = os.path.join(work, stems[0])
+                self.step(row, "sections", [roadie_cmd(), "sections", stems], POST_TIMEOUT)
+                self.step(row, "als", [roadie_cmd(), "als", stems], POST_TIMEOUT)
+                for f in sorted(os.listdir(work)):
+                    p = os.path.join(work, f)
+                    if f.lower().endswith(".wav") and os.path.isfile(p) and not os.path.islink(p):
+                        safe_rmtree(p, self.work_root)
+            except StepFailed:
+                safe_rmtree(work, self.work_root)
+                raise
+            with open(ready, "w") as f:
+                f.write(row["src"] + "\n")
         try:
             self.step(row, "upload", [rclone_cmd(), "copy", work, dest, "--transfers", "4",
                                       "--create-empty-src-dirs"], UPLOAD_TIMEOUT)
             self.step(row, "verify", [rclone_cmd(), "check", work, dest, "--one-way"], CHECK_TIMEOUT)
+            self.step(row, "mark", [rclone_cmd(), "touch", dest + "/" + DONE_MARKER], LSF_TIMEOUT)
         except StepFailed as e:
             raise UploadFailed(str(e))
         safe_rmtree(work, self.work_root)
+        safe_rmtree(ready, self.work_root)
         return dest
 
     # -- main loop
@@ -491,7 +507,7 @@ class Runner:
                 self.record(row, "stopped_floor", time.monotonic() - t0,
                             error="free disk below %.1f GB" % (self.floor / 1024 ** 3))
                 self.note_free()
-                return 0
+                return EXIT_FLOOR
             except Interrupted:
                 raise
             except Exception as e:  # a bug must not end the night
@@ -581,10 +597,14 @@ def cmd_run(a):
     lock.write("%d\n" % os.getpid())
     lock.flush()
 
+    sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
     def on_signal(signum, _frame):
+        for s in sigs:                       # a second signal must not cut short kill_group
+            signal.signal(s, signal.SIG_IGN)
         raise Interrupted(signum)
 
-    old = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    old = {s: signal.signal(s, on_signal) for s in sigs}
     runner = Runner(rows, a)
     rc = 1
     try:

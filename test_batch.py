@@ -3,6 +3,7 @@
 
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -31,7 +32,8 @@ esac
 FAKE_RCLONE = r"""#!/bin/sh
 echo "$@" >> "$FAKE_RCLONE_LOG"
 case "$1" in
-lsf) if [ -d "$2" ]; then ls -p "$2"; else exit 3; fi ;;
+lsf) if [ -d "$2" ]; then ls -Ap "$2"; else exit 3; fi ;;
+touch) mkdir -p "$(dirname "$2")"; : > "$2" ;;
 copy) [ -n "$FAKE_RCLONE_FAIL" ] && exit 1; mkdir -p "$3"; cp -R "$2"/. "$3"/ ;;
 check) diff -r "$2" "$3" ;;
 esac
@@ -229,6 +231,7 @@ def test_run_skips_a_track_already_on_pcloud(env):
     manifest = plan(tmp, tmp / "Studies")
     touch(tmp / "dest" / "Studies" / "Song" / "Song_120bpm_stems" / "v.flac")
     touch(tmp / "dest" / "Studies" / "Song" / "Song_120bpm.als")
+    touch(tmp / "dest" / "Studies" / "Song" / batch.DONE_MARKER, b"")
     assert run(tmp, manifest) == 0
     assert calls(tmp) == [] and states(tmp)[0]["status"] == "done"
 
@@ -258,8 +261,9 @@ def test_upload_failure_exits_3_keeps_work_and_stops(env, monkeypatch):
     manifest = plan(tmp, tmp / "Studies")
     assert run(tmp, manifest) == 3
     work = tmp / "cache" / "work"
-    kept = os.listdir(work)
-    assert len(kept) == 1 and kept[0].startswith("Studies-a-")
+    kept = sorted(os.listdir(work))
+    assert len(kept) == 2 and kept[0].startswith("Studies-a-")
+    assert kept[1] == kept[0] + batch.READY_SUFFIX     # the upload can resume from it
     assert [s["status"] for s in states(tmp)] == ["upload_failed"]
     assert len([c for c in calls(tmp) if c.startswith("split")]) == 1
     assert "upload_failed" in next((tmp / "reports").glob("*.md")).read_text()
@@ -270,7 +274,7 @@ def test_floor_stop(env, monkeypatch):
     touch(tmp / "Studies" / "a.mp3")
     monkeypatch.setattr(batch, "disk_free", lambda p: 1 * 1024 ** 3)
     manifest = plan(tmp, tmp / "Studies")
-    assert run(tmp, manifest) == 0
+    assert run(tmp, manifest) == batch.EXIT_FLOOR
     assert [s["status"] for s in states(tmp)] == ["stopped_floor"]
     assert calls(tmp) == []
     assert "Remaining" in next((tmp / "reports").glob("*.md")).read_text()
@@ -347,3 +351,33 @@ def test_second_run_is_refused_while_the_lock_is_held(env):
         fcntl.flock(held, fcntl.LOCK_EX)
         assert run(tmp, manifest) == 2
     assert calls(tmp) == []
+
+
+def test_partial_upload_is_not_mistaken_for_done(env):
+    """stems + .als on pCloud without the marker = an interrupted upload: redo the track."""
+    tmp = env
+    touch(tmp / "Studies" / "a.mp3")
+    manifest = plan(tmp, tmp / "Studies")
+    row = dict(zip(batch.COLUMNS, manifest.read_text().splitlines()[1].split("\t")))
+    dest = Path(row["dest"])
+    (dest / "a_120bpm_stems").mkdir(parents=True)
+    touch(dest / "a_120bpm.als")
+    assert run(tmp, manifest) == 0
+    assert [s["status"] for s in states(tmp)] == ["done"]
+    assert (dest / batch.DONE_MARKER).exists()
+    assert "split" in (tmp / "roadie.log").read_text()
+
+
+def test_upload_resumes_from_kept_work_dir(env, monkeypatch):
+    """After an upload failure, the next run uploads the kept work dir without re-splitting."""
+    tmp = env
+    touch(tmp / "Studies" / "a.mp3")
+    manifest = plan(tmp, tmp / "Studies")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "1")
+    assert run(tmp, manifest) == 3
+    splits = (tmp / "roadie.log").read_text().count("split")
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    assert run(tmp, manifest) == 0
+    assert (tmp / "roadie.log").read_text().count("split") == splits   # no second split
+    assert [s["status"] for s in states(tmp)] == ["upload_failed", "done"]
+    assert list((tmp / "cache" / "work").iterdir()) == []
