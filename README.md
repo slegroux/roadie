@@ -48,13 +48,26 @@ into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
 
 `roadie als <stems_dir>` writes `<name>.als` next to the stems folder (`-o` to
-choose, `-f` to overwrite). It copies the audio tracks of your empty template
+choose, `-f` to overwrite), and makes that folder a Live project (an empty
+`Ableton Project Info` folder), so ⌘S in Live saves the set in place. It copies the audio tracks of your empty template
 (`~/Music/Ableton/User Library/Templates/empty.als`, `--template` overrides), one
 per stem, each with a warped clip on the same bar line `roadie load` uses, the
 measured tempo, `--headroom` dB of fader, and a locator per detected section
 (`--no-locators` skips the detection). The `drums` composite is muted when the
 `drums_*` parts are there. `roadie sections` also saves `sections.json` into the
 stems folder (`--no-write` skips it).
+
+**Energy lanes.** `roadie als` also draws each stem's energy as automation under
+its clip. Every stem track gets an empty Audio Effect Rack named **Energy** (no
+chains, so the audio passes through untouched) whose Macro 1 carries the stem's
+mean power per bar: the top of the lane is the loudest bar of any stem, the bottom
+is 40 dB below it, so a quiet hat line reads as quiet next to the bass. The Main
+track gets the same lane for the whole mix, 12 dB deep, because a mastered track
+moves much less than a stem (on Off Gerlach 95% of bars sit within 6 dB of the
+loudest). The set opens in automation mode with each track showing its Energy
+lane, aligned with the clips and the locators (`A` toggles the view). The macro is mapped to nothing, so the lanes are a
+read-only map; `--no-energy` leaves them out. Reading the stems adds about 8 s
+on a 5-minute track.
 
 The `.als` format is gzipped XML. The track and clip layout match a project Live
 12.2.7 saved itself. Live also stores each sample's size and a 16-bit checksum

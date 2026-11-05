@@ -31,6 +31,14 @@ Live reported every stem missing. Type 1, a path relative to the .als file, is
 what Live 12 writes for a sample beside or above the set (e.g. a glacier.als
 referencing ../Teho - Glacier 3000.mp3), so that is what this writes.
 
+ENERGY LANES. Each stem track gets an empty Audio Effect Rack named "Energy"
+(no chains, so it passes audio untouched) whose Macro 1 is automated with the
+stem's mean power per bar: dB against the loudest bar of any stem, 0 at
+ENERGY_RANGE_DB below it, 127 at it. The Main track gets the same lane for the
+sum of the stems against its own loudest bar, MAIN_RANGE_DB deep. An unmapped macro changes no sound,
+so the curves are a read-only map under each clip. The set opens in automation
+mode with each track's lane set to its Energy macro, so they show straight away. The rack is copied from energy_rack.xml (a rack Live 12.2.7 saved).
+
 KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
   * Clip colours are palette INDICES (not RGB like the bridge's), taken per stem
     name from a project Live produced. Unknown names get 0.
@@ -51,6 +59,7 @@ if os.path.exists(_venv_py) and sys.executable != _venv_py and "VIRTUAL_ENV" not
 import argparse
 import copy
 import gzip
+import math
 import re
 import string
 import xml.etree.ElementTree as ET
@@ -63,6 +72,27 @@ DEFAULT_TEMPLATE = os.path.expanduser(
 COLOURS = {"drums_kick": 14, "bass": 14, "drums": 14, "drums_toms": 5,
            "drums_crash": 6, "drums_snare": 21, "drums_hh": 9, "drums_ride": 65,
            "synths": 4, "vocals": 5}
+
+ENERGY_RACK = os.path.join(os.path.dirname(_real_script), "energy_rack.xml")
+ENERGY_RANGE_DB = 40.0       # quietest bar drawn above 0, below the loudest
+# A mastered mix moves far less than a stem: on Off Gerlach 95% of bars sit within
+# 6.1 dB of the loudest, so 40 dB drew Main as a flat line at the top. 12 dB puts
+# the breakdown at about half height.
+MAIN_RANGE_DB = 12.0
+ENERGY_HOP = 2048            # samples per power reading
+BEATS_PER_BAR = 4
+PRE_ROLL = "-63072000"       # Live's time for an envelope's default value
+# A track's shown automation lane names a device and a parameter by index. Read
+# off the Off Gerlach set after Energy -> Energy was picked by hand and Live saved
+# it: (1, 1) on every track whose only device is the rack; an untouched track came
+# back as (2, 1), the mixer. So devices count from 1, and a rack's Macro 1 is its
+# parameter 1 (0 is the device on/off switch).
+LANE_FIRST_DEVICE = 1
+LANE_MACRO_1 = 1
+# Live treats a folder holding this (even empty) as a Live project, and saves a
+# set inside it in place; a set outside any project gets a new "<name> Project"
+# folder made around it on the first save.
+PROJECT_INFO = "Ableton Project Info"
 
 # Track ids and pointee ids are different pools; see the module docstring.
 TRACK_TAGS = ("MidiTrack", "AudioTrack", "ReturnTrack", "MainTrack",
@@ -351,9 +381,12 @@ def set_locators(root, locators):
 
 
 def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
-              headroom_db=6.0, locators=None, rel_dir=None, mute=()):
+              headroom_db=6.0, locators=None, rel_dir=None, mute=(),
+              energy=None, main_energy=None, rack=None):
     """Edit `root` (a parsed template) in place. `stems` is the ordered
-    [(name, absolute_path)]. Returns the list of track names written."""
+    [(name, absolute_path)]. `energy` {name: [(beat, value)]} and `main_energy`
+    [(beat, value)] add energy lanes (see the module docstring). Returns the
+    list of track names written."""
     tracks_el = root.find("LiveSet/Tracks")
     audio = [t for t in tracks_el if t.tag == "AudioTrack"]
     if not audio:
@@ -374,14 +407,119 @@ def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
             else os.path.basename(path)
         clip = make_clip(name, path, rel, start_beat, trim_beats, period,
                          warp_map, COLOURS.get(name, 0), disabled=name in mute)
-        tracks_el.insert(slot + i, clone_track(
-            proto, next_track + i, ids, name, COLOURS.get(name, 0), gain, [clip]))
+        track = clone_track(proto, next_track + i, ids, name, COLOURS.get(name, 0),
+                            gain, [clip])
+        if energy and name in energy:
+            rack = rack if rack is not None else read_rack()
+            add_energy_lane(track, ids, energy[name], rack)
+        tracks_el.insert(slot + i, track)
+    if main_energy:
+        rack = rack if rack is not None else read_rack()
+        add_energy_lane(root.find("LiveSet/MainTrack"), ids, main_energy, rack)
+    if energy or main_energy:
+        # Open in automation mode (the A key), so every lane shows straight away.
+        _child(root, "LiveSet/AutomationMode").set("Value", "true")
 
     pointee.set("Value", str(next(ids)))
     set_tempo(root, bpm)
     if locators is not None:
         set_locators(root, locators)
     return [n for n, _ in stems]
+
+
+# --- energy lanes ------------------------------------------------------------
+
+def bar_power(path, beat_of, first_beat=0.0, hop=ENERGY_HOP):
+    """Mean power (mean square, channels averaged) of `path` per arrangement bar.
+
+    `beat_of(sec)` maps a time in the file to an arrangement beat; readings
+    before `first_beat` (the trimmed lead-in, which never plays) are dropped.
+    Returns {bar_index: power}, bar 0 starting at beat 0."""
+    import numpy as np
+    import soundfile as sf
+    rate = sf.info(path).samplerate
+    sums, counts, pos = {}, {}, 0
+    for block in sf.blocks(path, blocksize=hop, dtype="float32", always_2d=True):
+        beat = beat_of((pos + len(block) / 2.0) / rate)
+        pos += len(block)
+        if beat < first_beat:
+            continue
+        bar = int(math.floor(beat / BEATS_PER_BAR))
+        sums[bar] = sums.get(bar, 0.0) + float(np.mean(np.square(block, dtype=np.float64)))
+        counts[bar] = counts.get(bar, 0) + 1
+    return {b: sums[b] / counts[b] for b in sums}
+
+
+def peak_db(*powers):
+    """dB of the loudest bar across one or more bar_power results."""
+    top = max([p for pw in powers for p in pw.values()] or [0.0])
+    return 10 * math.log10(top) if top > 0 else 0.0
+
+
+def energy_points(power, ref_db, range_db=ENERGY_RANGE_DB):
+    """[(beat, 0..127)] at each bar start: dB against `ref_db`, `range_db` deep."""
+    out = []
+    for bar in sorted(power):
+        db = 10 * math.log10(power[bar]) if power[bar] > 0 else -1e9
+        level = min(1.0, max(0.0, (db - ref_db + range_db) / range_db))
+        out.append((float(bar * BEATS_PER_BAR), round(127.0 * level, 2)))
+    return out
+
+
+def _child(parent, path):
+    """parent.find(path), creating each missing element on the way."""
+    for tag in path.split("/"):
+        nxt = parent.find(tag)
+        parent = nxt if nxt is not None else ET.SubElement(parent, tag)
+    return parent
+
+
+def add_energy_lane(track, ids, points, rack_proto):
+    """Put a copy of `rack_proto` first on `track`'s devices and automate its
+    Macro 1 with `points` [(beat, value)]. Pointee ids come from `ids`."""
+    rack = copy.deepcopy(rack_proto)
+    for el in rack.iter():
+        if _is_pointee(el):
+            el.set("Id", str(next(ids)))
+    devices = _child(track, "DeviceChain/DeviceChain/Devices")
+    rack.set("Id", str(max([int(d.get("Id", 0)) for d in devices] or [-1]) + 1))
+    devices.insert(0, rack)
+    first = points[0][1] if points else 0.0
+    rack.find("MacroControls.0/Manual").set("Value", num(first))
+
+    envs = _child(track, "AutomationEnvelopes/Envelopes")
+    env = ET.SubElement(envs, "AutomationEnvelope", Id=str(len(envs)))
+    ET.SubElement(ET.SubElement(env, "EnvelopeTarget"), "PointeeId",
+                  Value=rack.find("MacroControls.0/AutomationTarget").get("Id"))
+    auto = ET.SubElement(env, "Automation")
+    events = ET.SubElement(auto, "Events")
+    ET.SubElement(events, "FloatEvent", Id="0", Time=PRE_ROLL, Value=num(first))
+    for i, (beat, value) in enumerate(points, 1):
+        ET.SubElement(events, "FloatEvent", Id=str(i), Time=num(beat), Value=num(value))
+    view = ET.SubElement(auto, "AutomationTransformViewState")
+    ET.SubElement(view, "IsTransformPending", Value="false")
+    ET.SubElement(view, "TimeAndValueTransforms")
+    show_lane(track, LANE_FIRST_DEVICE, LANE_MACRO_1)
+    return rack
+
+
+def show_lane(track, device, parameter):
+    """Make `track`'s first automation lane the one for `device`/`parameter`
+    (Live's lane indices, see LANE_FIRST_DEVICE), so it is what the track shows
+    when the set opens in automation mode."""
+    lanes = _child(track, "DeviceChain/AutomationLanes/AutomationLanes")
+    lane = lanes.find("AutomationLane")
+    if lane is None:
+        lane = ET.SubElement(lanes, "AutomationLane", Id="0")
+        for tag, val in (("SelectedDevice", "0"), ("SelectedEnvelope", "0"),
+                         ("IsContentSelectedInDocument", "false"), ("LaneHeight", "68")):
+            ET.SubElement(lane, tag, Value=val)
+    _child(lane, "SelectedDevice").set("Value", str(device))
+    _child(lane, "SelectedEnvelope").set("Value", str(parameter))
+
+
+def read_rack(path=ENERGY_RACK):
+    return ET.parse(path).getroot()
 
 
 def write_set(root, out):
@@ -421,6 +559,8 @@ def main(argv=None):
                     help="place clips at the raw file start")
     ap.add_argument("--no-locators", action="store_true",
                     help="skip section detection")
+    ap.add_argument("--no-energy", action="store_true",
+                    help="skip the per-stem energy automation lanes")
     ap.add_argument("-f", "--force", action="store_true",
                     help="overwrite the output if it exists")
     args = ap.parse_args(argv)
@@ -466,11 +606,29 @@ def main(argv=None):
         locators = [dict(l, time=max(0.0, l["time"]))
                     for l in sections_to_locators(secs, period, start - trim / period)]
 
+    energy = main_energy = None
+    if not args.no_energy:
+        trim_beats = sample_beats(trim, period, warp_map)
+        beat_of = lambda sec: start + sample_beats(sec, period, warp_map) - trim_beats
+        power = {n: bar_power(paths[n], beat_of, start) for n in order}
+        audible = [power[n] for n in order if n not in mute]
+        ref = peak_db(*audible)
+        energy = {n: energy_points(power[n], ref) for n in order}
+        total = {}
+        for pw in audible:
+            for bar, p in pw.items():
+                total[bar] = total.get(bar, 0.0) + p
+        main_energy = energy_points(total, peak_db(total), MAIN_RANGE_DB)
+
     root = read_set(args.template)
     rel_dir = os.path.relpath(stems_dir, os.path.dirname(out))
     build_set(root, [(n, paths[n]) for n in order], start, trim, period, warp_map,
-              bpm, args.headroom, locators, rel_dir, mute)
+              bpm, args.headroom, locators, rel_dir, mute, energy, main_energy)
     write_set(root, out)
+    if os.path.dirname(out) == os.path.dirname(stems_dir):
+        # The track folder (WAV, stems, .als) becomes the Live project, so ⌘S
+        # saves this set where it is instead of nesting a new project folder.
+        os.makedirs(os.path.join(os.path.dirname(out), PROJECT_INFO), exist_ok=True)
 
     print("wrote %s" % out)
     print("  %d tracks, %.3f BPM, clips at bar %.2f, %s locators"
@@ -478,6 +636,9 @@ def main(argv=None):
              "no" if locators is None else len(locators)))
     if mute:
         print("  'drums' clip is muted: the drum parts sum back to it")
+    if energy:
+        print("  energy lanes: Macro 1 of an 'Energy' rack on every stem and on Main, "
+              "one point per bar, shown when the set opens")
 
 
 if __name__ == "__main__":
