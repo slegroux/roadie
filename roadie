@@ -7,6 +7,7 @@
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
+#   roadie batch plan|run|verify-sources ...   unattended overnight batch   (batch.py)
 #   roadie stats                     summarise the local usage log
 #
 # `roadie <command> --help` shows that command's own options. Every argument
@@ -128,6 +129,10 @@ case "$cmd" in
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
   scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
   als)      run_logged als      "$(first_dir "$@")" "$REPO/als_writer.py" "$@" ;;
+  batch)
+    # Not logged to the usage log: each track it processes calls roadie itself.
+    PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
+    exec "$PY" "$REPO/batch.py" "$@" ;;
   stats)
     if [[ -z "$LOG" ]]; then echo "usage log is off (ROADIE_LOG is empty)"; exit 0; fi
     if [[ ! -s "$LOG" ]]; then echo "no usage logged yet ($LOG)"; exit 0; fi
