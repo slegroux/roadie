@@ -94,6 +94,14 @@ out = ~/Projects/Music/slgMusProd/Studies
 |---|---|---|
 | `out` | folder `roadie split` writes the WAV and `_stems` folder into | the current directory |
 
+A configured `out` is treated as a studies library: `roadie split` writes into
+`<out>/<Artist>/`, the artist being the title before its first ` - `
+(`Matador - Eternity` → `Matador/`, `PML - Under Water` → `PML/`). An existing
+folder named for the artist or for their last name is reused, so
+`Marc Holstege - Mangata` lands in `Holstege/` if you already have one. A title
+with no ` - ` (a live set) stays in `out`; pass `-o` to place it. An explicit
+`-o` always writes exactly there, ungrouped (`yt2stems.sh -a` groups by hand).
+
 Precedence, highest first: the command-line flag (`roadie split -o DIR`), then the
 config file, then the built-in default. Config applies only through the `roadie`
 command; the underlying scripts run directly (`yt2stems`, `stems2live`) ignore it.

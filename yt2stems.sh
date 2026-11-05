@@ -2,8 +2,8 @@
 # Pull one of your own sets/mixes off YouTube, convert to Ableton-ready WAV,
 # optionally split into stems. Code lives in this repo; audio never does.
 #
-#   yt2stems.sh <url>          [-o DIR] [-s] [-d] [-m MODEL] [-f]
-#   yt2stems.sh --file <path>  [-o DIR] [-s] [-d] [-m MODEL] [-f]
+#   yt2stems.sh <url>          [-o DIR] [-a] [-s] [-d] [-m MODEL] [-f]
+#   yt2stems.sh --file <path>  [-o DIR] [-a] [-s] [-d] [-m MODEL] [-f]
 #
 #   --file P   process a local audio file instead of fetching a URL. Everything
 #              downstream is identical: merge, BPM tag, drum split, flat layout.
@@ -11,6 +11,12 @@
 #              compound on top of codec artifacts, so a purchased WAV/FLAC gives
 #              cleaner stems than a 133kbps YouTube transcode ever will.
 #   -o DIR     write here (created if missing). Default: current directory.
+#   -a         group by artist: write into DIR/<Artist>/, the artist being the
+#              title before its first " - " (first credited name of several
+#              falls out of the last-name match below). An existing folder named
+#              for the artist, or for their last name, is reused: "Marc Holstege
+#              - Mangata" lands in an existing Holstege/. A title with no " - "
+#              stays in DIR.
 #   -s         also split into stems (needs demucs).
 #   -d         then split the drums stem into kick/snare/toms/hh/ride/crash
 #              (implies -s; needs audio-separator). SLOW — see below.
@@ -129,13 +135,14 @@ detect_bpm () {
 
 DRUMSEP_MODEL="MDX23C-DrumSep-aufr33-jarredou.ckpt"
 DRUM_PARTS=(kick snare toms hh ride crash)
-URL="" SRCFILE="" OUTDIR="" STEMS=0 DRUMS=0 FORCE=0 MODEL="htdemucs_6s"
+URL="" SRCFILE="" OUTDIR="" BY_ARTIST=0 STEMS=0 DRUMS=0 FORCE=0 MODEL="htdemucs_6s"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --file|-i) SRCFILE="${2:-}"; shift 2 ;;
     -o) OUTDIR="${2:-}"; shift 2 ;;
     -m) MODEL="${2:-}"; shift 2 ;;
+    -a) BY_ARTIST=1; shift ;;
     -s) STEMS=1; shift ;;
     -d) DRUMS=1; STEMS=1; shift ;;          # -d is useless without the drums stem
     -f) FORCE=1; shift ;;
@@ -178,6 +185,25 @@ else
   NAME="${NAME%.*}"
 fi
 [[ -n "$NAME" ]] || { echo "couldn't resolve a name from the input" >&2; exit 1; }
+
+# -a: before WAV/DEST are built, so the resume checks below look in the artist
+# folder. Names are --restrict-filenames shaped here, so " - " is "_-_".
+if [[ $BY_ARTIST -eq 1 ]]; then
+  if [[ "$NAME" == *_-_* ]]; then
+    artist="${NAME%%_-_*}"; artist="${artist//_/ }"
+    lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+    want=$(lc "$artist") last=$(lc "${artist##* }") pick="$artist"
+    for d in "$OUT"/*/; do
+      [[ -d "$d" ]] || continue
+      b=$(basename "$d"); lb=$(lc "$b")
+      if [[ "$lb" == "$want" ]]; then pick="$b"; break; fi
+      [[ "$lb" == "$last" ]] && pick="$b"
+    done
+    OUT="$OUT/$pick"; mkdir -p "$OUT"
+  else
+    echo "no ' - ' in the title, so no artist folder: writing to $OUT (-o picks one)" >&2
+  fi
+fi
 
 WAV="$OUT/$NAME.wav"
 DEST="$OUT/${NAME}_stems"

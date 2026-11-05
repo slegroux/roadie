@@ -257,6 +257,27 @@ def test_split_uses_out_from_the_config_when_o_is_not_given(tmp_path):
     assert out.is_dir()
 
 
+@pytest.mark.parametrize("title, existing, folder", [
+    ("Marc Holstege - Mangata", "Holstege", "Holstege"),   # last-name folder reused
+    ("Kevin de Vries - Dance", None, "Kevin de Vries"),     # new artist folder
+    ("Teho live at Glacier", None, None),                   # no artist: stays in out
+])
+def test_split_with_config_out_groups_by_artist(tmp_path, title, existing, folder):
+    env, _ = _fake_tools(tmp_path)
+    env["ROADIE_LOG"] = ""
+    env["ROADIE_CONFIG"] = str(tmp_path / "config")
+    out = tmp_path / "studies"
+    (tmp_path / "config").write_text("out = %s\n" % out)
+    if existing:
+        (out / existing).mkdir(parents=True)
+    src = tmp_path / (title + ".wav")
+    src.write_bytes(b"RIFF")
+    r = subprocess.run([ROADIE, "split", str(src)], capture_output=True, text=True,
+                       timeout=60, env=env, cwd=str(tmp_path), check=False)
+    want = out / folder if folder else out
+    assert "==> %s\n" % want in r.stdout, r.stdout + r.stderr
+
+
 def test_an_explicit_o_beats_the_config(tmp_path):
     cfg, flag = tmp_path / "from-config", tmp_path / "from-flag"
     _split_out(tmp_path, "-o", str(flag), config="out=%s\n" % cfg)
