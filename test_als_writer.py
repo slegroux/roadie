@@ -290,8 +290,11 @@ def test_energy_lane_puts_a_rack_on_the_track_and_automates_its_macro(template, 
         env = [e for e in track.iter("AutomationEnvelope")
                if v(e, "EnvelopeTarget/PointeeId") == target]
         assert len(env) == 1
+        lane = track.find("DeviceChain/AutomationLanes/AutomationLanes/AutomationLane")
+        assert (v(lane, "SelectedDevice"), v(lane, "SelectedEnvelope")) == ("1", "1")
         times = [float(ev.get("Time")) for ev in env[0].iter("FloatEvent")]
         assert times[0] < 0 and times[1:] == sorted(times[1:])   # default, then by time
+    assert v(root, "LiveSet/AutomationMode") == "true"     # lanes show on open
     kick = audio_tracks(root)[0]
     vals = [float(ev.get("Value")) for ev in kick.iter("FloatEvent")]
     assert vals == [127.0, 127.0, 40.0]

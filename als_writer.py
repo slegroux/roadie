@@ -36,8 +36,8 @@ ENERGY LANES. Each stem track gets an empty Audio Effect Rack named "Energy"
 stem's mean power per bar: dB against the loudest bar of any stem, 0 at
 ENERGY_RANGE_DB below it, 127 at it. The Main track gets the same lane for the
 sum of the stems against its own loudest bar, MAIN_RANGE_DB deep. An unmapped macro changes no sound,
-so the curves are a read-only map under each clip; press A in Arrangement view to
-see them all. The rack is copied from energy_rack.xml (a rack Live 12.2.7 saved).
+so the curves are a read-only map under each clip. The set opens in automation
+mode with each track's lane set to its Energy macro, so they show straight away. The rack is copied from energy_rack.xml (a rack Live 12.2.7 saved).
 
 KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
   * Clip colours are palette INDICES (not RGB like the bridge's), taken per stem
@@ -82,6 +82,17 @@ MAIN_RANGE_DB = 12.0
 ENERGY_HOP = 2048            # samples per power reading
 BEATS_PER_BAR = 4
 PRE_ROLL = "-63072000"       # Live's time for an envelope's default value
+# A track's shown automation lane names a device and a parameter by index. Read
+# off the Off Gerlach set after Energy -> Energy was picked by hand and Live saved
+# it: (1, 1) on every track whose only device is the rack; an untouched track came
+# back as (2, 1), the mixer. So devices count from 1, and a rack's Macro 1 is its
+# parameter 1 (0 is the device on/off switch).
+LANE_FIRST_DEVICE = 1
+LANE_MACRO_1 = 1
+# Live treats a folder holding this (even empty) as a Live project, and saves a
+# set inside it in place; a set outside any project gets a new "<name> Project"
+# folder made around it on the first save.
+PROJECT_INFO = "Ableton Project Info"
 
 # Track ids and pointee ids are different pools; see the module docstring.
 TRACK_TAGS = ("MidiTrack", "AudioTrack", "ReturnTrack", "MainTrack",
@@ -405,6 +416,9 @@ def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
     if main_energy:
         rack = rack if rack is not None else read_rack()
         add_energy_lane(root.find("LiveSet/MainTrack"), ids, main_energy, rack)
+    if energy or main_energy:
+        # Open in automation mode (the A key), so every lane shows straight away.
+        _child(root, "LiveSet/AutomationMode").set("Value", "true")
 
     pointee.set("Value", str(next(ids)))
     set_tempo(root, bpm)
@@ -485,7 +499,23 @@ def add_energy_lane(track, ids, points, rack_proto):
     view = ET.SubElement(auto, "AutomationTransformViewState")
     ET.SubElement(view, "IsTransformPending", Value="false")
     ET.SubElement(view, "TimeAndValueTransforms")
+    show_lane(track, LANE_FIRST_DEVICE, LANE_MACRO_1)
     return rack
+
+
+def show_lane(track, device, parameter):
+    """Make `track`'s first automation lane the one for `device`/`parameter`
+    (Live's lane indices, see LANE_FIRST_DEVICE), so it is what the track shows
+    when the set opens in automation mode."""
+    lanes = _child(track, "DeviceChain/AutomationLanes/AutomationLanes")
+    lane = lanes.find("AutomationLane")
+    if lane is None:
+        lane = ET.SubElement(lanes, "AutomationLane", Id="0")
+        for tag, val in (("SelectedDevice", "0"), ("SelectedEnvelope", "0"),
+                         ("IsContentSelectedInDocument", "false"), ("LaneHeight", "68")):
+            ET.SubElement(lane, tag, Value=val)
+    _child(lane, "SelectedDevice").set("Value", str(device))
+    _child(lane, "SelectedEnvelope").set("Value", str(parameter))
 
 
 def read_rack(path=ENERGY_RACK):
@@ -595,6 +625,10 @@ def main(argv=None):
     build_set(root, [(n, paths[n]) for n in order], start, trim, period, warp_map,
               bpm, args.headroom, locators, rel_dir, mute, energy, main_energy)
     write_set(root, out)
+    if os.path.dirname(out) == os.path.dirname(stems_dir):
+        # The track folder (WAV, stems, .als) becomes the Live project, so ⌘S
+        # saves this set where it is instead of nesting a new project folder.
+        os.makedirs(os.path.join(os.path.dirname(out), PROJECT_INFO), exist_ok=True)
 
     print("wrote %s" % out)
     print("  %d tracks, %.3f BPM, clips at bar %.2f, %s locators"
@@ -604,7 +638,7 @@ def main(argv=None):
         print("  'drums' clip is muted: the drum parts sum back to it")
     if energy:
         print("  energy lanes: Macro 1 of an 'Energy' rack on every stem and on Main, "
-              "one point per bar (press A in Arrangement view)")
+              "one point per bar, shown when the set opens")
 
 
 if __name__ == "__main__":
