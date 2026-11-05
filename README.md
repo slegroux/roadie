@@ -56,6 +56,18 @@ measured tempo, `--headroom` dB of fader, and a locator per detected section
 `drums_*` parts are there. `roadie sections` also saves `sections.json` into the
 stems folder (`--no-write` skips it).
 
+**Energy lanes.** `roadie als` also draws each stem's energy as automation under
+its clip. Every stem track gets an empty Audio Effect Rack named **Energy** (no
+chains, so the audio passes through untouched) whose Macro 1 carries the stem's
+mean power per bar: the top of the lane is the loudest bar of any stem, the bottom
+is 40 dB below it, so a quiet hat line reads as quiet next to the bass. The Main
+track gets the same lane for the whole mix, 12 dB deep, because a mastered track
+moves much less than a stem (on Off Gerlach 95% of bars sit within 6 dB of the
+loudest). Press `A` in Arrangement view to show every lane at once, aligned with
+the clips and the locators. The macro is mapped to nothing, so the lanes are a
+read-only map; `--no-energy` leaves them out. Reading the stems adds about 8 s
+on a 5-minute track.
+
 The `.als` format is gzipped XML. The track and clip layout match a project Live
 12.2.7 saved itself. Live also stores each sample's size and a 16-bit checksum
 (`OriginalCrc`, CRC-16 of the first 16 KiB) and reports the file missing if they

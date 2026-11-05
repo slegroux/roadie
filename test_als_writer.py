@@ -269,3 +269,47 @@ def test_the_real_template_builds_with_unique_ids(stems):
             if e.find("EnvelopeTarget/PointeeId").get("Value") == target]
     assert lane and all(ev.get("Value") == "125.004"
                         for e in lane for ev in e.iter("FloatEvent"))
+
+
+# --- energy lanes --------------------------------------------------------------
+
+def test_energy_lane_puts_a_rack_on_the_track_and_automates_its_macro(template, stems):
+    lanes = {"drums_kick": [(32.0, 127.0), (36.0, 40.0)], "vocals": [(32.0, 0.0)]}
+    root = build(template, stems, energy=lanes, main_energy=[(32.0, 100.0)])
+    for track in audio_tracks(root) + [root.find("LiveSet/MainTrack")]:
+        name = track.find("Name/EffectiveName")
+        name = name.get("Value") if name is not None else "Main"
+        racks = track.findall("DeviceChain/DeviceChain/Devices/AudioEffectGroupDevice")
+        if name == "drums":                       # no lane asked for: untouched
+            assert not racks
+            continue
+        assert len(racks) == 1 and v(racks[0], "UserName") == "Energy"
+        assert v(racks[0], "On/Manual") == "true"
+        assert racks[0].find("Branches") is not None and not len(racks[0].find("Branches"))
+        target = racks[0].find("MacroControls.0/AutomationTarget").get("Id")
+        env = [e for e in track.iter("AutomationEnvelope")
+               if v(e, "EnvelopeTarget/PointeeId") == target]
+        assert len(env) == 1
+        times = [float(ev.get("Time")) for ev in env[0].iter("FloatEvent")]
+        assert times[0] < 0 and times[1:] == sorted(times[1:])   # default, then by time
+    kick = audio_tracks(root)[0]
+    vals = [float(ev.get("Value")) for ev in kick.iter("FloatEvent")]
+    assert vals == [127.0, 127.0, 40.0]
+    ids = [int(e.get("Id")) for e in root.iter()
+           if "Id" in e.attrib and (e.tag.endswith("Target") or e.tag == "Pointee")]
+    assert len(ids) == len(set(ids))
+    assert int(v(root, "LiveSet/NextPointeeId")) > max(ids)
+
+
+def test_bar_power_and_points_follow_loudness_on_the_bar_grid(tmp_path):
+    sf = pytest.importorskip("soundfile")
+    bar = int(RATE * PERIOD * 4)
+    x = np.concatenate([0.5 * np.ones(bar), 0.05 * np.ones(bar), np.zeros(bar)])
+    p = tmp_path / "s.wav"
+    sf.write(str(p), x.astype("float32"), RATE)
+    power = aw.bar_power(str(p), lambda sec: 32.0 + sec / PERIOD, first_beat=32.0, hop=256)
+    assert sorted(power) == [8, 9, 10]                     # clips start on bar 9
+    pts = aw.energy_points(power, aw.peak_db(power))
+    assert [b for b, _ in pts] == [32.0, 36.0, 40.0]
+    assert pts[0][1] == 127.0 and 0 < pts[1][1] < 127.0 and pts[2][1] == 0.0
+    assert pts[1][1] == pytest.approx(127 * (1 - 20 / aw.ENERGY_RANGE_DB), abs=1)
