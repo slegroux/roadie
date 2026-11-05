@@ -112,6 +112,10 @@ def test_plan_excludes_conflicts_packs_processed_and_duplicates(env):
     for i in range(5):
         touch(ref / "Joachim FaderPro STEMS" / ("part%d.wav" % i))
         touch(ref / "Synth Pack" / ("riff%d.aif" % i))
+    for i in range(4):                                   # under 5 files, but stem-named
+        touch(ref / "Pastor X Faderpro - Stems (bpm120)" / ("Space STEMS %d.wav" % i))
+    for i in range(5):                                   # "Systems" is not "stems"
+        touch(ref / "Systems" / ("Track %d.mp3" % i))
     touch(ref / "Samples" / "hit.wav")
     touch(ref / "Live Project" / "x.wav")
     touch(ref / "._junk.mp3")
@@ -126,7 +130,9 @@ def test_plan_excludes_conflicts_packs_processed_and_duplicates(env):
                    "References/Full Circle Moment.wav",
                    "References/The Space In Between.mp3",
                    "References/The Space In Between (Ben Bohmer Remix).mp3",
-                   "References/10A - 91 - Some Artist - Night Drive [abcdefghijk].m4a"}
+                   "References/10A - 91 - Some Artist - Night Drive [abcdefghijk].m4a"} | \
+                  {"References/Systems/Track %d.mp3" % i for i in range(5)}
+    assert ex[str(ref / "Pastor X Faderpro - Stems (bpm120)" / "Space STEMS 0.wav")] == "stem pack"
     assert ex[str(st / "Carry On.mp3")].startswith("duplicate of")
     assert ex[str(ref / "Carry On.flac")] == "duplicate of %s" % (st / "Carry On.wav")
     assert ex[str(ref / "Kolsch_Full Circle Moment.mp3")] == \

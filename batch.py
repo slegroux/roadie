@@ -167,8 +167,12 @@ def collect(roots):
             if not audio:
                 continue
             n_aif = sum(os.path.splitext(f)[1].lower().lstrip(".") in AIF_EXTS for f in audio)
-            pack = len(audio) >= 5 and (re.search(r"stem|remix.?pack", tree + "/" + rel, re.I)
-                                        or n_aif * 2 >= len(audio))
+            # A folder named for stems needs only 2 files (the Pastor FaderPro pack
+            # has 4); the aif-majority rule keeps its 5-file floor. \bstems?\b, not
+            # "stem", so a folder called "Systems" is not a pack.
+            stem_named = re.search(r"\bstems?\b|remix.?pack", tree + "/" + rel, re.I)
+            pack = ((len(audio) >= 2 and stem_named)
+                    or (len(audio) >= 5 and n_aif * 2 >= len(audio)))
             skeys = {d: norm_key(d[:-len("_stems")]) for d in good_sdirs}
             for f in audio:
                 n_audio += 1
