@@ -38,6 +38,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie load <stems_dir>` | stems → the Live set that is open now | `stems2live.py` |
 | `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
+| `roadie card <stems_dir>` | a Markdown study note: sections, who plays where, entries and exits | `card.py` |
 | `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
 | `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
@@ -676,6 +677,33 @@ creates a stray one. Measured: names attached one section behind, a stray locato
 at the play head, and four of nine silently missing, because the toggle deletes
 when it lands on an existing cue. The single-cue rules are the ones
 `patches/0003-cue_points.patch` found (see *Legacy*).
+
+### Track card — `roadie card`
+
+`roadie card <stems_dir>` writes the study note you would otherwise take by hand
+while listening to a reference: an arrangement table (each section's Live bar,
+length, which stems play, what came in or went out, level against the track's
+average), an element map with one column per 4 bars, each stem's entries and exits
+in Live bars, the fill or dropout in the bar before each section, and a few
+measured observations (the longest stretch where nothing comes in or goes out, how
+far the breakdowns sit under the drops, mini-breaks, sections off the 8-bar grid).
+
+```
+bar     9       41      73      105     137
+        || |Drop 1     |Br |Bu |Drop 2     |
+kick    ███████████████·······▒████████████··
+bass    █▒·████████████····██████████████████
+hh      ███████████████····████████████████··
+synths  ·████████████████████████████████████
+```
+
+It prints to stdout and saves `card.md` in the stems folder. `-o <file>` writes it
+elsewhere; `-o <folder>` (a notes vault) writes `<folder>/<track name>.md`.
+`--no-write` saves nothing, even with `-o`; `--no-transitions` skips the drum-hit scan. It runs the same analysis as `roadie sections`, so the same limits
+apply: the element map needs the stem-activity method (a kick and a `bass` stem),
+the section names are rules, and `synths` is every pad, lead, arp and pluck
+together. On drum parts from separation, `toms` often follows the kick: that is
+bleed, not a tom part.
 
 ### Downbeat detectors — `--detector`
 

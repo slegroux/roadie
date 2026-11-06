@@ -14,7 +14,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROADIE = os.path.join(HERE, "roadie")
-SUBCOMMANDS = ("split", "load", "open", "sections", "scenes", "als", "batch", "stats")
+SUBCOMMANDS = ("split", "load", "open", "sections", "card", "scenes", "als", "batch", "stats")
 
 
 def _env():
@@ -52,7 +52,8 @@ def test_unknown_subcommand_exits_2_with_usage():
 
 
 @pytest.mark.parametrize("sub, script", [("load", "stems2live.py"),
-                                         ("sections", "sections.py")])
+                                         ("sections", "sections.py"),
+                                         ("card", "card.py")])
 def test_subcommand_help_is_the_scripts_own_help(sub, script):
     via = run(ROADIE, sub, "--help")
     direct = run(os.path.join(HERE, script), "--help")

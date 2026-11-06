@@ -5,6 +5,7 @@
 #   roadie load <stems_dir> [opts]   load stems into the open Live set (stems2live.py)
 #   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
+#   roadie card <stems_dir> [opts]   Markdown study note for the track (card.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
 #   roadie batch plan|run|verify-sources ...   unattended overnight batch   (batch.py)
@@ -128,6 +129,7 @@ case "$cmd" in
   load)     run_logged load     "$(first_dir "$@")" "$REPO/stems2live.py" "$@" ;;
   open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
+  card)     run_logged card     "$(first_dir "$@")" "$REPO/card.py" "$@" ;;
   scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
   als)      run_logged als      "$(first_dir "$@")" "$REPO/als_writer.py" "$@" ;;
   batch)

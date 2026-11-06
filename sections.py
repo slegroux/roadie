@@ -654,6 +654,12 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
         "sections": sections,
         "method": "stems",
         "phrase_offset_bars": int(offset),
+        # Which stems play in each bar, "0"/"1" per bar from the first section's
+        # start, with the same hysteresis and 4-bar minimum as the cuts. Every
+        # audible stem, not only the cut roles: the track card's element map reads it.
+        "presence": {n: "".join("1" if x else "0"
+                                for x in _despeckle(_hysteresis(act[n])))
+                     for n in used if n in act},
     }
 
 
