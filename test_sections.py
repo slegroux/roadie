@@ -769,6 +769,80 @@ def test_a_muffled_kick_counts_as_no_kick(tmp_path):
     assert 56 not in [s["beat"] // 4 for s in secs]          # ...and do not split off a section of their own
 
 
+def _write_tones(folder, spans_by_stem, n_bars):
+    """stem -> [(first_bar, last_bar_exclusive, amplitude, hz)]: like _write_stems, but
+    each span sets its own frequency, so leakage can sit in another band."""
+    folder.mkdir(exist_ok=True)
+    t = np.arange(int(n_bars * BAR_SEC * SR_STEMS)) / SR_STEMS
+    for name, spans in spans_by_stem.items():
+        y = np.zeros(len(t))
+        for a, b, amp, hz in spans:
+            sl = slice(int(a * BAR_SEC * SR_STEMS), int(b * BAR_SEC * SR_STEMS))
+            y[sl] += amp * np.sin(2 * np.pi * hz * t[sl])
+        sf.write(str(folder / (name + ".wav")), y.astype("float32"), SR_STEMS)
+    return str(folder)
+
+
+def test_tom_leakage_in_the_kick_stem_does_not_read_as_a_kick(tmp_path):
+    # Issue #8: in a breakdown the drum split leaves the toms (here 150 Hz, -12 dB
+    # full-band) in drums_kick. Read full-band that is still "playing"; under
+    # KICK_LOWPASS_HZ the kick is gone, so bars 32-47 are a section of their own.
+    folder = _write_tones(tmp_path / "s", {
+        "drums_kick": [(0, 32, 1.0, 50.0), (32, 48, 0.25, 150.0), (48, 64, 1.0, 50.0)],
+        "drums_hh": [(0, 64, 0.8, 900.0)],
+        "bass": [(0, 64, 0.9, 80.0)],
+        "synths": [(0, 64, 0.7, 440.0)],
+    }, 64)
+    secs = _by_stems(folder)["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0, 32, 48]
+    assert "kick" not in secs[1]["stems"]
+
+
+def test_a_vocal_out_for_eight_bars_cuts_a_section_and_chops_do_not_fragment(tmp_path):
+    groove = {"drums_kick": [(0, 64, 1.0, 50.0)], "drums_hh": [(0, 64, 0.8, 900.0)],
+              "bass": [(0, 64, 0.9, 80.0)], "synths": [(0, 64, 0.7, 440.0)]}
+    held = dict(groove, vocals=[(16, 32, 0.6, 300.0)])          # in for 16 bars
+    secs = _by_stems(_write_tones(tmp_path / "held", held, 64))["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0, 16, 32]
+    assert "vocals" in secs[1]["stems"] and "vocals" not in secs[2]["stems"]
+    chops = dict(groove, vocals=[(b, b + 2, 0.6, 300.0) for b in range(16, 48, 4)])
+    secs = _by_stems(_write_tones(tmp_path / "chops", chops, 64))["sections"]
+    # 2-bar chops with 2-bar breaths are one vocal passage (bars 16-45): one cut in,
+    # one cut out, not a section per chop
+    assert [s["beat"] // 4 for s in secs] == [0, 16, 46]
+
+
+def _groove(n_bars, kick=None):
+    return {"drums_kick": kick or [(0, n_bars, 1.0, 50.0)], "drums_hh": [(0, n_bars, 0.8, 900.0)],
+            "bass": [(0, n_bars, 0.9, 80.0)], "synths": [(0, n_bars, 0.7, 440.0)]}
+
+
+def test_a_vocal_pickup_before_a_drop_does_not_take_the_drops_boundary(tmp_path):
+    layout = dict(_groove(64, kick=[(0, 16, 1.0, 50.0), (32, 64, 1.0, 50.0)]),
+                  vocals=[(30, 64, 0.6, 300.0)])               # in 2 bars before the drop
+    secs = _by_stems(_write_tones(tmp_path / "s", layout, 64))["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0, 16, 32]
+
+
+def test_a_vocal_sung_in_phrases_with_a_breath_between_counts_as_held(tmp_path):
+    spans = [(b, b + 7, 0.6, 300.0) for b in range(0, 32, 8)]   # 7 bars on, 1 off
+    layout = dict(_groove(64, kick=[(0, 32, 1.0, 50.0), (48, 64, 1.0, 50.0)]), vocals=spans)
+    secs = _by_stems(_write_tones(tmp_path / "s", layout, 64))["sections"]
+    assert "vocals" in secs[0]["stems"]
+
+
+def test_a_vocal_run_shorter_than_eight_bars_does_not_cut(tmp_path):
+    layout = dict(_groove(64), vocals=[(16, 21, 0.6, 300.0), (40, 46, 0.6, 300.0)])  # 5 and 6 bars
+    secs = _by_stems(_write_tones(tmp_path / "s", layout, 64))["sections"]
+    assert [s["beat"] // 4 for s in secs] == [0]
+
+
+def test_a_kick_with_nothing_under_the_cutoff_falls_back_to_full_band(tmp_path):
+    layout = _groove(64, kick=[(0, 32, 1.0, 1500.0), (48, 64, 1.0, 1500.0)])
+    res = _by_stems(_write_tones(tmp_path / "s", layout, 64))
+    assert res is not None and [s["beat"] // 4 for s in res["sections"]] == [0, 32, 48]
+
+
 def test_the_phrase_offset_is_estimated_when_structure_sits_off_the_cycle(tmp_path):
     res = _by_stems(_write_stems(tmp_path / "s", _layout(lead=4), 132))
     assert res["phrase_offset_bars"] == 4
