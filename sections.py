@@ -369,6 +369,11 @@ STEM_ON = 0.5             # activity above which a stem counts as playing...
 STEM_OFF = 0.3            # ...and below which it has stopped (hysteresis)
 STEM_MIN_RUN = 4          # bars a presence state must hold to count
 STEM_SNAP_BARS = 1        # snap a boundary to the phrase grid only this close
+KICK_LOWPASS_HZ = 70.0    # the kick's presence is read below this: a drum split leaks
+                          # the toms into drums_kick at 70-200 Hz. On Sainte Vie
+                          # "Light Beams" the breakdown's kick stem dropped only 12 dB
+                          # full-band (still "playing") but 24 dB under 70 Hz (issue #8)
+VOCAL_MIN_RUN = 8         # vocals cut a section only when in or out for this many bars
 STEM_NOVELTY_BARS = 4     # window either side when scoring the phrase offset
 
 class SectionsTooShort(ValueError):
@@ -382,19 +387,28 @@ STEM_ROLES = {
     "hats": ("drums_hh", "drums_ride"),
     "synths": ("synths",),
 }
-# Presence of these drives the boundaries; vocals are reported, not cut on —
-# they chop in and out too often to mark a section.
+# Presence of these drives the boundaries and the labels. Vocals cut too, but only
+# on a change that holds VOCAL_MIN_RUN bars: they chop in and out too often for the
+# 4-bar rule, yet a vocal leaving for 8+ bars is how some tracks change section
+# while the groove plays on. They never enter the labels.
 STEM_CUT_ROLES = ("kick", "bass", "hats", "synths")
 
 
-def _bar_db(path, edge_times):
+def _bar_db(path, edge_times, lowpass_hz=None):
     """Level of each bar of one stem, in dB. `edge_times` has n_bars + 1 entries.
 
     Streamed in blocks so a long set does not have to fit in memory: each block's
-    squared samples are added to the bar they fall in.
+    squared samples are added to the bar they fall in. With `lowpass_hz` the level
+    is read below that frequency (4th-order Butterworth, its state carried across
+    blocks so block edges leave no click).
     """
+    import scipy.signal as ss
     import soundfile as sf
     with sf.SoundFile(path) as f:
+        sos = zi = None
+        if lowpass_hz is not None and lowpass_hz < f.samplerate / 2:
+            sos = ss.butter(4, lowpass_hz, "low", fs=f.samplerate, output="sos")
+            zi = np.zeros((sos.shape[0], 2))
         idx = np.clip(np.round(np.asarray(edge_times) * f.samplerate).astype(np.int64),
                       0, f.frames)
         n_bars = len(idx) - 1
@@ -402,6 +416,8 @@ def _bar_db(path, edge_times):
         off = 0
         for block in f.blocks(blocksize=1 << 20, dtype="float32", always_2d=True):
             x = block.mean(axis=1).astype(np.float64)
+            if sos is not None:
+                x, zi = ss.sosfilt(sos, x, zi=zi)
             bar = np.searchsorted(idx, np.arange(off, off + len(x)), side="right") - 1
             ok = (bar >= 0) & (bar < n_bars)
             sums += np.bincount(bar[ok], weights=x[ok] ** 2, minlength=n_bars)
@@ -453,6 +469,21 @@ def _despeckle(b, n=STEM_MIN_RUN):
             b[i:j] = b[j]
         elif j - i < n and i > 0:
             b[i:j] = b[i - 1]
+        i = j
+    return b
+
+
+def _fill_gaps(b, n=STEM_MIN_RUN):
+    """Close off-runs shorter than `n` bars that sit between two on-runs: a vocal
+    sung in phrases with a bar's breath between them is one held vocal."""
+    b = b.copy()
+    i = 0
+    while i < len(b):
+        j = i
+        while j < len(b) and b[j] == b[i]:
+            j += 1
+        if not b[i] and i > 0 and j < len(b) and j - i < n:
+            b[i:j] = True
         i = j
     return b
 
@@ -591,12 +622,14 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
 
     db = {n: _bar_db(paths[n], edges) for n in used}
     act = {n: a for n, a in ((n, _activity(v)) for n, v in db.items()) if a is not None}
-    if kick_path == paths.get("drums"):   # composite-only folder: it stands in for the kick
-        if "drums" not in act:
-            return None
-        act["drums_kick"] = act["drums"]
-    if "drums_kick" not in act or "bass" not in act:
+    # The kick's PRESENCE is read under KICK_LOWPASS_HZ; its full-band level still
+    # counts towards the section energy below.
+    kick_act = _activity(_bar_db(kick_path, edges, lowpass_hz=KICK_LOWPASS_HZ))
+    if kick_act is None:                  # nothing under 70 Hz (a high-tuned kick):
+        kick_act = act.get(os.path.splitext(os.path.basename(kick_path))[0])
+    if kick_act is None or "bass" not in act:
         return None                       # the kick or the bass stem is silent
+    act["drums_kick"] = kick_act
 
     def role(name):
         have = [act[n] for n in STEM_ROLES[name] if n in act]
@@ -604,13 +637,24 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
 
     A = {r: role(r) for r in STEM_CUT_ROLES}
     present = {r: _despeckle(_hysteresis(A[r])) for r in STEM_CUT_ROLES}
-    vocals = _despeckle(_hysteresis(act["vocals"])) if "vocals" in act else np.zeros(n_bars, bool)
+    # Breaths between vocal phrases are filled BEFORE short runs are dropped: the
+    # other order folds a 7-on/1-off vocal into the off-run before each phrase.
+    vocals = (_despeckle(_fill_gaps(_hysteresis(act["vocals"])), VOCAL_MIN_RUN)
+              if "vocals" in act else np.zeros(n_bars, bool))
 
     state = np.stack([present[r] for r in STEM_CUT_ROLES], axis=1)
     change = [i for i in range(1, n_bars) if (state[i] != state[i - 1]).any()]
-    nov = _novelty(np.stack([A[r] for r in STEM_CUT_ROLES], axis=1))
+    vocal_change = [i for i in range(1, n_bars) if vocals[i] != vocals[i - 1]]
+    # The held vocal state votes on the phrase cycle too: a vocal cut is a cut, and a
+    # track whose only change is the vocal would otherwise snap it onto noise.
+    nov = _novelty(np.stack([A[r] for r in STEM_CUT_ROLES] + [vocals.astype(float)], axis=1))
     offset = estimate_phrase_offset(nov, phrase_bars)
+    # The stems' cuts win; a vocal cut is added only clear of every one of them, so
+    # a vocal pickup two bars before a drop cannot take the drop's boundary.
     cuts = _snap_bars(change, offset, phrase_bars, n_bars)
+    for v in _snap_bars(vocal_change, offset, phrase_bars, n_bars):
+        if all(abs(v - c) >= STEM_MIN_RUN for c in cuts):
+            cuts = sorted(cuts + [v])
     bounds = [0] + cuts + [n_bars]
 
     power = sum(10.0 ** (db[n] / 10.0) for n in used if n in act)

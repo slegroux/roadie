@@ -632,8 +632,17 @@ says that bar 1 is assumed at the first grid beat.
 on disk (`drums_kick`, or the `drums` composite when there are no drum parts, plus `bass`) it reads
 **per-bar stem activity**: each stem's level per bar, relative to that stem's own loud
 level, with a hysteresis threshold for "playing". Boundaries are where the set of
-playing stems changes (kick, bass, hats, synths; vocals are reported, not cut on). A
-**muffled breakdown kick** (about 22 dB under its loud level) counts as no kick. The
+playing stems changes (kick, bass, hats, synths), or where the vocal comes in or
+leaves and stays that way for 8 bars (shorter vocal chops don't cut). A
+**muffled breakdown kick** (about 22 dB under its loud level) counts as no kick, and the
+kick's presence is read **below 70 Hz**: a drum split leaks the toms into
+`drums_kick` at 70–200 Hz, which full-band would read as a kick still playing (sub-bass
+leaking under 70 Hz is not filtered out). A vocal cut never displaces a stem cut: it is
+added only 4+ bars clear of them, and a vocal sung in phrases with a bar's breath
+between them counts as held (Sainte
+Vie "Light Beams": the breakdown's kick stem fell 12 dB full-band, 24 dB under 70 Hz).
+The same reading finds the high-passed or removed kick of an 8-bar pre-drop or a
+4-bar break, which full-band missed on Einmusik's "Flare" and "Unlocked". The
 8-bar phrase cycle is **estimated from where the changes land** instead of assumed
 to start at the detected downbeat, and a boundary is snapped to it only when it is
 within a bar. A stem that is effectively silent (under -50 dB, or audible in fewer than 4 bars, like an empty ride) is ignored. Names are rules over which stems play: no kick is a Breakdown, kick and
