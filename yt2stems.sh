@@ -113,7 +113,9 @@ detect_bpm () {
     # alignment.json, which stems2live then reads instead of repeating this
     # analysis. Handed a lone kick stem the phase is near chance and the result
     # is not reusable, so the second pass would have to redo everything.
-    bpm_val=$("$py" "$aligner" "$1" --json 2>/dev/null | grep '"bpm":' | awk -F': ' '{printf "%.0f\n", $2}') || bpm_val=""
+    # Parsed as JSON, not grepped: the result holds more than one "bpm" key.
+    bpm_val=$("$py" "$aligner" "$1" --json 2>/dev/null \
+      | "$py" -c 'import json,sys; print("%.0f" % json.load(sys.stdin)["bpm"])' 2>/dev/null) || bpm_val=""
     if [[ -n "$bpm_val" ]]; then
       echo "$bpm_val"
       return 0

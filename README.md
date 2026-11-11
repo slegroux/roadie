@@ -566,10 +566,27 @@ the change is said on stderr; the result's `tempo_check` holds both numbers.
 name is a label, not evidence: on five reference tracks four were 2 BPM above
 what the audio locks to.
 
+**Then the grid is refitted to the kick attacks.** With a `drums_kick` stem,
+`beat_aligner` finds each kick's attack (the first sample above 10 % of the hit's
+peak, read at the file's own rate) and fits the tempo and phase to the on-beat
+ones, taking the whole BPM when it fits as well. On seven studio tracks the
+detector's beats sat 7–30 ms before the kick attack, a fixed offset (spread under
+2 ms); after the refit they sit on it. The fit is **steady** when every 30-second
+window with kicks in it has them on the grid and the windows agree within 15 ms.
+Only a steady fit is used, and it then overrules a drift verdict (next section);
+the result's `kick_grid` records the fit and `drift_overruled` says when it
+cleared one. With `--tempo` only the phase moves. `--no-kick-grid` (on
+`beat_aligner`, `roadie load` and `roadie als`) keeps the detector's grid. A broken
+beat or a sparse kick gives no verdict and changes nothing.
+
 ### Warping: only when the tempo actually drifts
 
 A warp map is written **only if drift is detected**. A set that holds one tempo is
 left unwarped, which is why the stems still drop in at bar 1 and lock on their own.
+The beat tracker can read drift that isn't there: across a kickless breakdown it
+slips by a beat or a 16th, which wrote a warp map on all six Einmusik tracks
+checked, moving the second half off Live's grid. When the kick holds one grid
+(above), that verdict is overruled and no map is written.
 
 The reason is that the grid fit is not exact. Residual jitter of the detected beats
 against the fitted grid runs **~35 ms RMS**, which is aubio's placement noise, not

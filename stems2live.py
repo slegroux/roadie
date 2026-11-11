@@ -761,6 +761,9 @@ def main():
     ap.add_argument("--no-tempo-check", action="store_true",
                     help="keep the beat detector's tempo without asking the kick "
                          "stem whether it is right")
+    ap.add_argument("--no-kick-grid", action="store_true",
+                    help="keep the beat detector's grid instead of refitting it to "
+                         "the kick attacks (and keep any warp map it wrote)")
     ap.add_argument("--no-align", action="store_true",
                     help="place clips at the raw file start instead of nudging "
                          "them onto a bar line")
@@ -847,7 +850,8 @@ def main():
         from beat_aligner import analyze_alignment, phase_verdict
         grid_info = analyze_alignment(
             args.stems_dir, override_tempo=args.tempo, detector=args.detector,
-            tempo_check=not args.no_tempo_check)
+            tempo_check=not args.no_tempo_check,
+            kick_grid=not args.no_kick_grid)
     except ImportError as e:
         # ONLY a genuinely absent beat_aligner reaches this. Catching every
         # Exception here once hid a real bug: a signature mismatch raised

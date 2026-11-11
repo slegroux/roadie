@@ -88,7 +88,8 @@ DEFAULT_DETECTOR = "heuristic"
 # whenever a change to this module would alter the numbers — an unversioned
 # cache would serve stale answers with no way to tell.
 CACHE_NAME = "alignment.json"
-CACHE_VERSION = 4   # 4: tempo cross-check against the kick stem (tempo_check in the key)
+CACHE_VERSION = 5   # 4: tempo cross-check against the kick stem (tempo_check in the key)
+                    # 5: grid refitted to the kick attacks (kick_grid in the key)
                     # 3: phrase alignment removed; no phrase_bars in the key
 
 # Analysis sample rate for the summed mix. madmom resamples internally anyway,
@@ -1092,7 +1093,7 @@ def build_warp_map(beat_times, seed_period, segment_sec=30.0,
 
 
 def _cache_fingerprint(paths, override_tempo, detector,
-                       use_structural=True, tempo_check=True):
+                       use_structural=True, tempo_check=True, kick_grid=True):
     """Identity of an analysis: the inputs plus every parameter that changes it.
 
     Sizes and mtimes rather than content hashes — the stems are hundreds of MB
@@ -1112,6 +1113,8 @@ def _cache_fingerprint(paths, override_tempo, detector,
         "use_structural": bool(use_structural),
         # Changes the tempo itself when the detector and the stems disagree.
         "tempo_check": bool(tempo_check),
+        # Moves the grid onto the kick and can drop the warp map.
+        "kick_grid": bool(kick_grid),
     }
 
 
@@ -1245,8 +1248,208 @@ def check_tempo(paths, detected_bpm):
     }
 
 
+# --- the grid, refitted to the kick stem's attacks (issue #9) ---------------------
+#
+# The beat tracker's grid is right on average but wrong in two ways on studio
+# tracks, both measured against `drums_kick` on seven of them:
+#   - PHASE: its beats sat 7-30 ms before the kick attack, the same amount all track
+#     long (spread under 2 ms), so a fixed offset, not noise.
+#   - DRIFT: across a kickless breakdown it slips (a beat, a 16th) and reports it as
+#     tempo drift, which writes a warp map that moves the whole second half off
+#     Live's grid. On all six Einmusik tracks the kick held one tempo within 3 ms.
+# So when the kick plays a regular on-beat pattern, the grid is fitted to its
+# attacks. The fit counts as STEADY only if every 30 s window with enough kicks in
+# it has most of them on the grid and the windows' residuals agree within
+# KICK_GRID_STEADY_MS; then a drift verdict from the beat tracker is overruled. A
+# track whose tempo really moves fails the first test in the windows it moved in.
+
+KICK_GRID_WINDOW_SEC = 30.0   # windows the steadiness is judged in
+KICK_GRID_MIN_DENSITY = 0.5   # kicks per beat for a window to be judged at all
+KICK_GRID_MIN_WINDOWS = 3     # fewer judged windows than this: no verdict
+KICK_GRID_STEADY_MS = 15.0    # spread of the windows' median residuals for "steady"
+KICK_GRID_ROUND_BPM = 0.01    # a fit this close to a whole BPM may be taken as it...
+KICK_GRID_ROUND_COST_MS = 5.0 # ...if that widens the spread by no more than this
+                              # (122.001 vs 122 over 7 min: 4 ms; 124.008: 25 ms)
+KICK_GRID_ONBEAT_SEC = 0.02   # an attack this close to a grid line is on the beat
+KICK_GRID_PULSE_TOL = 0.10    # an off-grid window counts against the fit only if its
+                              # hits pulse within this fraction of the beat
+KICK_MIN_GAP_SEC = 0.08       # closer onsets are one hit (a 16th at 180 BPM is 83 ms)
+KICK_ATTACK_SEARCH_SEC = 0.15 # how far before a hit's envelope peak its attack is sought:
+                              # a boomy kick's smoothed peak comes 60+ ms after the attack
+
+
+def kick_attacks(path):
+    """Kick attack times in seconds: the first sample above 10 % of each hit's peak.
+
+    Hits are FOUND on a smoothed envelope at ANALYSIS_SR (mono, small), then each
+    attack is READ at the file's own rate from a short slice before the envelope
+    peak: the attack is a few ms long, and an envelope or onset-strength peak sits
+    10-50 ms after it on a long kick (the error this exists to remove). The whole
+    file is never held at its native rate, so memory does not grow with a set's
+    length beyond the analysis-rate copy. Hits under 5 % of the loudest are leakage;
+    peaks closer than KICK_MIN_GAP_SEC, or not standing half their height above the
+    trough before them, are one hit.
+    """
+    import scipy.signal as ss
+    y, sr = librosa.load(path, sr=ANALYSIS_SR, mono=True)
+    if not len(y) or float(np.max(np.abs(y))) < 1e-4:
+        return np.zeros(0)
+    # Zero-phase smoothing, so the trough before each hit sits where the hit
+    # starts rising, not a filter delay later.
+    env = ss.sosfiltfilt(ss.butter(2, 40.0, "low", fs=sr, output="sos"), np.abs(y))
+    peaks, props = ss.find_peaks(env, height=0.05 * float(env.max()),
+                                 distance=max(1, int(KICK_MIN_GAP_SEC * sr)),
+                                 prominence=0.0)
+    # A hit rises from a trough; a ripple on its own decay does not, so a peak
+    # must stand at least half its height above the trough before it.
+    peaks = peaks[props["prominences"] >= 0.5 * props["peak_heights"]]
+    search = int(KICK_ATTACK_SEARCH_SEC * sr)
+    out = []
+    with sf.SoundFile(path) as f:
+        nsr = f.samplerate
+        for pk in peaks:
+            a = max(pk - search, 0)
+            if out:
+                a = max(a, int((out[-1] + KICK_MIN_GAP_SEC / 2.0) * sr))
+            if a >= pk:
+                continue
+            trough = a + int(np.argmin(env[a:pk + 1]))      # where this hit starts
+            lo = int(trough / float(sr) * nsr)
+            hi = int((pk / float(sr) + 0.01) * nsr)       # through the hit's peak
+            f.seek(lo)
+            seg = np.abs(f.read(max(hi - lo, 1), dtype="float32",
+                                always_2d=True).mean(axis=1))
+            if not len(seg) or float(seg.max()) <= 0.0:
+                continue
+            at = (lo + int(np.argmax(seg > 0.1 * seg.max()))) / float(nsr)
+            if not out or at - out[-1] >= KICK_MIN_GAP_SEC:
+                out.append(at)
+    del y, env
+    return np.asarray(out)
+
+
+def _onbeat_offset(attacks, period, t0):
+    """Offset (s) of the on-beat kick cluster from the grid `t0 + k * period`.
+
+    Offsets are folded into half a beat either side and histogrammed; the cluster
+    nearest 0 is the on-beat one, so the off-beat hits of a broken pattern (their
+    own clusters, a 16th or an 8th away) do not pull it.
+    """
+    dev = ((attacks - t0 + period / 2.0) % period) - period / 2.0
+    edges = np.arange(-period / 2.0, period / 2.0 + 0.005, 0.005)
+    hist, edges = np.histogram(dev, bins=edges)
+    if not hist.any():
+        return None
+    peaks = [i for i in range(len(hist)) if hist[i] >= 0.1 * hist.max()
+             and hist[i] == hist[max(i - 2, 0):i + 3].max()]
+    c = min((edges[i] + 0.0025 for i in peaks), key=abs)
+    near = dev[np.abs(dev - c) < KICK_GRID_ONBEAT_SEC]
+    return float(np.median(near)) if len(near) else None
+
+
+def _judge_kick_grid(attacks, period, t):
+    """How well the grid (period, t) holds over the kick: a dict, or None.
+
+    Windows are taken over ALL attacks, so a window where the tempo has moved still
+    counts: it has the kicks but not on the grid (`off_grid`). Judging only the
+    attacks already on the grid would make any fit steady by construction.
+    """
+    n = np.round((attacks - t) / period)
+    res = attacks - (t + n * period)
+    on = np.abs(res) < KICK_GRID_ONBEAT_SEC
+    win = np.floor(attacks / KICK_GRID_WINDOW_SEC).astype(int)
+    need = KICK_GRID_MIN_DENSITY * KICK_GRID_WINDOW_SEC / period
+    meds, off_grid = [], 0
+    for w in np.unique(win):
+        sel = win == w
+        if sel.sum() < need:
+            continue                      # a breakdown or a sparse stretch: no say
+        if (sel & on).sum() < need:
+            # Hits but not on the grid. Only a regular pulse near this tempo is a
+            # kick that has moved off it; toms, rolls and leakage in a breakdown
+            # are irregular or at another rate, and have no say.
+            ioi = np.diff(attacks[sel & ~on])     # the off-grid hits alone: a window
+            ioi = ioi[ioi < 1.5 * period]          # half kick, half leakage is not moved
+            if len(ioi) >= need / 2.0:
+                med = float(np.median(ioi))
+                if (abs(med / period - 1.0) < KICK_GRID_PULSE_TOL
+                        and float(np.median(np.abs(ioi - med))) < 0.03 * med):
+                    off_grid += 1         # the kick is there, the grid is not
+            continue
+        meds.append(float(np.median(res[sel & on])) * 1000.0)
+    if len(meds) + off_grid < KICK_GRID_MIN_WINDOWS:
+        return None
+    if meds:
+        # One deviant window is tolerated when there are six or more: a filtered
+        # intro kick has a softer attack and reads a few ms early.
+        core = sorted(meds, key=lambda v: abs(v - np.median(meds)))
+        core = core[:-1] if len(core) >= 6 else core
+        spread = max(core) - min(core)
+    else:
+        spread = float("inf")
+    return {"spread_ms": spread, "windows": len(meds), "off_grid": off_grid,
+            "kicks": int(on.sum())}
+
+
+def fit_kick_grid(attacks, period, t0, fit_tempo=True):
+    """Grid fitted to the on-beat kick attacks, seeded by (period, t0). Or None.
+
+    Returns {bpm, period, t0, steady, spread_ms, windows, off_grid_windows, kicks,
+    attacks, shift_ms}. `t0` is unwrapped: it stays within half a beat of the seed,
+    so beat indices counted from the seed keep their meaning. With `fit_tempo`
+    False the period is kept and only the phase is fitted. None when the kick is
+    too sparse to judge.
+    """
+    attacks = np.asarray(attacks, dtype=float)
+    if len(attacks) < 8 * KICK_GRID_MIN_WINDOWS:
+        return None
+    off = _onbeat_offset(attacks, period, t0)
+    if off is None:
+        return None
+    t = t0 + off
+    for _ in range(6):
+        n = np.round((attacks - t) / period)
+        on = np.abs(attacks - (t + n * period)) < KICK_GRID_ONBEAT_SEC
+        if int(on.sum()) < 8:
+            return None
+        if fit_tempo:
+            period, t = (float(v) for v in np.polyfit(n[on], attacks[on], 1))
+        else:
+            t = float(np.median(attacks[on] - n[on] * period))
+    judged = _judge_kick_grid(attacks, period, t)
+    if judged is None:
+        return None
+    bpm = 60.0 / period
+    if fit_tempo and abs(bpm - round(bpm)) < KICK_GRID_ROUND_BPM:
+        # The whole tempo is kept only if it fits as well: 0.01 BPM over eight
+        # minutes is 30 ms, enough to turn a good fit into a bad one.
+        wp = 60.0 / round(bpm)
+        n = np.round((attacks - t) / wp)
+        on = np.abs(attacks - (t + n * wp)) < KICK_GRID_ONBEAT_SEC
+        wt = float(np.median(attacks[on] - n[on] * wp)) if on.any() else t
+        whole = _judge_kick_grid(attacks, wp, wt)
+        if (whole is not None and whole["off_grid"] <= judged["off_grid"]
+                and whole["spread_ms"] <= judged["spread_ms"] + KICK_GRID_ROUND_COST_MS):
+            period, t, judged, bpm = wp, wt, whole, float(round(bpm))
+    steady = judged["off_grid"] == 0 and judged["spread_ms"] <= KICK_GRID_STEADY_MS
+    return {
+        "bpm": float(round(bpm, 3)),
+        "period": float(period),
+        "t0": float(t),
+        "steady": bool(steady),
+        "spread_ms": (float(round(judged["spread_ms"], 1))
+                      if np.isfinite(judged["spread_ms"]) else None),
+        "windows": int(judged["windows"]),
+        "off_grid_windows": int(judged["off_grid"]),
+        "kicks": int(judged["kicks"]),
+        "attacks": int(len(attacks)),
+        "shift_ms": float(round((t - t0) * 1000.0, 1)),
+    }
+
+
 def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_DETECTOR,
-                      use_cache=True, use_structural=True, tempo_check=True):
+                      use_cache=True, use_structural=True, tempo_check=True,
+                      kick_grid=True):
     """Main analysis pipeline for tempo, downbeat, offset, and drift.
 
     Two signals, two jobs. TEMPO is fitted to the kick stem, where the pulse is
@@ -1265,6 +1468,11 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
 
     `use_cache=False` forces recomputation, which is what --no-cache is for when
     the aligner itself has changed.
+
+    `kick_grid` refits the grid (tempo and phase) to the drums_kick attacks and, when
+    the kick holds one grid all track long, overrules a drift verdict: no warp map
+    (see fit_kick_grid). The result's `kick_grid` records the fit, `drift_overruled`
+    whether it cleared a drift verdict.
 
     `tempo_check` asks the kick stem whether it really locks to the detected
     tempo (`check_tempo`). When it clearly does not, the grid is refitted at the
@@ -1294,7 +1502,7 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
     fingerprint = None
     if cacheable:
         fingerprint = _cache_fingerprint(paths, override_tempo, detector,
-                                         use_structural, tempo_check)
+                                         use_structural, tempo_check, kick_grid)
         if use_cache:
             cached = read_cache(stems_dir_or_audio, fingerprint)
             if cached is not None:
@@ -1348,6 +1556,39 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
             bpm = 60.0 / period
         if tempo_info is not None:
             tempo_info["applied"] = tempo_info_applied
+
+    # 2c. Refit the grid to the kick's attacks (see fit_kick_grid). With a tempo
+    #     override only the phase moves. Only a STEADY fit is used: a kick that
+    #     wanders is a track that wanders, and the beat tracker's grid and drift
+    #     analysis stay in charge.
+    kick_info = None
+    if kick_grid and "drums_kick" in paths and librosa and sf:
+        try:
+            kick_info = fit_kick_grid(kick_attacks(paths["drums_kick"]), period, t0,
+                                      fit_tempo=override_tempo is None)
+        except Exception as e:
+            sys.stderr.write("kick grid fit failed (%s: %s); keeping the beat "
+                             "tracker's grid\n" % (type(e).__name__, e))
+        if kick_info is not None:
+            kick_info["applied"] = False
+            if kick_info["steady"]:
+                k_new = np.round((beats - kick_info["t0"]) / kick_info["period"]).astype(int)
+                in_new = (np.abs(beats - (kick_info["period"] * k_new + kick_info["t0"]))
+                          <= OUTLIER_TOL * kick_info["period"])
+                if int(in_new.sum()) >= 8:
+                    period, t0 = kick_info["period"], kick_info["t0"]
+                    k, inliers = k_new, in_new
+                    bpm = 60.0 / period
+                    kick_info["applied"] = True
+            kick_info["period"] = float(round(kick_info["period"], 6))
+            kick_info["t0"] = float(round(kick_info["t0"] % kick_info["period"], 4))
+
+    # Anchor the grid in its first beat, moving the indices with it, so grid_t0,
+    # the beat indices and the downbeat phase reported below share one origin.
+    m = int(np.floor(t0 / period))
+    if m:
+        t0 -= m * period
+        k = k + m
 
     # Beats that actually fit the grid: their indices and their ideal times.
     # Drift deliberately uses NEITHER — see step 7.
@@ -1452,6 +1693,16 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
     #    this call site used to have. `period` is a scale for rounding interval
     #    ratios here, not a grid.
     has_drift, drift_pct = analyze_tempo_drift(beats, period)
+    drift_overruled = False
+    if has_drift and kick_info and kick_info["applied"]:
+        # The kick held one tempo; the drift is the beat tracker slipping where the
+        # kick was out. drift_pct stays as measured, for the record.
+        sys.stderr.write("tempo: the beat detector reports %.2f%% drift, but the kick "
+                         "holds one grid within %.1f ms; no warp map "
+                         "(--no-kick-grid keeps it)\n"
+                         % (drift_pct, kick_info["spread_ms"]))
+        has_drift = False
+        drift_overruled = True
     warp_map = []
     if has_drift:
         try:
@@ -1487,11 +1738,17 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
         "warp_map": warp_map,
         "primary_stem": os.path.basename(primary_stem),
         "beat_count": int(len(beats)),
+        # Wrapped into one beat for the report only: every step above ran on the
+        # unwrapped value, so its beat indices (and the bar phase) are untouched.
         "grid_t0": float(round(t0, 4)),
         "inlier_count": int(inliers.sum()),
         "inlier_fraction": float(round(inlier_fraction, 4)),
         "drift_pct": float(drift_pct),
+        # True when drift_pct is over the line but the kick held one grid, so
+        # has_drift was cleared and no warp map was written.
+        "drift_overruled": bool(drift_overruled),
         "tempo_check": tempo_info,
+        "kick_grid": kick_info,
     }
 
     if cacheable:
@@ -1528,6 +1785,11 @@ def main():
                          "tempo when the stem clearly locks to a different one "
                          "(more than %.1f BPM away and scoring %.1fx better)"
                          % (TEMPO_CHECK_TOL, TEMPO_CHECK_RATIO))
+    ap.add_argument("--no-kick-grid", action="store_true",
+                    help="keep the beat tracker's grid instead of refitting it to the "
+                         "drums_kick attacks. The refit is used only when the kick "
+                         "holds one grid within %.0f ms all track long; it then also "
+                         "overrules a drift verdict (no warp map)" % KICK_GRID_STEADY_MS)
     ap.add_argument("--json", action="store_true", help="Output JSON results")
     args = ap.parse_args()
 
@@ -1535,7 +1797,8 @@ def main():
                             detector=args.detector,
                             use_cache=not args.no_cache,
                             use_structural=not args.no_structural,
-                            tempo_check=not args.no_tempo_check)
+                            tempo_check=not args.no_tempo_check,
+                            kick_grid=not args.no_kick_grid)
     if args.json:
         print(json.dumps(res, indent=2))
     else:
@@ -1550,7 +1813,14 @@ def main():
         if tc and tc.get("applied"):
             print(f"  ^^ the beat detector said {tc['detected_bpm']:.3f}; the kick stem "
                   f"locks to {tc['measured_bpm']:.2f} ({tc['ratio']:.1f}x better), "
-                  f"so that is the tempo used")
+                  f"so that is the tempo used"
+                  + (" (then refined on the kick attacks, below)"
+                     if (res.get("kick_grid") or {}).get("applied") else ""))
+        kg = res.get("kick_grid")
+        if kg and kg.get("applied"):
+            print(f"  ^^ grid refitted to the kick attacks: {kg['bpm']:.3f} BPM, moved "
+                  f"{kg['shift_ms']:+.1f} ms at the first beat, steady within "
+                  f"{kg['spread_ms']:.1f} ms over {kg['windows']} windows")
         print(f"Grid Beats:          {res['inlier_count']} of {res['beat_count']} detections")
         print(f"First Downbeat:      {res['downbeat_sec']:.4f}s (phase beat {res['downbeat_phase'] + 1})")
         print(f"Phase Confidence:    {conf:.3f}  ({verdict}; {PHASE_CHANCE:.2f} = chance, "

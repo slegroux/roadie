@@ -551,6 +551,9 @@ def main(argv=None):
     ap.add_argument("--no-tempo-check", action="store_true",
                     help="keep the beat detector's tempo without asking the kick "
                          "stem whether it is right")
+    ap.add_argument("--no-kick-grid", action="store_true",
+                    help="keep the beat detector's grid instead of refitting it to "
+                         "the kick attacks (and keep any warp map it wrote)")
     ap.add_argument("--start-bar", type=int, default=9,
                     help="bar the clips start on (default 9)")
     ap.add_argument("--headroom", type=float, default=6.0,
@@ -585,7 +588,8 @@ def main(argv=None):
     from stems2live import (arrange_stems, bar_aligned_placement, centroid,
                             section_grid)
     grid = analyze_alignment(stems_dir, override_tempo=args.tempo,
-                             tempo_check=not args.no_tempo_check)
+                             tempo_check=not args.no_tempo_check,
+                             kick_grid=not args.no_kick_grid)
     bpm = args.tempo or grid["bpm"]
     period = float(grid["period"])
     warp_map = grid.get("warp_map") or []
