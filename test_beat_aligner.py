@@ -914,3 +914,149 @@ class TestTempoCheckEndToEnd:
         off = ba.analyze_alignment(wrong_detector, tempo_check=False)
         on = ba.analyze_alignment(wrong_detector)
         assert off["bpm"] != pytest.approx(on["bpm"], abs=0.5)
+
+
+# --- the grid refitted to the kick attacks (issue #9) ------------------------------
+# Pure tests on attack times: a steady kick 30 ms off a slightly wrong seed grid, a
+# breakdown gap, a broken pattern, a real tempo change, and too few kicks.
+
+def _kicks(bpm, t_first, n_beats, every=1, gaps=(), jitter=0.0, seed=0):
+    p = 60.0 / bpm
+    rng = np.random.default_rng(seed)
+    t = np.array([t_first + i * p for i in range(0, n_beats, every)
+                  if not any(a <= i < b for a, b in gaps)])
+    return t + rng.normal(0.0, jitter, len(t))
+
+
+class TestKickGrid:
+    def test_steady_kick_gives_its_tempo_and_attack_phase(self):
+        att = _kicks(124.0, 0.53, 800, gaps=[(300, 364)], jitter=0.001)
+        g = ba.fit_kick_grid(att, 60.0 / 124.05, 0.50)
+        assert g["steady"] and g["bpm"] == 124.0
+        assert g["t0"] % g["period"] == pytest.approx(0.53 % (60.0 / 124.0), abs=0.002)
+        assert g["shift_ms"] == pytest.approx(30.0, abs=2.0)
+
+    def test_a_breakdown_gap_does_not_make_it_unsteady(self):
+        att = _kicks(122.0, 0.2, 900, gaps=[(256, 384), (600, 616)])
+        assert ba.fit_kick_grid(att, 60.0 / 122.0, 0.2)["steady"]
+
+    def test_off_beat_hits_of_a_broken_pattern_do_not_pull_the_phase(self):
+        on = _kicks(126.0, 0.1, 700)
+        off = on[::2] + 0.5 * 60.0 / 126.0            # an 8th after every other beat
+        att = np.sort(np.concatenate([on, off]))
+        g = ba.fit_kick_grid(att, 60.0 / 126.0, 0.12)
+        assert g["t0"] % g["period"] == pytest.approx(0.1, abs=0.002)
+
+    @pytest.mark.parametrize("seed_bpm", [124.0, 125.0, 126.0])
+    def test_a_real_tempo_change_is_not_steady(self, seed_bpm):
+        # Seeded on either segment's own tempo too: judged only on the kicks that
+        # fit, the other segment's windows would drop out and it would read steady.
+        a = _kicks(124.0, 0.0, 400)
+        b = _kicks(126.0, a[-1] + 60.0 / 126.0, 400)  # the track really speeds up
+        g = ba.fit_kick_grid(np.concatenate([a, b]), 60.0 / seed_bpm, 0.0)
+        assert g is not None and not g["steady"] and g["off_grid_windows"] > 0
+
+    def test_a_tempo_just_off_a_whole_bpm_is_not_forced_onto_it(self):
+        # 124.008 over ~7 minutes drifts 25 ms from a 124.000 grid
+        g = ba.fit_kick_grid(_kicks(124.008, 0.3, 860), 60.0 / 124.0, 0.3)
+        assert g["steady"] and g["bpm"] == pytest.approx(124.008, abs=0.001)
+
+    def test_a_tempo_off_a_whole_bpm_is_kept(self):
+        g = ba.fit_kick_grid(_kicks(123.5, 0.3, 800), 60.0 / 123.5, 0.3)
+        assert g["bpm"] == pytest.approx(123.5, abs=0.002)
+
+    def test_with_a_tempo_given_only_the_phase_moves(self):
+        g = ba.fit_kick_grid(_kicks(124.0, 0.53, 800), 60.0 / 124.0, 0.50, fit_tempo=False)
+        assert g["period"] == 60.0 / 124.0
+        assert g["t0"] == pytest.approx(0.53, abs=0.002)
+
+    def test_too_few_kicks_gives_no_verdict(self):
+        assert ba.fit_kick_grid(_kicks(124.0, 0.0, 16), 60.0 / 124.0, 0.0) is None
+        # a sparse kick (one per bar) never fills a window enough to judge
+        assert ba.fit_kick_grid(_kicks(124.0, 0.0, 800, every=4), 60.0 / 124.0, 0.0) is None
+
+    def test_attacks_are_read_at_the_start_of_the_hit_not_its_peak(self, tmp_path):
+        import soundfile as sf
+        sr, starts = 44100, np.arange(0.5, 20.0, 60.0 / 124.0)
+        y = np.zeros(int(21 * sr))
+        n = np.arange(int(0.25 * sr))
+        hit = np.sin(2 * np.pi * 50 * n / sr) * np.minimum(n / (0.02 * sr), 1.0) * np.exp(-n / (0.08 * sr))
+        for s in starts:                               # a 20 ms rise, then a long decay
+            y[int(s * sr):int(s * sr) + len(n)] += hit
+        sf.write(str(tmp_path / "drums_kick.wav"), y.astype("float32"), sr)
+        att = ba.kick_attacks(str(tmp_path / "drums_kick.wav"))
+        assert len(att) == len(starts)
+        assert np.max(np.abs(att - starts)) < 0.004   # within 4 ms of the true start
+
+
+class TestKickGridEndToEnd:
+    """analyze_alignment with a rendered kick stem and stubbed detections."""
+    SR = 22050
+
+    def _render(self, folder, segments, t_first=0.3):
+        """Kick at each segment's tempo, [(bpm, seconds)]; returns the true hits."""
+        import soundfile as sf
+        folder.mkdir(exist_ok=True)
+        t, hits = t_first, []
+        for bpm, sec in segments:
+            end = t + sec
+            while t < end:
+                hits.append(t)
+                t += 60.0 / bpm
+        n = np.arange(2205)
+        thump = np.sin(2 * np.pi * 55 * n / self.SR) * np.exp(-n / 600.0)
+        y = np.zeros(int((t + 2) * self.SR))
+        for h in hits:
+            i = int(h * self.SR)
+            y[i:i + len(thump)] += thump
+        sf.write(str(folder / "drums_kick.wav"), (0.8 * y).astype("float32"), self.SR)
+        tone = 0.1 * np.sin(2 * np.pi * 80 * np.arange(len(y)) / self.SR)
+        sf.write(str(folder / "bass.wav"), tone.astype("float32"), self.SR)
+        return str(folder), np.asarray(hits)
+
+    def _detector(self, monkeypatch, times):
+        rng = np.random.default_rng(1)
+        monkeypatch.setattr(ba, "estimate_aubio_beats",
+                            lambda path: times + rng.normal(0.0, 0.004, len(times)))
+
+    def test_a_steady_kick_overrules_a_detector_that_slipped(self, tmp_path, monkeypatch):
+        stems, hits = self._render(tmp_path / "s", [(124.0, 210.0)])
+        slipped = np.concatenate([hits[hits < 100], hits[hits >= 100] + 0.12])  # a 16th, mid-track
+        self._detector(monkeypatch, slipped)
+        on = ba.analyze_alignment(stems, use_cache=False)
+        assert on["kick_grid"]["applied"] and on["bpm"] == 124.0
+        assert on["warp_map"] == [] and on["has_drift"] is False
+        off = ba.analyze_alignment(stems, use_cache=False, kick_grid=False)
+        assert off["kick_grid"] is None
+        if off["has_drift"]:                         # the detector read the slip as drift
+            assert on["drift_overruled"] is True and off["warp_map"]
+
+    def test_a_real_tempo_change_keeps_its_drift_and_warp_map(self, tmp_path, monkeypatch):
+        stems, hits = self._render(tmp_path / "s", [(124.0, 150.0), (127.0, 90.0)])
+        self._detector(monkeypatch, hits)
+        res = ba.analyze_alignment(stems, use_cache=False)
+        assert not (res["kick_grid"] or {}).get("applied")
+        assert res["has_drift"] is True and res["warp_map"] and not res["drift_overruled"]
+
+    def test_the_grid_lands_on_the_kick_attack(self, tmp_path, monkeypatch):
+        stems, hits = self._render(tmp_path / "s", [(124.0, 120.0)])
+        self._detector(monkeypatch, hits - 0.025)    # a detector 25 ms early
+        res = ba.analyze_alignment(stems, use_cache=False)
+        p, t0 = res["period"], res["grid_t0"]
+        dev = (hits - t0 + p / 2) % p - p / 2
+        assert np.max(np.abs(dev)) < 0.002
+
+    def test_grid_t0_and_the_downbeat_phase_share_one_origin(self, tmp_path, monkeypatch):
+        stems, hits = self._render(tmp_path / "s", [(125.0, 120.0)], t_first=0.47)
+        self._detector(monkeypatch, hits - 0.01)
+        res = ba.analyze_alignment(stems, use_cache=False)
+        assert 0.0 <= res["grid_t0"] < res["period"]
+        k = round((res["downbeat_sec"] - res["grid_t0"]) / res["period"])
+        assert k % 4 == res["downbeat_phase"]
+
+    def test_the_cache_key_carries_the_switch(self, tmp_path, monkeypatch):
+        stems, hits = self._render(tmp_path / "s", [(124.0, 120.0)])
+        self._detector(monkeypatch, hits)
+        ba.analyze_alignment(stems)
+        assert ba.analyze_alignment(stems, kick_grid=False)["kick_grid"] is None
+        assert ba.analyze_alignment(stems)["kick_grid"] is not None
