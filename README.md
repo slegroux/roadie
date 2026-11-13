@@ -17,7 +17,7 @@ defaults are known to hold. Each measurement is written down below so it can be
 re-derived for other material rather than trusted.
 
 ```
-roadie split my-set.wav -o <dir> -d     # audio -> stems -> drum parts
+roadie split my-set.wav -o <dir> -s     # audio -> stems -> drum parts (-D: stems only)
 roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the audio
 ```
 
@@ -34,7 +34,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 
 | command | what it does | script |
 |---|---|---|
-| `roadie split <file\|url>` | audio → 44.1 kHz WAV → stems (→ drum parts with `-d`) | `yt2stems.sh` |
+| `roadie split <file\|url>` | audio → 44.1 kHz WAV → stems with `-s` → drum parts (skip with `-D`) | `yt2stems.sh` |
 | `roadie load <stems_dir>` | stems → the Live set that is open now | `stems2live.py` |
 | `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
@@ -182,7 +182,7 @@ From one input:
 | `…/drums.flac` | composite kit |
 | `…/synths.wav` | float32 WAV — see *the synths merge* below |
 | `…/vocals.flac` | |
-| `…/drums_{kick,snare,toms,hh,ride,crash}.flac` | six-way drum split (`-d`) |
+| `…/drums_{kick,snare,toms,hh,ride,crash}.flac` | six-way drum split (on with `-s`; `-D` skips it) |
 | `…/alignment.json` | cached beat grid, reused by `roadie load` |
 
 All stems are sample-identical in length, so they drop into Live at bar 1 and
@@ -825,7 +825,10 @@ shuffling them.
 That is correct — there are no acoustic cymbals — not a failure.
 
 **The drum pass is slow**: ~1.3× realtime versus ~14.5× for demucs, so a 9-minute
-set costs ~7 minutes for `-d` alone. Hence opt-in.
+set costs ~7 minutes for the drum pass alone. It is on by default anyway: a study
+wants the parts, and the beat grid is fitted to `drums_kick` first, so a split
+without it gets a looser tempo. `-D` (`--no-drums`) stops at the four stems; a
+later `-s` run on the same source adds only the drum pass.
 
 **Live must already be running** with Sideman active (`roadie open` launches it
 for you). The socket (127.0.0.1:9878) lives inside Live; there is no headless

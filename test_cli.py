@@ -289,3 +289,32 @@ def test_config_tilde_expands_to_home(tmp_path):
     home.mkdir()
     _split_out(tmp_path, config="out = ~/Studies\n", home=str(home))
     assert (home / "Studies").is_dir()
+
+
+# --- drum pass on by default -------------------------------------------------
+
+@pytest.mark.parametrize("flags, wants_drumsep", [
+    (["-s"], True),            # stems now bring the drum parts with them
+    (["-d"], True),            # the old opt-in flag still works
+    (["-s", "-D"], False),     # -D stops at the four stems
+    (["-s", "--no-drums"], False),
+    ([], False),               # no stems, so no drums stem to split
+])
+def test_the_drum_pass_is_on_with_stems_unless_D(tmp_path, flags, wants_drumsep):
+    """audio-separator is checked up front only when the drum pass will run, so
+    hiding it from PATH shows whether it would have."""
+    bin_ = tmp_path / "fakebin"
+    bin_.mkdir()
+    for tool in ("ffmpeg", "yt-dlp", "demucs"):
+        (bin_ / tool).write_text("#!/bin/sh\nexit 1\n")
+        (bin_ / tool).chmod(0o755)
+    env = _env()
+    env["PATH"] = os.pathsep.join([str(bin_), "/usr/bin", "/bin"])
+    env["ROADIE_LOG"] = ""
+    src = tmp_path / "Artist - Track.wav"
+    src.write_bytes(b"RIFF")
+    r = subprocess.run([ROADIE, "split", str(src), "-o", str(tmp_path / "out"), *flags],
+                       capture_output=True, text=True, timeout=60, env=env,
+                       cwd=str(tmp_path), check=False)
+    asked = "missing: audio-separator" in r.stderr
+    assert asked == wants_drumsep, r.stdout + r.stderr

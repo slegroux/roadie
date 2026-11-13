@@ -2,8 +2,8 @@
 # Pull one of your own sets/mixes off YouTube, convert to Ableton-ready WAV,
 # optionally split into stems. Code lives in this repo; audio never does.
 #
-#   yt2stems.sh <url>          [-o DIR] [-a] [-s] [-d] [-m MODEL] [-f]
-#   yt2stems.sh --file <path>  [-o DIR] [-a] [-s] [-d] [-m MODEL] [-f]
+#   yt2stems.sh <url>          [-o DIR] [-a] [-s] [-D] [-m MODEL] [-f]
+#   yt2stems.sh --file <path>  [-o DIR] [-a] [-s] [-D] [-m MODEL] [-f]
 #
 #   --file P   process a local audio file instead of fetching a URL. Everything
 #              downstream is identical: merge, BPM tag, drum split, flat layout.
@@ -18,17 +18,19 @@
 #              named for the artist, or for their last name, is reused: "Marc
 #              Holstege - Mangata" lands in an existing Holstege/Mangata/. A name
 #              with no " - " gets DIR/<Title>/.
-#   -s         also split into stems (needs demucs).
-#   -d         then split the drums stem into kick/snare/toms/hh/ride/crash
-#              (implies -s; needs audio-separator). SLOW — see below.
+#   -s         also split into stems (needs demucs), then split the drums stem
+#              into kick/snare/toms/hh/ride/crash (needs audio-separator).
+#              The drum pass is on by default and SLOW — see below.
+#   -D         --no-drums: stop at the four stems, skip the drum pass.
+#   -d         the drum pass, implying -s. Kept for scripts that pass it.
 #   -m MODEL   demucs model. Default htdemucs_6s — see the note below.
 #   -f         force: redo every stage even if its output is already there.
 #
 #   Models: htdemucs_6s (default, 6 stems) | htdemucs_ft | mdx_extra | htdemucs
 #
 # Re-running is cheap: each of the three stages (download, separate, drumsep) is
-# skipped when its output already exists, so adding -d to an earlier grab only
-# runs the drum pass. The title is resolved from metadata BEFORE downloading so
+# skipped when its output already exists, so re-running -s on an earlier -D grab
+# only runs the drum pass. The title is resolved from metadata BEFORE downloading so
 # we know what to look for on disk — one cheap API call.
 # Granularity is per STAGE, not per stem: demucs emits all its stems in a single
 # forward pass, so one missing stem re-runs that whole separation.
@@ -55,7 +57,9 @@
 # deliberate. --overlap is left at demucs's 0.25 default.
 #
 # -d runs at ~1.3x realtime (vs ~14.5x for demucs), so a 9-minute set costs ~7
-# minutes for the drum pass alone — hence opt-in. Its stems ARE real: kick peaks
+# minutes for the drum pass alone. It is on by default anyway (-D skips it):
+# studies want the parts, and the beat aligner fits its grid to drums_kick first,
+# so a grab without it gets a looser tempo. Its stems ARE real: kick peaks
 # at 60-250Hz, hh at 4-10kHz, snare at 1-4kHz, i.e. genuinely distinct sources.
 # ride/crash come out near-silent on electronic material, which is correct
 # (no acoustic cymbals) rather than a failure.
@@ -136,7 +140,7 @@ detect_bpm () {
 
 DRUMSEP_MODEL="MDX23C-DrumSep-aufr33-jarredou.ckpt"
 DRUM_PARTS=(kick snare toms hh ride crash)
-URL="" SRCFILE="" OUTDIR="" BY_ARTIST=0 STEMS=0 DRUMS=0 FORCE=0 MODEL="htdemucs_6s"
+URL="" SRCFILE="" OUTDIR="" BY_ARTIST=0 STEMS=0 DRUMS=1 FORCE=0 MODEL="htdemucs_6s"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -146,12 +150,15 @@ while [[ $# -gt 0 ]]; do
     -a) BY_ARTIST=1; shift ;;
     -s) STEMS=1; shift ;;
     -d) DRUMS=1; STEMS=1; shift ;;          # -d is useless without the drums stem
+    -D|--no-drums) DRUMS=0; shift ;;
     -f) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *)  URL="$1"; shift ;;
   esac
 done
+# The drum pass splits the drums stem, so with no stems there is nothing to split.
+[[ $STEMS -eq 1 ]] || DRUMS=0
 
 [[ -n "$URL" || -n "$SRCFILE" ]] || { usage; exit 2; }
 [[ -z "$URL" || -z "$SRCFILE" ]] || { echo "give a URL or --file, not both" >&2; exit 2; }
@@ -166,7 +173,7 @@ if [[ $STEMS -eq 1 ]] && ! command -v demucs >/dev/null; then
   echo "missing: demucs — uv tool install demucs --with numpy" >&2; exit 1
 fi
 if [[ $DRUMS -eq 1 ]] && ! command -v audio-separator >/dev/null; then
-  echo "missing: audio-separator — uv tool install \"audio-separator[cpu]\"" >&2; exit 1
+  echo "missing: audio-separator — uv tool install \"audio-separator[cpu]\", or -D to skip the drum pass" >&2; exit 1
 fi
 
 OUT="${OUTDIR:-$PWD}"
