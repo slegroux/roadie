@@ -17,7 +17,7 @@
 # nothing resolves it, so the numpy and soundfile pinned in requirements.txt are the ones in force. Keep them
 # compatible with what Sideman asks for (numpy>=1.24, soundfile>=0.12) by hand.
 #
-# PINNED TO A COMMIT OF SIDEMAN'S BRANCH feat/yt2live-audio-layer, not its main: the public names exist only
-# there. MOVE THIS PIN TO SIDEMAN MAIN (then to a tag, or PyPI once Sideman publishes) as soon as that branch
-# merges. The v0.1.0 tag is 66 commits older than the Remote Script users have installed, so it is not an option.
-sideman[listen] @ git+https://github.com/slegroux/sideman@8008db9adcc34233ee96fce4461d036ee0d15488
+# Pinned to a commit of Sideman's main (the merge of its PR #8, which holds the public `sideman.listen` names and
+# the three-step mix report). Move it to a tag, or to PyPI, once Sideman publishes one that has them. The v0.1.0
+# tag is older than the Remote Script users have installed, so it is not an option.
+sideman[listen] @ git+https://github.com/slegroux/sideman@320e9cfec2655ff3c83649ab538c8202dbd0a5b9
