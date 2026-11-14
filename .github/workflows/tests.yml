@@ -42,6 +42,8 @@ jobs:
           uv pip install --python .venv/bin/python -r requirements.txt
           # Sideman on its own, without its dependencies: requirements-sideman.txt.
           uv pip install --python .venv/bin/python --no-deps -r requirements-sideman.txt
+          # The MCP SDK for roadie_mcp.py, every package pinned: requirements-mcp.txt.
+          uv pip install --python .venv/bin/python -r requirements-mcp.txt
 
       # madmom is a real backend but an awkward build: the PyPI release is from
       # 2018 and imports MutableSequence from collections, so it needs git main,

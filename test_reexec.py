@@ -1,6 +1,6 @@
-"""The `.venv` re-exec preamble at the top of five scripts hops at most once.
+"""The `.venv` re-exec preamble at the top of six scripts hops at most once.
 
-als_writer, beat_aligner, sections, session_view and stems2live each begin by
+als_writer, beat_aligner, roadie_mcp, sections, session_view and stems2live each begin by
 re-executing under `<script dir>/.venv/bin/python`. Two ways that went wrong:
 
   * a `.venv` whose python never looks like the venv to the check (a symlinked
@@ -21,8 +21,8 @@ import sys
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = ["als_writer.py", "beat_aligner.py", "sections.py", "session_view.py",
-           "stems2live.py"]
+SCRIPTS = ["als_writer.py", "beat_aligner.py", "roadie_mcp.py", "sections.py",
+           "session_view.py", "stems2live.py"]
 SHOW = 'print("RAN", os.path.realpath(sys.prefix), os.environ.get("ROADIE_REEXEC"))\n'
 
 

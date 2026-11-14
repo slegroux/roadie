@@ -1,0 +1,47 @@
+# The MCP SDK, for Roadie's MCP server (roadie_mcp.py, `roadie mcp`) and nothing else. Installed
+# AFTER requirements.txt and requirements-sideman.txt, by install.sh and CI:
+#
+#     uv pip install -r requirements.txt
+#     uv pip install --no-deps -r requirements-sideman.txt
+#     uv pip install -r requirements-mcp.txt
+#
+# Why a file of its own: Sideman is installed --no-deps so that `mcp` and the packages under it do
+# not float into every Roadie venv unpinned (see requirements-sideman.txt). The server does need them,
+# so here they are, every one pinned: this is `uv pip compile --universal` of `mcp==2.3.0`
+# (the version Sideman's server runs; Sideman asks for mcp>=2.2,<3) against the versions in the venv
+# the suite was run in, so an install gets exactly what was tested. Without this file the CLI side
+# works as before; only `roadie mcp` stops, with an install hint.
+#
+# To move to a newer mcp: put the new version in a one-line file and run
+#     uv pip compile <file> --python-version 3.13 --universal --no-header --no-annotate
+# then paste the result below this comment and run the suite (test_roadie_mcp.py).
+annotated-types==0.8.0
+anyio==4.16.0
+attrs==26.1.0
+cffi==2.1.1 ; platform_python_implementation != 'PyPy'
+click==8.5.1 ; sys_platform != 'emscripten'
+cryptography==50.0.2
+h11==0.16.0 ; sys_platform != 'emscripten'
+httpcore2==2.16.0 ; sys_platform != 'emscripten'
+httpx2==2.16.0
+httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
+idna==3.20
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==2.3.0
+mcp-types==2.3.0
+opentelemetry-api==1.45.2
+pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+pydantic==2.14.3
+pydantic-core==2.50.4
+pyjwt==2.15.1
+python-multipart==0.0.33
+pywin32==312 ; sys_platform == 'win32'
+referencing==0.37.0
+rpds-py==2026.9.1
+sse-starlette==3.7.0
+starlette==1.10.0
+truststore==0.10.5 ; sys_platform != 'emscripten'
+typing-extensions==4.16.0
+typing-inspection==0.4.5
+uvicorn==0.54.0 ; sys_platform != 'emscripten'

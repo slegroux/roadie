@@ -8,8 +8,9 @@
 #
 # .venv is built with `uv venv --python 3.13` when it does not exist yet, and
 # every run re-syncs it to requirements.txt, then requirements-sideman.txt
-# (installed with --no-deps), so a bumped pin reaches an existing venv and a
-# half-built one is repaired. --check reports and changes nothing.
+# (installed with --no-deps), then requirements-mcp.txt (the MCP SDK, for
+# `roadie mcp`), so a bumped pin reaches an existing venv and a half-built one
+# is repaired. --check reports and changes nothing.
 #
 # Symlinks rather than copies, so editing a script takes effect immediately and
 # the repo stays the single source of truth. They also strip the .sh/.py
@@ -86,9 +87,10 @@ VENV_PY="$HERE/.venv/bin/python"
 # Probe the packages, not just the interpreter: a `uv pip install` that died
 # half way leaves a python with nothing importable, and checking only for the
 # binary would call that installed forever.
-# sideman.listen.to_db is one of the public names roadie_analysis imports: an older
-# Sideman left in the venv lacks it, fails the probe and gets re-synced.
-venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client, sideman.listen; sideman.listen.to_db" >/dev/null 2>&1; }
+# sideman.listen.mix_layer is one of the public names roadie_analysis imports: an older
+# Sideman left in the venv lacks it, fails the probe and gets re-synced. mcp.server.mcpserver
+# is what roadie_mcp.py imports.
+venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client, sideman.listen, mcp.server.mcpserver; sideman.listen.to_db, sideman.listen.mix_layer" >/dev/null 2>&1; }
 if [[ $CHECK -eq 1 ]]; then
   if venv_ok; then
     printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
@@ -113,8 +115,10 @@ else
   uv pip install --python "$VENV_PY" -r "$HERE/requirements.txt"
   # Sideman after, and without its dependencies: see requirements-sideman.txt.
   uv pip install --python "$VENV_PY" --no-deps -r "$HERE/requirements-sideman.txt"
+  # The MCP SDK for `roadie mcp`, every package pinned: see requirements-mcp.txt.
+  uv pip install --python "$VENV_PY" -r "$HERE/requirements-mcp.txt"
   venv_ok || { echo "  .venv still cannot import the requirements — see the uv output above" >&2; exit 1; }
-  printf "  \033[32mok\033[0m    .venv synced to requirements.txt and requirements-sideman.txt\n"
+  printf "  \033[32mok\033[0m    .venv synced to requirements.txt, requirements-sideman.txt and requirements-mcp.txt\n"
 fi
 
 echo
