@@ -1,0 +1,274 @@
+{
+ "s2l.apply_warp_map": {
+  "calls": [
+   ["warp_markers_set", {"markers": [[0, 0.0], [4, 1.92]], "path": "live_set tracks 2 arrangement_clips 1"}]
+  ],
+  "ret": ["ok", "warp 2 markers (+2 -0, 1 refused)"],
+  "out": ""
+ },
+ "s2l.apply_warp_map.unsupported": {
+  "calls": [
+   ["warp_markers_set", {"markers": [[0, 0.0]], "path": "live_set tracks 2 arrangement_clips 1"}]
+  ],
+  "ret": ["unsupported", "unknown op 'warp_markers_set'"],
+  "out": ""
+ },
+ "s2l.arrangement_clips": {
+  "calls": [
+   ["count", {"child": "arrangement_clips", "path": "live_set tracks 2"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 0", "property": "end_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 0", "property": "start_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "end_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "start_time"}]
+  ],
+  "ret": [[0, 3.5, 31.7], [1, 3.5, 31.7]],
+  "out": ""
+ },
+ "s2l.arrangement_clips.noend": {
+  "calls": [
+   ["count", {"child": "arrangement_clips", "path": "live_set tracks 2"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 0", "property": "end_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 0", "property": "start_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "end_time"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "start_time"}]
+  ],
+  "ret": [[0, 3.5, null], [1, 3.5, null]],
+  "out": ""
+ },
+ "s2l.audio_track_targets": {
+  "calls": [
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["get", {"path": "live_set tracks 1", "property": "has_audio_input"}],
+   ["get", {"path": "live_set tracks 2", "property": "has_audio_input"}],
+   ["call", {"args": [-1], "function": "create_audio_track", "path": "live_set"}],
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["call", {"args": [-1], "function": "create_audio_track", "path": "live_set"}],
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["call", {"args": [-1], "function": "create_audio_track", "path": "live_set"}],
+   ["count", {"child": "tracks", "path": "live_set"}]
+  ],
+  "ret": [1, 2, 2, 2, 2],
+  "out": "creating 3 audio tracks (set has 3)\n"
+ },
+ "s2l.is_audio_track": {
+  "calls": [
+   ["get", {"path": "live_set tracks 4", "property": "has_audio_input"}]
+  ],
+  "ret": true,
+  "out": ""
+ },
+ "s2l.lom.call_args": {
+  "calls": [
+   ["call", {"args": [-1], "function": "create_audio_track", "path": "live_set"}]
+  ],
+  "ret": {"id": 3, "ok": true, "result": {"result": null}},
+  "out": ""
+ },
+ "s2l.lom.call_noargs": {
+  "calls": [
+   ["call", {"function": "stop_playing", "path": "live_set"}]
+  ],
+  "ret": {"id": 2, "ok": true, "result": {"result": null}},
+  "out": ""
+ },
+ "s2l.lom.get": {
+  "calls": [
+   ["get", {"path": "live_set tracks 0", "property": "name"}]
+  ],
+  "ret": {"id": 1, "ok": true, "result": {"path": "live_set tracks 0", "property": "name", "value": "x"}},
+  "out": ""
+ },
+ "s2l.lom.notes_add": {
+  "calls": [
+   ["notes_add", {"notes": [{"duration": 4.0, "pitch": 84, "start_time": 0.0, "velocity": 90}], "path": "c"}]
+  ],
+  "ret": {"id": 5, "ok": true, "result": {"result": null}},
+  "out": ""
+ },
+ "s2l.lom.set": {
+  "calls": [
+   ["set", {"path": "live_set", "property": "tempo", "value": 126.0}]
+  ],
+  "ret": {"id": 4, "ok": true, "result": {"value": 126.0}},
+  "out": ""
+ },
+ "s2l.probe_bridge.nohandlers": {
+  "calls": [
+   ["ping", {}]
+  ],
+  "ret": null,
+  "out": ""
+ },
+ "s2l.probe_bridge.nowarp": {
+  "calls": [
+   ["ping", {}],
+   ["warp_markers_set", {}]
+  ],
+  "ret": false,
+  "out": "NOTE: this bridge has no `warp_markers_set` op, so a drifting set cannot be warped.\n      Send {\"op\": \"reload\"} to port {PORT} to pick up an updated handlers.py \u2014\n      the LOM handlers hot-reload, so this needs NO Live restart (unlike the MCP path).\n"
+ },
+ "s2l.probe_bridge.ok": {
+  "calls": [
+   ["ping", {}],
+   ["warp_markers_set", {}]
+  ],
+  "ret": true,
+  "out": ""
+ },
+ "s2l.probe_bridge.pingerror": {
+  "calls": [
+   ["ping", {}]
+  ],
+  "ret": null,
+  "out": ""
+ },
+ "s2l.set_track_headroom": {
+  "calls": [
+   ["set", {"path": "live_set tracks 3 mixer_device volume", "property": "value", "value": 0.7}]
+  ],
+  "ret": [true, "-6.0 dB"],
+  "out": ""
+ },
+ "s2l.set_track_headroom.err": {
+  "calls": [
+   ["set", {"path": "live_set tracks 3 mixer_device volume", "property": "value", "value": 0.7}]
+  ],
+  "ret": [false, "unknown op 'warp_markers_set'"],
+  "out": ""
+ },
+ "s2l.trim_clip_start.warped": {
+  "calls": [
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "warping"}],
+   ["set", {"path": "live_set tracks 2 arrangement_clips 1", "property": "looping", "value": true}],
+   ["set", {"path": "live_set tracks 2 arrangement_clips 1", "property": "loop_start", "value": 0.49376185}],
+   ["set", {"path": "live_set tracks 2 arrangement_clips 1", "property": "start_marker", "value": 0.49376185}],
+   ["set", {"path": "live_set tracks 2 arrangement_clips 1", "property": "looping", "value": false}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "start_marker"}]
+  ],
+  "ret": [false, "start_marker did not take \u2014 asked 0.4938 beats, reads 8.0000"],
+  "out": ""
+ },
+ "s2l.write_energy_map": {
+  "calls": [
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["get", {"path": "live_set tracks 2", "property": "name"}],
+   ["call", {"args": [2], "function": "delete_track", "path": "live_set"}],
+   ["get", {"path": "live_set tracks 1", "property": "name"}],
+   ["get", {"path": "live_set tracks 0", "property": "name"}],
+   ["call", {"args": [0], "function": "create_midi_track", "path": "live_set"}],
+   ["set", {"path": "live_set tracks 0", "property": "name", "value": "ENERGY MAP"}],
+   ["call", {"args": [4.0, 128.0], "function": "create_midi_clip", "path": "live_set tracks 0"}],
+   ["set", {"path": "live_set tracks 0 arrangement_clips 0", "property": "name", "value": "arrangement energy"}],
+   ["notes_add", {"notes": [{"duration": 32.0, "pitch": 84, "start_time": 0.0, "velocity": 90}], "path": "live_set tracks 0 arrangement_clips 0"}]
+  ],
+  "ret": null,
+  "out": "energy map: 1 notes on a silent MIDI track at the top \u2014 rows top to bottom: kick, bass\n"
+ },
+ "sv.call_args": {
+  "calls": [
+   ["call", {"args": [-1], "confirm": false, "function": "create_scene", "path": "live_set"}]
+  ],
+  "ret": {"result": null},
+  "out": ""
+ },
+ "sv.call_confirm": {
+  "calls": [
+   ["call", {"args": [], "confirm": true, "function": "delete_clip", "path": "live_set tracks 0 clip_slots 0"}]
+  ],
+  "ret": {"result": null},
+  "out": ""
+ },
+ "sv.call_noargs": {
+  "calls": [
+   ["call", {"args": [], "confirm": false, "function": "x", "path": "live_set"}]
+  ],
+  "ret": {"result": null},
+  "out": ""
+ },
+ "sv.clear_slot": {
+  "calls": [
+   ["get", {"path": "live_set tracks 1 clip_slots 0", "property": "has_clip"}],
+   ["call", {"args": [], "confirm": true, "function": "delete_clip", "path": "live_set tracks 1 clip_slots 0"}]
+  ],
+  "ret": true,
+  "out": ""
+ },
+ "sv.count": {
+  "calls": [
+   ["count", {"child": "tracks", "path": "live_set"}]
+  ],
+  "ret": 3,
+  "out": ""
+ },
+ "sv.ensure_scenes": {
+  "calls": [
+   ["count", {"child": "scenes", "path": "live_set"}],
+   ["call", {"args": [-1], "confirm": false, "function": "create_scene", "path": "live_set"}],
+   ["call", {"args": [-1], "confirm": false, "function": "create_scene", "path": "live_set"}],
+   ["set", {"path": "live_set scenes 0", "property": "name", "value": "S0"}],
+   ["set", {"path": "live_set scenes 1", "property": "name", "value": "S1"}],
+   ["set", {"path": "live_set scenes 2", "property": "name", "value": "S2"}],
+   ["set", {"path": "live_set scenes 3", "property": "name", "value": "S3"}]
+  ],
+  "ret": null,
+  "out": "scenes: 2 present, creating 2 more\n"
+ },
+ "sv.get": {
+  "calls": [
+   ["get", {"path": "live_set tracks 0", "property": "name"}]
+  ],
+  "ret": "x",
+  "out": ""
+ },
+ "sv.many_in_one_run": {
+  "calls": [
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["get", {"path": "live_set", "property": "tempo"}],
+   ["get", {"path": "live_set", "property": "tempo"}]
+  ],
+  "ret": [3, 0, 0],
+  "out": ""
+ },
+ "sv.map_stems_to_tracks": {
+  "calls": [
+   ["count", {"child": "tracks", "path": "live_set"}],
+   ["get", {"path": "live_set tracks 0", "property": "name"}],
+   ["get", {"path": "live_set tracks 1", "property": "name"}],
+   ["get", {"path": "live_set tracks 2", "property": "name"}]
+  ],
+  "ret": [{"bass": 1, "x": 0}, ["gone"], ["x", "bass", "ENERGY MAP"]],
+  "out": ""
+ },
+ "sv.set": {
+  "calls": [
+   ["set", {"path": "live_set scenes 0", "property": "name", "value": "Intro"}]
+  ],
+  "ret": {"value": "Intro"},
+  "out": ""
+ },
+ "sv.track_clip_color": {
+  "calls": [
+   ["count", {"child": "arrangement_clips", "path": "live_set tracks 2"}],
+   ["get", {"path": "live_set tracks 2 arrangement_clips 0", "property": "color"}]
+  ],
+  "ret": 255,
+  "out": ""
+ },
+ "sv.write_clip": {
+  "calls": [
+   ["call", {"args": ["/tmp/a.flac"], "confirm": false, "function": "create_audio_clip", "path": "live_set tracks 1 clip_slots 0"}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "warping", "value": true}],
+   ["get", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "end_marker"}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "looping", "value": true}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "loop_start", "value": 8.0}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "loop_end", "value": 40.0}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "start_marker", "value": 8.0}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "end_marker", "value": 40.0}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "name", "value": "Intro"}],
+   ["set", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "color", "value": 255}],
+   ["get", {"path": "live_set tracks 1 clip_slots 0 clip", "property": "start_marker"}]
+  ],
+  "ret": 64.0,
+  "out": ""
+ }
+}
