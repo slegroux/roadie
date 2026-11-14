@@ -6,6 +6,13 @@
   "ret": ["ok", "warp 2 markers (+2 -0, 1 refused)"],
   "out": ""
  },
+ "s2l.apply_warp_map.remote_timeout": {
+  "calls": [
+   ["warp_markers_set", {"markers": [[0, 0.0]], "path": "live_set tracks 2 arrangement_clips 1"}]
+  ],
+  "ret": ["failed", "Live's main thread was busy for 15s"],
+  "out": ""
+ },
  "s2l.apply_warp_map.unsupported": {
   "calls": [
    ["warp_markers_set", {"markers": [[0, 0.0]], "path": "live_set tracks 2 arrangement_clips 1"}]
@@ -83,6 +90,13 @@
    ["notes_add", {"notes": [{"duration": 4.0, "pitch": 84, "start_time": 0.0, "velocity": 90}], "path": "c"}]
   ],
   "ret": {"id": 5, "ok": true, "result": {"result": null}},
+  "out": ""
+ },
+ "s2l.lom.remote_timeout": {
+  "calls": [
+   ["call", {"args": [-1], "function": "create_audio_track", "path": "live_set"}]
+  ],
+  "ret": {"error": {"message": "Live's main thread was busy for 15s", "type": "Timeout"}, "id": 1, "ok": false},
   "out": ""
  },
  "s2l.lom.set": {

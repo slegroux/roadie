@@ -48,7 +48,12 @@ elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
 import argparse, colorsys, math, subprocess
 from concurrent import futures
 
-from sideman.client import Live, LiveError
+try:
+    from sideman.client import Live, LiveError
+except ModuleNotFoundError as _e:
+    if (_e.name or "").split(".")[0] != "sideman":
+        raise
+    sys.exit("sideman is not installed in .venv: run ./install.sh")
 
 PORT = 9878
 LOM_TIMEOUT = 120.0
@@ -77,7 +82,7 @@ def lom(op, **params):
     """
     try:
         return {"ok": True,
-                "result": Live("localhost", PORT, LOM_TIMEOUT).request(op, params)}
+                "result": Live("127.0.0.1", PORT, LOM_TIMEOUT).request(op, params)}
     except LiveError as e:
         if e.type == "ConnectionRefused":
             sys.exit("Nothing listening on 127.0.0.1:%d.\n"
@@ -85,7 +90,10 @@ def lom(op, **params):
                      "Control Surface = AbletonLOM (Input/Output = None)." % PORT)
         if e.type == "ConnectionClosed":
             raise RuntimeError("no reply from Live on port %d" % PORT)
-        if e.type == "Timeout":
+        # Only a timeout on the socket is raised; Live's own "Timeout" reply (its
+        # main thread was blocked) is an error envelope like any other refusal,
+        # which fails one operation, not the run.
+        if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
             raise TimeoutError("no reply from Live on port %d within %gs"
                                % (PORT, LOM_TIMEOUT))
         # `str(e)` is "<type>: <message>": give back the message as Live sent it.

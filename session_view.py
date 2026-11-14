@@ -59,7 +59,12 @@ import argparse
 import json
 import math
 
-from sideman.client import Live, LiveError
+try:
+    from sideman.client import Live, LiveError
+except ModuleNotFoundError as _e:
+    if (_e.name or "").split(".")[0] != "sideman":
+        raise
+    sys.exit("sideman is not installed in .venv: run ./install.sh")
 
 from sections import (BEATS_PER_BAR, PHRASE_BARS, analyze_sections, cli_grid,
                       stem_paths)
@@ -121,9 +126,14 @@ class Bridge:
                     "AbletonLOM." % (self.host, self.port))
             if e.type == "ConnectionClosed":
                 raise LomError("Live closed the connection during %r" % op)
-            if e.type == "Timeout":
+            # Only a timeout on the socket; Live's own "Timeout" reply is a
+            # refusal of this one request and falls through to LomError below.
+            if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
                 raise TimeoutError("no reply from Live within %gs" % self.timeout)
             raise LomError("%s %s: %s" % (op, params.get("path", ""), e))
+        except (ConnectionResetError, BrokenPipeError):
+            # Mid-request, with Live there a moment ago: not "nothing listening".
+            raise
         except OSError as e:
             # Unreachable host, a connect that timed out: the client lets these
             # through unwrapped, and the run has always reported them as "no

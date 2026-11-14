@@ -88,6 +88,17 @@ def _ping_fails(op, p):
     raise RuntimeError("nope")
 
 
+class Timeout(Exception):
+    """Named like the Remote Script's own timeout reply: it answers
+    `{"ok": false, "error": {"type": "Timeout", ...}}` when Live's main thread
+    stays blocked. The fake client turns it into LiveError("Timeout", ...)
+    with no socket timeout behind it."""
+
+
+def _remote_timeout(op, p):
+    raise Timeout("Live's main thread was busy for 15s")
+
+
 @pytest.fixture
 def wire(monkeypatch):
     """Replace `Live.request`; returns (install, calls). `install(reply)` sets
@@ -126,6 +137,8 @@ S2L = {
     "s2l.probe_bridge.nowarp": (_unknown_warp, S.probe_bridge),
     "s2l.arrangement_clips": (_generic, lambda: S.arrangement_clips(2)),
     "s2l.arrangement_clips.noend": (_no_end_time, lambda: S.arrangement_clips(2)),
+    "s2l.lom.remote_timeout": (_remote_timeout, lambda: S.lom("call", path="live_set", function="create_audio_track", args=[-1])),
+    "s2l.apply_warp_map.remote_timeout": (_remote_timeout, lambda: S.apply_warp_map(2, 1, [[0, 0.0]])),
     "s2l.apply_warp_map": (_generic, lambda: S.apply_warp_map(2, 1, [[0, 0.0], [4, 1.92]])),
     "s2l.apply_warp_map.unsupported": (_unknown_op, lambda: S.apply_warp_map(2, 1, [[0, 0.0]])),
     "s2l.set_track_headroom": (_generic, lambda: S.set_track_headroom(3, -6.0)),
@@ -214,6 +227,12 @@ def failing(monkeypatch):
     connection-level problem (type strings are the client's own)."""
     def fail(type_, message):
         def request(self, op, params=None):
+            if type_ == "Timeout":
+                # The client raises it from inside `except socket.timeout`.
+                try:
+                    raise socket.timeout("timed out")
+                except socket.timeout:
+                    raise LiveError(type_, message)
             raise LiveError(type_, message)
         monkeypatch.setattr(Live, "request", request)
     return fail
@@ -240,6 +259,43 @@ def test_stems2live_a_timeout_is_a_timeout_error(failing):
     failing("Timeout", "slow")
     with pytest.raises(TimeoutError):
         S.lom("ping")
+
+
+def test_stems2live_lives_own_timeout_reply_fails_one_operation_not_the_run(wire):
+    """REVIEW, blocking: the Remote Script answers `Timeout` when Live's main
+    thread was blocked. The old code returned that as an error envelope and the
+    run went on; only a timeout on the socket raised."""
+    install, calls = wire
+    install(_remote_timeout)
+    r = S.lom("call", path="live_set", function="create_audio_track", args=[-1])
+    assert r == {"ok": False, "error": {"type": "Timeout",
+                                        "message": "Live's main thread was busy for 15s"}}
+    install(lambda op, p: ({"count": 2} if op == "count"
+                           else _remote_timeout(op, p)))
+    with pytest.raises(SystemExit) as e:                 # as the old code did
+        S.audio_track_targets(5, 2)
+    assert str(e.value) == ("create_audio_track failed: "
+                            "Live's main thread was busy for 15s")
+
+
+def test_session_view_lives_own_timeout_reply_is_a_lom_error_the_run_survives(wire):
+    """Old: LomError, which the per-clip `except LomError` counts and carries
+    on from. Not the TimeoutError that ends the run."""
+    install, _ = wire
+    install(_remote_timeout)
+    with pytest.raises(V.LomError) as e:
+        V.Bridge().get("a", "b")
+    assert str(e.value).startswith("get a: ")
+    assert "Live's main thread was busy for 15s" in str(e.value)
+
+
+def test_session_view_a_reset_mid_request_is_not_relabelled_nothing_listening(monkeypatch):
+    for exc in (ConnectionResetError("reset"), BrokenPipeError("pipe")):
+        def request(self, op, params=None, _exc=exc):
+            raise _exc
+        monkeypatch.setattr(Live, "request", request)
+        with pytest.raises(type(exc)):
+            V.Bridge().get("a", "b")
 
 
 def test_stems2live_an_error_reply_comes_back_as_an_envelope_not_an_exception(wire):
@@ -327,6 +383,121 @@ def test_session_view_on_a_closed_port_the_real_client_still_gives_a_lom_error()
     with pytest.raises(V.LomError) as e:
         V.Bridge(port=port).get("a", "b")
     assert str(e.value).startswith("nothing listening on 127.0.0.1:%d" % port)
+
+
+# ------------------------------------------------- the real client, loopback
+
+class _Loopback:
+    """One-shot-per-connection server for the REAL `Live`: replies with an error
+    envelope, stays silent, or hangs up, so the adapters meet the client's own
+    exceptions rather than a fake's."""
+
+    def __init__(self, mode, error=None):
+        import threading
+        self.mode, self.error = mode, error
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.port = self.sock.getsockname()[1]
+        self.held = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            if self.mode == "error":
+                conn.sendall(json.dumps({"id": "py", "ok": False,
+                                         "error": self.error}).encode() + b"\n")
+                conn.close()
+            elif self.mode == "close":
+                conn.close()
+            else:                                   # silent: hold it open
+                self.held.append(conn)
+
+    def close(self):
+        self.sock.close()
+        for c in self.held:
+            c.close()
+
+
+@pytest.fixture
+def loopback(monkeypatch):
+    made = []
+
+    def start(mode, error=None):
+        srv = _Loopback(mode, error)
+        made.append(srv)
+        monkeypatch.setattr(S, "PORT", srv.port)
+        monkeypatch.setattr(S, "LOM_TIMEOUT", 0.3)
+        return srv
+    yield start
+    for srv in made:
+        srv.close()
+
+
+def test_loopback_a_silent_live_is_a_timeout_error_in_both_modules(loopback):
+    srv = loopback("silent")
+    with pytest.raises(TimeoutError):
+        S.lom("ping")
+    with pytest.raises(TimeoutError) as e:
+        V.Bridge(port=srv.port, timeout=0.3).get("a", "b")
+    assert not isinstance(e.value, V.LomError)
+
+
+def test_loopback_a_connection_closed_before_a_reply(loopback):
+    srv = loopback("close")
+    with pytest.raises(RuntimeError) as e:
+        S.lom("ping")
+    assert str(e.value) == "no reply from Live on port %d" % srv.port
+    with pytest.raises(V.LomError) as e:
+        V.Bridge(port=srv.port, timeout=0.3).get("a", "b")
+    assert str(e.value) == "Live closed the connection during 'get'"
+
+
+def test_loopback_error_replies_including_lives_own_timeout(loopback):
+    for err in ({"type": "ValueError", "message": "nope"},
+                {"type": "Timeout", "message": "main thread blocked"}):
+        srv = loopback("error", err)
+        assert S.lom("get", path="a", property="b") == {"ok": False, "error": err}
+        with pytest.raises(V.LomError) as e:
+            V.Bridge(port=srv.port, timeout=0.3).get("a", "b")
+        assert err["message"] in str(e.value)
+
+
+def test_the_address_and_the_120_second_timeout_are_pinned(monkeypatch):
+    seen = []
+
+    def request(self, op, params=None):
+        seen.append((self.host, self.port, self.timeout))
+        return {}
+    monkeypatch.setattr(Live, "request", request)
+    S.lom("ping")
+    V.Bridge().request("ping")
+    assert seen == [("127.0.0.1", S.PORT, 120.0), ("127.0.0.1", 9878, 120.0)]
+
+
+@pytest.mark.parametrize("script", ["stems2live.py", "session_view.py"])
+def test_a_venv_without_sideman_says_what_to_run(script):
+    """An old .venv built before sideman was a dependency: a one-line exit,
+    not a ModuleNotFoundError traceback."""
+    import subprocess
+    import sys
+    code = ("import sys; sys.modules['sideman'] = None; "
+            "sys.path.insert(0, %r); import %s" % (HERE, script[:-3]))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=120, check=False,
+                       env=dict(os.environ, ROADIE_REEXEC="1"))
+    assert r.returncode == 1
+    assert r.stderr.strip() == "sideman is not installed in .venv: run ./install.sh"
 
 
 # ------------------------------------------------------------ no raw socket
