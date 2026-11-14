@@ -20,4 +20,4 @@
 # Pinned to a commit of Sideman's main (the merge of its PR #8, which holds the public `sideman.listen` names and
 # the three-step mix report). Move it to a tag, or to PyPI, once Sideman publishes one that has them. The v0.1.0
 # tag is older than the Remote Script users have installed, so it is not an option.
-sideman[listen] @ git+https://github.com/slegroux/sideman@320e9cfec2655ff3c83649ab538c8202dbd0a5b9
+sideman[listen] @ git+https://github.com/slegroux/sideman@bf4d4c911ac2a4b53504071be93d4de4b4098b43

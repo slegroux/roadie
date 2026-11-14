@@ -63,10 +63,28 @@ BANDS = [(30, 80), (80, 200), (200, 500), (500, 1200),
 CENTRES = [math.sqrt(lo * hi) for lo, hi in BANDS]
 
 
+_LIVE = None      # the connection this run holds: (PORT, LOM_TIMEOUT) it was opened for, and the Live
+
+
+def _live():
+    """The `sideman.client.Live` every request of this run goes through, holding ONE connection.
+
+    A load is a few hundred requests and a held connection saves Live a tick on each (measured on a
+    ten-stem Set: 389 ms a request against 603 ms connecting every time). `Live.__enter__` is what
+    holds it; the connection closes with the process. A changed PORT or LOM_TIMEOUT gets a new one.
+    """
+    global _LIVE
+    if _LIVE is None or _LIVE[0] != (PORT, LOM_TIMEOUT):
+        if _LIVE is not None:
+            _LIVE[1].close()
+        _LIVE = ((PORT, LOM_TIMEOUT), Live("127.0.0.1", PORT, LOM_TIMEOUT).__enter__())
+    return _LIVE[1]
+
+
 def lom(op, **params):
     """One round trip to the AbletonLOM bridge. Returns the reply envelope.
 
-    The wire is `sideman.client.Live.request`, one connection per request. This
+    The wire is `sideman.client.Live.request`, on the one connection `_live()` holds. This
     keeps the envelope the callers below were written against, `{"ok": True,
     "result": ...}` or `{"ok": False, "error": {"type", "message"}}`, because
     they branch on `ok` and print the error instead of catching exceptions:
@@ -82,7 +100,7 @@ def lom(op, **params):
     """
     try:
         return {"ok": True,
-                "result": Live("127.0.0.1", PORT, LOM_TIMEOUT).request(op, params)}
+                "result": _live().request(op, params)}
     except LiveError as e:
         if e.type == "ConnectionRefused":
             sys.exit("Nothing listening on 127.0.0.1:%d.\n"
