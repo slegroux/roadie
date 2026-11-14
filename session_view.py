@@ -126,7 +126,7 @@ class Bridge:
                     "AbletonLOM." % (self.host, self.port))
             if e.type == "ConnectionClosed":
                 raise LomError("Live closed the connection during %r" % op)
-            # Only a timeout on the socket; Live's own "Timeout" reply is a
+            # Only a timeout waiting on the connection; Live's own "Timeout" reply is a
             # refusal of this one request and falls through to LomError below.
             if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
                 raise TimeoutError("no reply from Live within %gs" % self.timeout)

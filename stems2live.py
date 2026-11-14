@@ -90,7 +90,7 @@ def lom(op, **params):
                      "Control Surface = AbletonLOM (Input/Output = None)." % PORT)
         if e.type == "ConnectionClosed":
             raise RuntimeError("no reply from Live on port %d" % PORT)
-        # Only a timeout on the socket is raised; Live's own "Timeout" reply (its
+        # Only a timeout waiting on the connection is raised; Live's own "Timeout" reply (its
         # main thread was blocked) is an error envelope like any other refusal,
         # which fails one operation, not the run.
         if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
