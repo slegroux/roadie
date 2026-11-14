@@ -254,6 +254,12 @@ from a clone), then in Live: **Preferences → Link, Tempo & MIDI → Control
 Surface = AbletonLOM** (the name Sideman's remote script registers under),
 Input/Output = None. Restart Live once if it was running during the install.
 
+Roadie does not speak that socket itself: `roadie load` and `roadie scenes` go
+through Sideman's Python client, `sideman.client.Live`. `install.sh` installs
+the `sideman` package into Roadie's `.venv` (it is pinned in `requirements.txt`
+to a commit of Sideman's `main`; the package also pulls in `mcp`), so an `.venv`
+built before that needs `./install.sh` run once more.
+
 Sideman ships `warp_markers_set` natively, so no patch is needed on the Live side.
 Verify with:
 
@@ -831,8 +837,9 @@ without it gets a looser tempo. `-D` (`--no-drums`) stops at the four stems; a
 later `-s` run on the same source adds only the drum pass.
 
 **Live must already be running** with Sideman active (`roadie open` launches it
-for you). The socket (127.0.0.1:9878) lives inside Live; there is no headless
-mode, and the port is 9878 (only `roadie scenes` takes `--port`). The socket answers identically whatever handlers
+for you). Sideman's socket (127.0.0.1:9878, reached through `sideman.client`)
+lives inside Live; there is no headless mode, and the port is 9878 (only
+`roadie scenes` takes `--port`). The socket answers identically whatever handlers
 are loaded, so "the port is open" proves nothing — `./install.sh --check` probes
 for `warp_markers_set`, which is the reliable test.
 
