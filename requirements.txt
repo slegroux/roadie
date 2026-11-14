@@ -7,5 +7,12 @@ scipy==1.18.0
 librosa==0.11.0
 soundfile==0.14.0
 numba==0.66.0
+# The Ableton bridge's Python client (sideman.client.Live): stems2live and
+# session_view reach Live only through it. Pinned to a commit on Sideman's main
+# rather than the v0.1.0 tag, which is 66 commits older than the Remote Script
+# users have installed; move to a tag once Sideman publishes one (or to PyPI).
+# Only sideman.client is imported, but installing the package also pulls in
+# `mcp`, Sideman's core dependency.
+sideman @ git+https://github.com/slegroux/sideman@bc9ba081801a035e4d7bbdd9a225ca46fd1b42f5
 # tests
 pytest==9.1.1

@@ -15,8 +15,10 @@
 # extensions, so you type `stems2als`, not `stems2als.sh`.
 #
 # This installs the CLI side only. The Ableton bridge (needed for roadie
-# load/open/scenes) is Sideman, installed on its own — see README.md, "Ableton
-# side: Sideman" (https://github.com/slegroux/sideman). --check probes it.
+# load/open/scenes) is Sideman: its Python client (sideman.client) comes with
+# requirements.txt, but the Remote Script that runs inside Live is installed on
+# its own — see README.md, "Ableton side: Sideman"
+# (https://github.com/slegroux/sideman). --check probes it.
 
 set -euo pipefail
 trap 'rc=$?; echo "install: FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
@@ -83,7 +85,7 @@ VENV_PY="$HERE/.venv/bin/python"
 # Probe the packages, not just the interpreter: a `uv pip install` that died
 # half way leaves a python with nothing importable, and checking only for the
 # binary would call that installed forever.
-venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile" >/dev/null 2>&1; }
+venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client" >/dev/null 2>&1; }
 if venv_ok; then
   printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
 elif [[ $CHECK -eq 1 ]]; then
