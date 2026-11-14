@@ -12,8 +12,8 @@ centroid, so the arrangement reads low-frequency at the top to high at the
 bottom.
 
 Requires Live running with the AbletonLOM control surface active (it listens on
-127.0.0.1:9878). Talks to that socket directly rather than going through the MCP
-server, so it works from a plain shell.
+127.0.0.1:9878). Talks to it through `sideman.client.Live`, Sideman's own Python
+client, rather than going through the MCP server, so it works from a plain shell.
 
 The bridge is generic: instead of one command per feature it exposes the Live
 Object Model itself, so every call here is a `get`/`set`/`call`/`count` against
@@ -31,47 +31,74 @@ luck. A sub-heavy track flips that ordering, and the kick belongs at the top
 regardless of what the measurement says.
 """
 
-import argparse, colorsys, itertools, json, math, os, socket, subprocess, sys
+import os
+import sys
+
+# Re-exec with local .venv python if present: `sideman` (the Live client) and
+# librosa are installed there, not in the system python the shebang finds.
+_real_script = os.path.realpath(__file__)
+_venv = os.path.join(os.path.dirname(_real_script), ".venv")
+_venv_py = os.path.join(_venv, "bin", "python")
+if os.path.realpath(sys.prefix) == os.path.realpath(_venv):
+    os.environ.pop("ROADIE_REEXEC", None)    # arrived; later scripts may hop again
+elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
+    os.environ["ROADIE_REEXEC"] = "1"        # one hop, whatever the venv looks like
+    os.execv(_venv_py, [_venv_py] + sys.argv)
+
+import argparse, colorsys, math, subprocess
 from concurrent import futures
 
+try:
+    from sideman.client import Live, LiveError
+except ModuleNotFoundError as _e:
+    if (_e.name or "").split(".")[0] != "sideman":
+        raise
+    sys.exit("sideman is not installed in .venv: run ./install.sh")
+
 PORT = 9878
+LOM_TIMEOUT = 120.0
 # geometric centres of the bands sampled for the centroid
 BANDS = [(30, 80), (80, 200), (200, 500), (500, 1200),
          (1200, 3000), (3000, 7000), (7000, 16000)]
 CENTRES = [math.sqrt(lo * hi) for lo, hi in BANDS]
 
-_REQ_ID = itertools.count(1)
-
 
 def lom(op, **params):
     """One round trip to the AbletonLOM bridge. Returns the reply envelope.
 
-    Wire format is newline-delimited JSON: a request is
-    `{"id": n, "op": ..., "params": {...}}` — note `params` is NESTED, a flat
-    body makes the handler raise `KeyError: 'path'` — and the reply is exactly
-    one line, `{"id": n, "ok": bool, "result": ..., "error": {...}}`.
+    The wire is `sideman.client.Live.request`, one connection per request. This
+    keeps the envelope the callers below were written against, `{"ok": True,
+    "result": ...}` or `{"ok": False, "error": {"type", "message"}}`, because
+    they branch on `ok` and print the error instead of catching exceptions:
+    Live's refusals come back as that envelope rather than being raised.
 
-    Read to the first NEWLINE, not to EOF: the bridge keeps the connection open
-    for further requests, so waiting for the socket to close would hang.
+    `Live.request(op, params)` rather than its typed methods, on purpose:
+    `Live.call` adds `"confirm": false` to every call and `args: []` to ones
+    that sent none, which would change what goes out on the wire.
+
+    Failures of the connection itself are raised, as they always were: nothing
+    listening exits with the set-up instructions, a connection closed before a
+    reply is a RuntimeError, and a reply that never comes is a TimeoutError.
     """
     try:
-        s = socket.create_connection(("localhost", PORT), timeout=120)
-    except ConnectionRefusedError:
-        sys.exit("Nothing listening on 127.0.0.1:%d.\n"
-                 "Open Ableton Live and set Preferences -> Link, Tempo & MIDI ->\n"
-                 "Control Surface = AbletonLOM (Input/Output = None)." % PORT)
-    try:
-        s.sendall((json.dumps({"id": next(_REQ_ID), "op": op, "params": params})
-                   + "\n").encode())
-        buf = b""
-        while b"\n" not in buf:
-            chunk = s.recv(65536)
-            if not chunk:
-                raise RuntimeError("no reply from Live on port %d" % PORT)
-            buf += chunk
-        return json.loads(buf.split(b"\n", 1)[0].decode())
-    finally:
-        s.close()
+        return {"ok": True,
+                "result": Live("127.0.0.1", PORT, LOM_TIMEOUT).request(op, params)}
+    except LiveError as e:
+        if e.type == "ConnectionRefused":
+            sys.exit("Nothing listening on 127.0.0.1:%d.\n"
+                     "Open Ableton Live and set Preferences -> Link, Tempo & MIDI ->\n"
+                     "Control Surface = AbletonLOM (Input/Output = None)." % PORT)
+        if e.type == "ConnectionClosed":
+            raise RuntimeError("no reply from Live on port %d" % PORT)
+        # Only a timeout waiting on the connection is raised; Live's own "Timeout" reply (its
+        # main thread was blocked) is an error envelope like any other refusal,
+        # which fails one operation, not the run.
+        if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
+            raise TimeoutError("no reply from Live on port %d within %gs"
+                               % (PORT, LOM_TIMEOUT))
+        # `str(e)` is "<type>: <message>": give back the message as Live sent it.
+        return {"ok": False,
+                "error": {"type": e.type, "message": str(e)[len(e.type) + 2:]}}
 
 
 def lom_err(reply):

@@ -1,0 +1,263 @@
+{
+  "input_schemas": {
+    "sample_analyze": {
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "hit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hit"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "sample_analyzeArguments",
+      "type": "object"
+    },
+    "sample_compare": {
+      "properties": {
+        "a": {
+          "title": "A",
+          "type": "string"
+        },
+        "b": {
+          "title": "B",
+          "type": "string"
+        },
+        "hit_a": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hit A"
+        },
+        "hit_b": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hit B"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ],
+      "title": "sample_compareArguments",
+      "type": "object"
+    },
+    "mix_report": {
+      "properties": {
+        "manifest": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Manifest"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
+        "out_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Out Dir"
+        }
+      },
+      "required": [
+        "manifest"
+      ],
+      "title": "mix_reportArguments",
+      "type": "object"
+    },
+    "reference_profile": {
+      "properties": {
+        "mix": {
+          "title": "Mix",
+          "type": "string"
+        },
+        "stems": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "title": "Stems",
+          "type": "object"
+        },
+        "tempo": {
+          "title": "Tempo",
+          "type": "number"
+        },
+        "t0": {
+          "title": "T0",
+          "type": "number"
+        },
+        "sections": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "beats_per_bar": {
+          "default": 4,
+          "title": "Beats Per Bar",
+          "type": "integer"
+        },
+        "out": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Out"
+        }
+      },
+      "required": [
+        "mix",
+        "stems",
+        "tempo",
+        "t0",
+        "sections"
+      ],
+      "title": "reference_profileArguments",
+      "type": "object"
+    }
+  },
+  "reference_profile_summary": {
+    "json_path": "DIR/ref.profile.json",
+    "tempo": 120.0,
+    "t0": 0.25,
+    "beats_per_bar": 4,
+    "sample_rate": 48000,
+    "roles": [
+      "kick",
+      "bass",
+      "synth",
+      "hh",
+      "snare",
+      "drums"
+    ],
+    "notes": [],
+    "sections": [
+      {
+        "name": "A",
+        "start_bar": 0,
+        "bars": 4,
+        "mix_level_db": -15.97,
+        "present": [
+          "kick",
+          "bass",
+          "synth",
+          "hh",
+          "snare",
+          "drums"
+        ],
+        "trace": [],
+        "absent": []
+      },
+      {
+        "name": "B",
+        "start_bar": 4,
+        "bars": 4,
+        "mix_level_db": -16.15,
+        "present": [
+          "kick",
+          "bass",
+          "hh",
+          "snare",
+          "drums"
+        ],
+        "trace": [],
+        "absent": [
+          "synth"
+        ]
+      },
+      {
+        "name": "C",
+        "start_bar": 8,
+        "bars": 4,
+        "mix_level_db": -15.97,
+        "present": [
+          "kick",
+          "bass",
+          "synth",
+          "hh",
+          "snare",
+          "drums"
+        ],
+        "trace": [],
+        "absent": []
+      }
+    ]
+  }
+}

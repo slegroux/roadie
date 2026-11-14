@@ -15,6 +15,7 @@ import os
 import sys
 
 import pytest
+from sideman.client import Live, LiveError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -309,29 +310,26 @@ def test_the_threshold_is_a_parameter_not_a_hardcoded_four():
 # the bridge envelope
 # --------------------------------------------------------------------------
 
-class _FakeSocket:
-    """A bridge that replies with the real envelope shape, not a bare value."""
+class _FakeLive:
+    """Stands in for `Live.request`: replies with the real envelope shape, not a
+    bare value. An error envelope becomes a LiveError, as in the real client."""
 
     def __init__(self, replies):
         self.replies, self.sent = list(replies), []
-        self._out = b""
 
-    def sendall(self, data):
-        self.sent.append(json.loads(data.decode()))
-        self._out += json.dumps(self.replies.pop(0)).encode() + b"\n"
-
-    def recv(self, _n):
-        out, self._out = self._out, b""
-        return out
-
-    def close(self):
-        pass
+    def request(self, _live, op, params=None):
+        self.sent.append({"op": op, "params": json.loads(json.dumps(params or {}))})
+        reply = self.replies.pop(0)
+        if not reply.get("ok"):
+            err = reply["error"]
+            raise LiveError(err["type"], err["message"])
+        return reply["result"]
 
 
 def _bridge(monkeypatch, replies):
-    fake = _FakeSocket(replies)
-    monkeypatch.setattr("session_view.socket.create_connection",
-                        lambda *a, **k: fake)
+    fake = _FakeLive(replies)
+    monkeypatch.setattr(Live, "request",
+                        lambda live, op, params=None: fake.request(live, op, params))
     b = Bridge()
     return b, fake
 
@@ -363,7 +361,8 @@ def test_params_are_sent_nested(monkeypatch):
 
 
 def test_a_refusal_raises_rather_than_returning_none(monkeypatch):
-    b, _ = _bridge(monkeypatch, [{"ok": False, "error": "no such property"}])
+    b, _ = _bridge(monkeypatch, [{"ok": False, "error": {
+        "type": "AttributeError", "message": "no such property"}}])
     with pytest.raises(LomError) as e:
         b.get("live_set tracks 99", "name")
     assert "no such property" in str(e.value)

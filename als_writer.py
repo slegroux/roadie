@@ -52,8 +52,12 @@ import sys
 # Re-exec with the local .venv python if present, like the other scripts, so
 # numpy/soundfile/librosa resolve when this is run through the roadie command.
 _real_script = os.path.realpath(__file__)
-_venv_py = os.path.join(os.path.dirname(_real_script), ".venv", "bin", "python")
-if os.path.exists(_venv_py) and sys.executable != _venv_py and "VIRTUAL_ENV" not in os.environ:
+_venv = os.path.join(os.path.dirname(_real_script), ".venv")
+_venv_py = os.path.join(_venv, "bin", "python")
+if os.path.realpath(sys.prefix) == os.path.realpath(_venv):
+    os.environ.pop("ROADIE_REEXEC", None)    # arrived; later scripts may hop again
+elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
+    os.environ["ROADIE_REEXEC"] = "1"        # one hop, whatever the venv looks like
     os.execv(_venv_py, [_venv_py] + sys.argv)
 
 import argparse

@@ -7,5 +7,7 @@ scipy==1.18.0
 librosa==0.11.0
 soundfile==0.14.0
 numba==0.66.0
+# Sideman (the Ableton bridge's Python client, and the measurement core) is pinned in
+# requirements-sideman.txt and installed with --no-deps, after this file: see there.
 # tests
 pytest==9.1.1

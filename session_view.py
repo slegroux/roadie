@@ -37,8 +37,9 @@ in BEATS (measured: 307.92 -> 641.515 on the same clip). Trimming before the
 warp writes second-values into beat-fields and lands the clip roughly 480 times
 too short.
 
-Talks to the AbletonLOM remote script on 127.0.0.1:9878 directly, so it runs
-from a plain shell without the MCP server in the way.
+Talks to the AbletonLOM remote script on 127.0.0.1:9878 through
+`sideman.client.Live`, so it runs from a plain shell without the MCP server in
+the way.
 """
 
 import os
@@ -46,14 +47,24 @@ import sys
 
 # Re-exec with local .venv python if present to ensure librosa/numpy environment
 _real_script = os.path.realpath(__file__)
-_venv_py = os.path.join(os.path.dirname(_real_script), ".venv", "bin", "python")
-if os.path.exists(_venv_py) and sys.executable != _venv_py and "VIRTUAL_ENV" not in os.environ:
+_venv = os.path.join(os.path.dirname(_real_script), ".venv")
+_venv_py = os.path.join(_venv, "bin", "python")
+if os.path.realpath(sys.prefix) == os.path.realpath(_venv):
+    os.environ.pop("ROADIE_REEXEC", None)    # arrived; later scripts may hop again
+elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
+    os.environ["ROADIE_REEXEC"] = "1"        # one hop, whatever the venv looks like
     os.execv(_venv_py, [_venv_py] + sys.argv)
 
 import argparse
 import json
 import math
-import socket
+
+try:
+    from sideman.client import Live, LiveError
+except ModuleNotFoundError as _e:
+    if (_e.name or "").split(".")[0] != "sideman":
+        raise
+    sys.exit("sideman is not installed in .venv: run ./install.sh")
 
 from sections import (BEATS_PER_BAR, PHRASE_BARS, analyze_sections, cli_grid,
                       stem_paths)
@@ -81,61 +92,56 @@ class LomError(RuntimeError):
 
 
 class Bridge:
-    """One persistent connection to the AbletonLOM remote script.
+    """The AbletonLOM remote script, through `sideman.client.Live`.
 
-    The connection is reused across requests on purpose. A full grid is ~7 calls
-    per clip and ~90 clips; a socket per call is 600-odd connects, and the remote
-    script spawns a thread for each one. The wire is newline-delimited JSON in
-    both directions, so several requests can share a connection safely.
+    `Live` connects once per request, where this class used to hold one
+    connection open for a whole run: a full grid is ~7 calls per clip and ~90
+    clips, so ~600 short loopback connections instead of one. It is what the
+    shared client does, and the price of not keeping a second copy of the wire
+    protocol here.
 
-    `params` IS NESTED. A flat body — `{"op": "get", "path": ...}` — reaches the
-    handler with no `path` key and comes back as `KeyError: 'path'`, which reads
-    like a missing object rather than a malformed request.
+    `Live.request` takes `params` as a dict and nests it for the wire; a flat
+    body reaches the handler with no `path` key and comes back as
+    `KeyError: 'path'`, which reads like a missing object rather than a
+    malformed request. Every method below goes through `request` rather than
+    `Live`'s typed ones so that what is sent stays exactly what it was.
     """
 
     def __init__(self, host=LOM_HOST, port=LOM_PORT, timeout=120.0):
         self.host, self.port, self.timeout = host, port, timeout
-        self._sock = None
-        self._buf = b""
-        self._next_id = 0
+        self._live = Live(host, port, timeout)
 
-    def connect(self):
-        if self._sock is not None:
-            return
+    def close(self):
+        """Nothing is held open between requests; kept so callers still pair
+        every Bridge with a close."""
+
+    def request(self, op, **params):
         try:
-            self._sock = socket.create_connection((self.host, self.port),
-                                                  timeout=self.timeout)
-        except (ConnectionRefusedError, OSError) as e:
+            return self._live.request(op, params)
+        except LiveError as e:
+            if e.type == "ConnectionRefused":
+                raise LomError(
+                    "nothing listening on %s:%d.\nOpen Ableton Live and set "
+                    "Preferences -> Link, Tempo & MIDI -> Control Surface = "
+                    "AbletonLOM." % (self.host, self.port))
+            if e.type == "ConnectionClosed":
+                raise LomError("Live closed the connection during %r" % op)
+            # Only a timeout waiting on the connection; Live's own "Timeout" reply is a
+            # refusal of this one request and falls through to LomError below.
+            if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
+                raise TimeoutError("no reply from Live within %gs" % self.timeout)
+            raise LomError("%s %s: %s" % (op, params.get("path", ""), e))
+        except (ConnectionResetError, BrokenPipeError):
+            # Mid-request, with Live there a moment ago: not "nothing listening".
+            raise
+        except OSError as e:
+            # Unreachable host, a connect that timed out: the client lets these
+            # through unwrapped, and the run has always reported them as "no
+            # bridge" rather than crashing.
             raise LomError(
                 "nothing listening on %s:%d (%s).\nOpen Ableton Live and set "
                 "Preferences -> Link, Tempo & MIDI -> Control Surface = "
                 "AbletonLOM." % (self.host, self.port, e))
-
-    def close(self):
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            finally:
-                self._sock = None
-                self._buf = b""
-
-    def request(self, op, **params):
-        self.connect()
-        self._next_id += 1
-        line = json.dumps({"id": self._next_id, "op": op,
-                           "params": params}).encode() + b"\n"
-        self._sock.sendall(line)
-        while b"\n" not in self._buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise LomError("Live closed the connection during %r" % op)
-            self._buf += chunk
-        raw, self._buf = self._buf.split(b"\n", 1)
-        reply = json.loads(raw.decode())
-        if not reply.get("ok"):
-            raise LomError("%s %s: %s" % (op, params.get("path", ""),
-                                          reply.get("error") or "refused"))
-        return reply.get("result")
 
     def get(self, path, prop):
         """The property's VALUE, not the bridge's envelope around it.

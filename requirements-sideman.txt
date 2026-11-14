@@ -1,0 +1,23 @@
+# The one Sideman pin. Installed AFTER requirements.txt and with --no-deps, by install.sh
+# and CI:
+#
+#     uv pip install -r requirements.txt
+#     uv pip install --no-deps -r requirements-sideman.txt
+#
+# --no-deps because Roadie imports only sideman.client and sideman.listen, which need numpy and
+# soundfile (pinned in requirements.txt) and nothing else. Without it the install also pulls in
+# `mcp`, Sideman's core dependency, and 23 packages under it (pydantic, starlette, cryptography,
+# ...) whose versions float. With --no-deps the `[listen]` extra is not resolved either, so
+# numpy and soundfile must stay pinned in requirements.txt: they are the ones that count.
+#
+# Sideman, the Ableton bridge and the measurement core. stems2live and session_view reach Live only through
+# `sideman.client.Live`; roadie_analysis builds on the public names of `sideman.listen` (levels, spectra, the
+# manifest readers, and load_capture / mix_layer / write_report: the plain mix report session_compare adds its
+# layers to). The `listen` extra (numpy, soundfile) is written here only to name that need: under --no-deps
+# nothing resolves it, so the numpy and soundfile pinned in requirements.txt are the ones in force. Keep them
+# compatible with what Sideman asks for (numpy>=1.24, soundfile>=0.12) by hand.
+#
+# Pinned to a commit of Sideman's main (the merge of its PR #8, which holds the public `sideman.listen` names and
+# the three-step mix report). Move it to a tag, or to PyPI, once Sideman publishes one that has them. The v0.1.0
+# tag is older than the Remote Script users have installed, so it is not an option.
+sideman[listen] @ git+https://github.com/slegroux/sideman@320e9cfec2655ff3c83649ab538c8202dbd0a5b9
