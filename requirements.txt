@@ -7,12 +7,15 @@ scipy==1.18.0
 librosa==0.11.0
 soundfile==0.14.0
 numba==0.66.0
-# The Ableton bridge's Python client (sideman.client.Live): stems2live and
-# session_view reach Live only through it. Pinned to a commit on Sideman's main
-# rather than the v0.1.0 tag, which is 66 commits older than the Remote Script
-# users have installed; move to a tag once Sideman publishes one (or to PyPI).
-# Only sideman.client is imported, but installing the package also pulls in
-# `mcp`, Sideman's core dependency.
-sideman @ git+https://github.com/slegroux/sideman@bc9ba081801a035e4d7bbdd9a225ca46fd1b42f5
+# Sideman, the Ableton bridge and the measurement core. stems2live and session_view reach Live only through
+# `sideman.client.Live`; roadie_analysis builds on the public names of `sideman.listen` (levels, spectra, the
+# manifest readers), which is why the `listen` extra (numpy, soundfile) is asked for: it makes the resolver check
+# the numpy and soundfile pinned above against what Sideman needs (numpy>=1.24, soundfile>=0.12). Installing
+# the package also pulls in `mcp`, Sideman's core dependency.
+#
+# PINNED TO A COMMIT OF SIDEMAN'S BRANCH feat/yt2live-audio-layer, not its main: the public names exist only
+# there. MOVE THIS PIN TO SIDEMAN MAIN (then to a tag, or PyPI once Sideman publishes) as soon as that branch
+# merges. The v0.1.0 tag is 66 commits older than the Remote Script users have installed, so it is not an option.
+sideman[listen] @ git+https://github.com/slegroux/sideman@b4cce24ee3e4d8f6f8a2740781d82423f768c496
 # tests
 pytest==9.1.1
