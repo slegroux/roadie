@@ -429,6 +429,9 @@ def build_session_view(stems_dir, period=None, grid_t0=None,
         if not dry_run:
             bridge.close()
             raise
+    except BaseException:            # a timeout, Ctrl-C: the Bridge holds a connection now, so it is closed
+        bridge.close()
+        raise
 
     # Top to bottom in track order, so the printed progress reads the same way
     # the grid does.
@@ -456,11 +459,10 @@ def build_session_view(stems_dir, period=None, grid_t0=None,
         bridge.close()
         return plan
 
-    colors = {s: track_clip_color(bridge, mapping[s]) for s in ordered}
-    ensure_scenes(bridge, scenes, verbose=verbose)
-
     written = failed = 0
     try:
+        colors = {s: track_clip_color(bridge, mapping[s]) for s in ordered}
+        ensure_scenes(bridge, scenes, verbose=verbose)
         for sc in scenes:
             done = []
             for stem in ordered:
