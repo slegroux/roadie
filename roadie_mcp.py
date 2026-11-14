@@ -2,7 +2,7 @@
 """Roadie's MCP server: the analysis tools that need a reference track, its stems or samples.
 
     roadie mcp                      run it (stdio); an MCP client starts it, not you
-    claude mcp add roadie -- roadie mcp
+    claude mcp add --scope user roadie -- /abs/path/to/roadie/roadie mcp
 
 Four tools: sample_analyze, sample_compare, reference_profile and session_compare. The first three
 have the names, arguments, defaults and output of Sideman's tools of the same name; session_compare
@@ -82,6 +82,8 @@ def _audio_file(source: str) -> str:
             got = client.Live().get(source, "file_path")
         except (client.LiveError, OSError, ValueError) as e:
             raise AnalysisError("cannot read the file_path of %s from Live: %s" % (source, e))
+        except (AttributeError, TypeError) as e:           # a reply that is not the object sideman.client expects
+            raise AnalysisError("cannot read the file_path of %s from Live: malformed reply (%s: %s)" % (source, type(e).__name__, e))
         path = got.get("value") if isinstance(got, dict) else got
         if not path:
             raise AnalysisError("%s has no file_path; only audio clips do" % source)

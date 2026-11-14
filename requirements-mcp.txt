@@ -12,6 +12,10 @@
 # the suite was run in, so an install gets exactly what was tested. Without this file the CLI side
 # works as before; only `roadie mcp` stops, with an install hint.
 #
+# Four packages below (cffi, idna, pycparser, typing-extensions) are also pulled in, unpinned, by
+# requirements.txt (soundfile, librosa): installed last, this file is the pin in force for them. numpy,
+# scipy, soundfile, librosa and numba are not in the mcp tree and cannot move.
+#
 # To move to a newer mcp: put the new version in a one-line file and run
 #     uv pip compile <file> --python-version 3.13 --universal --no-header --no-annotate
 # then paste the result below this comment and run the suite (test_roadie_mcp.py).

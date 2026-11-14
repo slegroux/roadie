@@ -226,6 +226,8 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     import mcp_server.server as SM            # Sideman main's server, found through PYTHONPATH
     assert "site-packages" not in SM.__file__, SM.__file__
+    import sideman.listen as SL                # and its analysis, not the pinned Sideman in the venv
+    assert "site-packages" not in SL.__file__, SL.__file__
     dest = pathlib.Path(sys.argv[2]).resolve()
     dest.mkdir(exist_ok=True)
     schemas = {t.name: t.input_schema for t in asyncio.run(SM.mcp.list_tools())
