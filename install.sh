@@ -86,7 +86,9 @@ VENV_PY="$HERE/.venv/bin/python"
 # Probe the packages, not just the interpreter: a `uv pip install` that died
 # half way leaves a python with nothing importable, and checking only for the
 # binary would call that installed forever.
-venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client" >/dev/null 2>&1; }
+# sideman.listen.to_db is one of the public names roadie_analysis imports: an older
+# Sideman left in the venv lacks it, fails the probe and gets re-synced.
+venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client, sideman.listen; sideman.listen.to_db" >/dev/null 2>&1; }
 if [[ $CHECK -eq 1 ]]; then
   if venv_ok; then
     printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
