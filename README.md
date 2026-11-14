@@ -42,11 +42,47 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
+| `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
 
 `roadie <command> --help` shows that command's own options. Every argument after
 the command passes through untouched, except that `split` turns a bare local path
 into `--file <path>`. The underlying scripts still work directly, under the same
 names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
+
+## MCP server: analysis against a reference
+
+`roadie mcp` is an MCP server with four tools for the analysis that needs **a
+reference track, its stems or samples**. Measuring the Set on its own needs only
+Live and the Set's signal, and stays in Sideman's server: `audio_analyze`,
+`audio_compare`, and `mix_report` with no reference or an audio file as the
+reference. Register both:
+
+```bash
+claude mcp add --scope user sideman -- /path/to/sideman/.venv/bin/python -m mcp_server.server
+claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clone
+```
+
+| tool | what it does |
+|---|---|
+| `sample_analyze(source, hit=None)` | a drum one-shot in synth terms: envelope, pitch and its drop, harmonics, noise, click, bands, width |
+| `sample_compare(a, b, hit_a=None, hit_b=None)` | two hits compared, with one plain `readings` line per difference past its threshold |
+| `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
+| `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's; writes `mix_report.json` and `mix_report.md` |
+
+The first three have the names, arguments and output of Sideman's tools of the
+same name; `session_compare` is what Sideman's `mix_report` returns when its
+`reference` is a profile, and refuses an audio file or no reference (that is
+Sideman's `mix_report`). The tools' docstrings are the full documentation; the
+model reads them. A `source` is a file path or an audio clip's LOM path (`live_set
+tracks 3 clip_slots 0 clip`): its `file_path` is read through
+`sideman.client.Live`, the only thing sent to Live. Everything else runs locally
+on the files.
+
+Roadie builds on Sideman here too: `roadie_analysis/` imports the measurement
+core from `sideman.listen` (and `session_compare` takes the plain report from it
+before adding its layers); nothing in Sideman imports Roadie. The server needs
+the `mcp` package, which `install.sh` installs from `requirements-mcp.txt`
+(every package pinned); without it `roadie mcp` exits with that hint.
 
 `roadie als <stems_dir>` writes `<name>.als` next to the stems folder (`-o` to
 choose, `-f` to overwrite), and makes that folder a Live project (an empty
@@ -258,7 +294,8 @@ Roadie does not speak that socket itself: `roadie load` and `roadie scenes` go
 through Sideman's Python client, `sideman.client.Live`. `install.sh` installs
 the `sideman` package into Roadie's `.venv` from `requirements-sideman.txt`
 (pinned to a commit, installed with `--no-deps`, so Sideman's own dependency
-`mcp` is not pulled in) and re-syncs it on every run, so a bumped pin reaches an
+`mcp` is not pulled in unpinned; `roadie mcp`'s copy comes from
+`requirements-mcp.txt`, every package pinned) and re-syncs it on every run, so a bumped pin reaches an
 existing `.venv` with one `./install.sh`. A `.venv` built before Sideman was a
 dependency says so and asks for that run.
 
