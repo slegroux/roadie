@@ -12,11 +12,12 @@
 #
 # Sideman, the Ableton bridge and the measurement core. stems2live and session_view reach Live only through
 # `sideman.client.Live`; roadie_analysis builds on the public names of `sideman.listen` (levels, spectra, the
-# manifest readers). The `listen` extra (numpy, soundfile) is written here only to name that need: under --no-deps
+# manifest readers, and load_capture / mix_layer / write_report: the plain mix report session_compare adds its
+# layers to). The `listen` extra (numpy, soundfile) is written here only to name that need: under --no-deps
 # nothing resolves it, so the numpy and soundfile pinned in requirements.txt are the ones in force. Keep them
 # compatible with what Sideman asks for (numpy>=1.24, soundfile>=0.12) by hand.
 #
 # PINNED TO A COMMIT OF SIDEMAN'S BRANCH feat/yt2live-audio-layer, not its main: the public names exist only
 # there. MOVE THIS PIN TO SIDEMAN MAIN (then to a tag, or PyPI once Sideman publishes) as soon as that branch
 # merges. The v0.1.0 tag is 66 commits older than the Remote Script users have installed, so it is not an option.
-sideman[listen] @ git+https://github.com/slegroux/sideman@b4cce24ee3e4d8f6f8a2740781d82423f768c496
+sideman[listen] @ git+https://github.com/slegroux/sideman@8008db9adcc34233ee96fce4461d036ee0d15488

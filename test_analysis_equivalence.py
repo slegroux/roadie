@@ -93,8 +93,8 @@ def _norm(text, d):
 
 def produce(profile_mod, oneshot_mod, d):
     """Every output of the moved half on the fixed fixtures, as {name: text}. `profile_mod` has
-    reference_profile and mix_report, `oneshot_mod` profile and compare: roadie_analysis's, or Sideman main's
-    listen and oneshot."""
+    reference_profile and session_compare (Sideman main: mix_report with the profile), `oneshot_mod` profile and
+    compare: roadie_analysis's, or Sideman main's listen and oneshot."""
     d = pathlib.Path(d)
     (d / "ref").mkdir()
     (d / "ours").mkdir()
@@ -109,7 +109,8 @@ def produce(profile_mod, oneshot_mod, d):
     manifest = {"tempo": TEMPO, "offset_s": T0, "sections": SECTIONS,
                 "sources": {"master": ours["mix"], "kick": ours["kick"], "bass": ours["bass"],
                             "synth": ours["synth"], "hh": ours["hh"], "snare": ours["snare"]}}
-    r = profile_mod.mix_report(manifest, reference=d / "ref.profile.json", out_dir=d / "out")
+    report = getattr(profile_mod, "session_compare", None) or profile_mod.mix_report    # Roadie's, or Sideman main's
+    r = report(manifest, reference=d / "ref.profile.json", out_dir=d / "out")
     out["mix_report.json"] = pathlib.Path(r["json_path"]).read_text()
     out["mix_report.md"] = pathlib.Path(r["md_path"]).read_text()
     take = np.concatenate([_decay(100.0, 0.08, 0.7), _decay(100.0, 0.08, 0.7) * 0.7, _decay(120.0, 0.05, 0.7)])
