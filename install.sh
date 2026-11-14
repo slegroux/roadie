@@ -6,9 +6,10 @@
 #   --bin DIR   where to put the symlinks. Default ~/.local/bin
 #   --check     report only; create nothing
 #
-# .venv is built with `uv venv --python 3.13` from requirements.txt when it does
-# not exist yet, and repaired in place when it cannot import them (a half-built
-# venv from an interrupted install). --check reports and changes nothing.
+# .venv is built with `uv venv --python 3.13` when it does not exist yet, and
+# every run re-syncs it to requirements.txt, then requirements-sideman.txt
+# (installed with --no-deps), so a bumped pin reaches an existing venv and a
+# half-built one is repaired. --check reports and changes nothing.
 #
 # Symlinks rather than copies, so editing a script takes effect immediately and
 # the repo stays the single source of truth. They also strip the .sh/.py
@@ -86,23 +87,32 @@ VENV_PY="$HERE/.venv/bin/python"
 # half way leaves a python with nothing importable, and checking only for the
 # binary would call that installed forever.
 venv_ok () { [[ -x "$VENV_PY" ]] && PYTHONDONTWRITEBYTECODE=1 "$VENV_PY" -c "import librosa, numpy, scipy, soundfile, sideman.client" >/dev/null 2>&1; }
-if venv_ok; then
-  printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
-elif [[ $CHECK -eq 1 ]]; then
-  if [[ -x "$VENV_PY" ]]; then
+if [[ $CHECK -eq 1 ]]; then
+  if venv_ok; then
+    printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
+  elif [[ -x "$VENV_PY" ]]; then
     printf "  BAD   .venv is missing packages (would install requirements.txt)\n"
   else
     printf "  none  .venv (would create with uv from requirements.txt)\n"
   fi
-else
-  command -v uv >/dev/null 2>&1 || {
+elif ! command -v uv >/dev/null 2>&1; then
+  if venv_ok; then
+    printf "  \033[32mok\033[0m    .venv has the requirements (%s)\n" "$("$VENV_PY" -V 2>&1)"
+    printf "  --    uv not found: .venv was not re-synced to requirements*.txt\n"
+  else
     echo "  uv is required to build .venv: https://docs.astral.sh/uv/ (brew install uv)" >&2
     exit 1
-  }
+  fi
+else
+  # Every run, not only when the import probe fails: a bumped pin in
+  # requirements*.txt has to reach a venv that already works. uv does nothing
+  # when everything is already as pinned.
   [[ -x "$VENV_PY" ]] || uv venv --python 3.13 "$HERE/.venv"
   uv pip install --python "$VENV_PY" -r "$HERE/requirements.txt"
+  # Sideman after, and without its dependencies: see requirements-sideman.txt.
+  uv pip install --python "$VENV_PY" --no-deps -r "$HERE/requirements-sideman.txt"
   venv_ok || { echo "  .venv still cannot import the requirements — see the uv output above" >&2; exit 1; }
-  printf "  \033[32mok\033[0m    .venv built from requirements.txt\n"
+  printf "  \033[32mok\033[0m    .venv synced to requirements.txt and requirements-sideman.txt\n"
 fi
 
 echo

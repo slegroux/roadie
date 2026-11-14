@@ -256,9 +256,11 @@ Input/Output = None. Restart Live once if it was running during the install.
 
 Roadie does not speak that socket itself: `roadie load` and `roadie scenes` go
 through Sideman's Python client, `sideman.client.Live`. `install.sh` installs
-the `sideman` package into Roadie's `.venv` (it is pinned in `requirements.txt`
-to a commit of Sideman's `main`; the package also pulls in `mcp`), so an `.venv`
-built before that needs `./install.sh` run once more.
+the `sideman` package into Roadie's `.venv` from `requirements-sideman.txt`
+(pinned to a commit, installed with `--no-deps`, so Sideman's own dependency
+`mcp` is not pulled in) and re-syncs it on every run, so a bumped pin reaches an
+existing `.venv` with one `./install.sh`. A `.venv` built before Sideman was a
+dependency says so and asks for that run.
 
 Sideman ships `warp_markers_set` natively, so no patch is needed on the Live side.
 Verify with:
