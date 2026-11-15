@@ -731,59 +731,78 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
     paths = ["live_set tracks %d arrangement_clips %d" % c for c in clips]
     out = [None] * len(paths)
     value, unwritten = {}, {}
+
+    def in_unit(k, warping):
+        value[k] = (sample_time_to_beats(trim_sec, warp_map, period) if warping
+                    else trim_sec, "beats" if warping else "s", warping)
+
     for k, r in enumerate(lom_reads([{"path": p, "property": "warping"} for p in paths])):
         if not r.get("ok"):
             out[k] = (False, "get %s.warping: %s" % (paths[k], lom_err(r)))
             continue
-        warping = bool(r["result"]["value"])
-        value[k] = (sample_time_to_beats(trim_sec, warp_map, period) if warping
-                    else trim_sec, "beats" if warping else "s", warping)
+        in_unit(k, bool(r["result"]["value"]))
 
-    # (property, value) per step; None is the clip's own trim value. A set answers with the
-    # property as it reads after the write, in the same task: one that reads other than asked
-    # fails the trim at the end, but does not stop the steps, so the clip ends up as the
-    # one-set-a-request code left it.
-    for step in ((("looping", True),), (("loop_start", None), ("start_marker", None)),
-                 (("looping", False),)):
-        live = [k for k in value if out[k] is None]
-        ops = [live_batch.seq([{"op": "set", "path": paths[k], "property": prop,
-                                "value": value[k][0] if val is None else val}
-                               for prop, val in step]) for k in live]
-        for k, env in zip(live, lom_ops(ops)):
-            for (prop, val), r in zip(step, seq_results(env)):
-                if not r.get("ok"):
-                    out[k] = (False, "%s: %s" % (prop, lom_err(r)))
-                    break
-                asked, got = value[k][0] if val is None else val, r["result"].get("value")
-                if k not in unwritten and not _took(asked, got):
-                    unwritten[k] = ("%s did not take — asked %s, reads %s"
-                                    % (prop, _shown(asked, value[k][1]), _shown(got, value[k][1])))
+    # LIVE CAN TURN `warping` ON BEHIND US after it was read: with no warp map, a fresh clip
+    # reads unwarped, and Live's auto-warp lands once it has analysed the file, without
+    # converting the markers. Measured 2026-11-15 on a 92 s stem: the trim went in as
+    # 0.5662 s and the clip ended warped with start_marker 0.5662 beats, 0.3 s of lead-in
+    # left (the code before batching did the same and reported success). So the read-back
+    # re-reads `warping`, and a clip whose warping changed is trimmed again in the new unit;
+    # it fails only if warping changes a second time.
+    pending = sorted(value)
+    for attempt in (1, 2):
+        # (property, value) per step; None is the clip's own trim value. A set answers with
+        # the property as it reads after the write, in the same task: one that reads other
+        # than asked fails the trim at the end, but does not stop the steps, so the clip
+        # ends up as the one-set-a-request code left it.
+        for step in ((("looping", True),), (("loop_start", None), ("start_marker", None)),
+                     (("looping", False),)):
+            live = [k for k in pending if out[k] is None]
+            ops = [live_batch.seq([{"op": "set", "path": paths[k], "property": prop,
+                                    "value": value[k][0] if val is None else val}
+                                   for prop, val in step]) for k in live]
+            for k, env in zip(live, lom_ops(ops)):
+                for (prop, val), r in zip(step, seq_results(env)):
+                    if not r.get("ok"):
+                        out[k] = (False, "%s: %s" % (prop, lom_err(r)))
+                        break
+                    asked, got = value[k][0] if val is None else val, r["result"].get("value")
+                    if k not in unwritten and not _took(asked, got):
+                        unwritten[k] = ("%s did not take — asked %s, reads %s"
+                                        % (prop, _shown(asked, value[k][1]),
+                                           _shown(got, value[k][1])))
 
-    # Read back, because the failure this guards against is SILENT: without the
-    # loop dance above the write is accepted and the marker stays at 0.0. `warping`
-    # is read again with it: the trim was written in the unit the first read gave,
-    # and a clip whose warping changed since then holds it in the wrong one.
-    live = [k for k in value if out[k] is None]
-    backs = iter(lom_reads([{"path": paths[k], "property": prop} for k in live
-                            for prop in ("start_marker", "warping")]))
-    for k in live:
-        r, w = next(backs), next(backs)
-        if not r.get("ok"):
-            out[k] = (False, "get %s.start_marker: %s" % (paths[k], lom_err(r)))
-            continue
-        got = float(r["result"]["value"])
-        v, unit, warping = value[k]
-        if abs(got - v) > 1e-3:
-            out[k] = (False, "start_marker did not take — asked %.4f %s, reads %.4f"
-                      % (v, unit, got))
-        elif w.get("ok") and bool(w["result"]["value"]) != warping:
-            out[k] = (False, "warping changed from %s to %s after it was read — the trim "
-                             "was written in %s" % (warping, not warping,
-                                                    "beats" if warping else "seconds"))
-        elif k in unwritten:
-            out[k] = (False, unwritten[k])
-        else:
-            out[k] = (True, "trim %.4f %s" % (v, unit))
+        # Read back, because the failure this guards against is SILENT: without the
+        # loop dance above the write is accepted and the marker stays at 0.0.
+        live = [k for k in pending if out[k] is None]
+        backs = iter(lom_reads([{"path": paths[k], "property": prop} for k in live
+                                for prop in ("start_marker", "warping")]))
+        pending = []
+        for k in live:
+            r, w = next(backs), next(backs)
+            if not r.get("ok"):
+                out[k] = (False, "get %s.start_marker: %s" % (paths[k], lom_err(r)))
+                continue
+            got = float(r["result"]["value"])
+            v, unit, warping = value[k]
+            if w.get("ok") and bool(w["result"]["value"]) != warping:
+                if attempt == 1:
+                    in_unit(k, not warping)
+                    unwritten.pop(k, None)
+                    pending.append(k)
+                else:
+                    out[k] = (False, "warping changed again, to %s, after the trim was "
+                                     "redone in %s" % (not warping,
+                                                       "beats" if warping else "seconds"))
+            elif abs(got - v) > 1e-3:
+                out[k] = (False, "start_marker did not take — asked %.4f %s, reads %.4f"
+                          % (v, unit, got))
+            elif k in unwritten:
+                out[k] = (False, unwritten[k])
+            else:
+                out[k] = (True, "trim %.4f %s" % (v, unit))
+        if not pending:
+            break
     return out
 
 

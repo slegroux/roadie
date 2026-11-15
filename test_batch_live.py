@@ -336,24 +336,49 @@ def test_an_arrangement_set_that_reads_back_otherwise_fails_that_trim(tmp_path, 
         "trim 1.2000 s")
 
 
-def test_warping_that_changes_after_it_was_read_fails_the_trim(tmp_path, analysis,
-                                                               monkeypatch, capsys):
-    """The trim is written in the unit `warping` gave when it was read. If Live turned warping
-    on afterwards (auto-warp landing late), the read-back sees it and the trim fails loudly."""
-    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
-    model = fake_live.FakeLive()
-    orig = model.dispatch
+def _auto_warp(model, path, times=1):
+    """Live turning `warping` on by itself, without converting the markers, right after the
+    trim's `looping=False` on `path` (as measured on 2026-11-15); `times` such flips."""
+    orig, left = model.dispatch, [times]
 
     def dispatch(op, params):
         res = orig(op, params)
         if op == "set" and params.get("property") == "looping" and params.get("value") is False \
-                and params["path"] == "live_set tracks 3 arrangement_clips 0":
-            model.resolve(params["path"])._v["warping"] = True       # Live, on its own
+                and params["path"] == path and left[0]:
+            left[0] -= 1
+            clip = model.resolve(path)
+            clip._v["warping"] = not clip._v["warping"]
         return res
     model.dispatch = dispatch
+
+
+def test_warping_that_changes_after_it_was_read_redoes_the_trim_in_beats(tmp_path, analysis,
+                                                                         monkeypatch, capsys):
+    """The trim is written in the unit `warping` gave when it was read. If Live turned warping
+    on afterwards (auto-warp landing late), the read-back sees it and the trim is written
+    again in beats, so the marker means the same 1.2 s it was asked to."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
+    model = fake_live.FakeLive()
+    path = "live_set tracks 3 arrangement_clips 0"
+    _auto_warp(model, path)
     out, _ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
-    assert ("[trim failed: warping changed from False to True after it was read — the trim "
-            "was written in seconds]") in out
+    beats = model.beats(1.2)
+    assert "trim %.4f beats" % beats in out
+    assert out.count("trim 1.2000 s") == 1
+    assert "trim failed" not in out
+    clip = model.resolve(path)
+    assert clip.warping is True and clip.looping is False
+    assert abs(clip.start_marker - beats) < 1e-6 and abs(clip.loop_start - beats) < 1e-6
+    assert model.hazards == []
+
+
+def test_warping_that_changes_twice_fails_the_trim(tmp_path, analysis, monkeypatch, capsys):
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
+    model = fake_live.FakeLive()
+    _auto_warp(model, "live_set tracks 3 arrangement_clips 0", times=2)
+    out, _ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert ("[trim failed: warping changed again, to False, after the trim was redone in "
+            "beats]") in out
     assert out.count("trim 1.2000 s") == 1
 
 
