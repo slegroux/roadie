@@ -326,11 +326,14 @@ add is reachable without patching:
 **Few requests, few undo steps.** A request to Live costs about 400 ms whatever it
 carries (it waits on Live's main thread), so `roadie load` and `roadie scenes` send
 reads that do not depend on each other in one `get_batch` and writes in one
-`transaction`. A ten-stem load with `--session` into a fresh Set is 30 requests
-instead of 439, and each transaction is one Cmd-Z on Live 12.4+ (about 20 to undo
+`transaction`. A ten-stem load with `--session` into a fresh Set is 37 requests
+instead of 439, and each transaction is one Cmd-Z on Live 12.4+ (about 23 to undo
 a load instead of about 280). Anything that depends on an earlier step (a clip
 addressed after the request that made it, a read-back after its write, the play-head
 moves for locators) still waits for a later request: `live_batch.py` lists them.
+**Don't touch the Set while a load or `roadie scenes` runs**: each batch is one undo step,
+and on Live 12.4+ a knob you move while one lands can be swept into it. A batch Live does
+not answer in time ends the run, since Live may still be applying it.
 
 **The decisive difference is reload.** Sideman's `handlers.py` is re-imported on
 `{"op": "reload"}` — **no Live restart**. The AbletonMCP path needs a full quit
