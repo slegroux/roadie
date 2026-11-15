@@ -24,11 +24,26 @@ one request the model logs a HAZARD for
 The model still answers a hazardous op (as if Live had settled), so a run completes; the test
 asserts there were none.
 
-WHAT IT DOES NOT MODEL: audio, Live's own warp analysis (warping=True rescales the markers by
-the Set tempo), the 15 s main-thread timeout and its time cost, undo/redo themselves (only how
-many undo steps a run would leave: one per request that changed something, on Live 12.4+ where
-parameter changes are synced into a batch's step), track/clip colours Live picks by default
-(every new object starts at 0), devices, automation.
+A request can also be answered with Live's Timeout reply or a closed connection AFTER it ran
+(`cuts`), which is what Live does with a task it gave up waiting on: it keeps running it.
+
+WHAT IT DOES NOT MODEL, and so cannot vouch for:
+  - time: the 15 s main-thread limit is only an error the test injects (`cuts`), never a
+    consequence of how much a request carries; no op has a cost;
+  - Live changing a clip's `warping` on its own after the create (auto-warp landing later):
+    `warping` is set at creation here, and only the scripts change it (stems2live re-reads it
+    with the trim read-back to catch this on Live);
+  - order inside one task between writes to DIFFERENT properties of one clip (loop_start, then
+    loop_end, then start_marker, ...): setters apply at once and never constrain each other,
+    except that start_marker is ignored while the clip is not looping (the scripts check every
+    marker set's reply against the value asked);
+  - several heavy creates in one task interacting (they are independent here);
+  - Live's palette and name rules (a colour or name is stored as sent);
+  - audio and Live's own warp analysis (warping=True rescales the markers by the Set tempo);
+  - undo/redo themselves (only how many undo steps a run would leave: one per request that
+    changed something, on Live 12.4+ where parameter changes are synced into a batch's step),
+    and Live before 12.4, where parameter changes split off into steps of their own;
+  - default colours (every new object starts at 0), devices, automation.
 
 Server semantics are copied from Sideman's remote_script/AbletonLOM/handlers.py at the commit
 requirements-sideman.txt pins: get_batch never fails as a whole; transaction and set_batch run
@@ -263,7 +278,8 @@ class CuePoint(_Obj):
 
 class Song(_Obj):
     PROPS = ("tempo", "current_song_time", "is_playing", "song_length", "tracks", "scenes",
-             "cue_points")
+             "cue_points", "file_path")
+    file_path = ""                        # an unsaved Set
     WRITABLE = ("tempo", "current_song_time")
     CALLS = ("create_audio_track", "create_midi_track", "delete_track", "create_scene",
              "set_or_delete_cue", "stop_playing")
@@ -388,6 +404,9 @@ class FakeLive(object):
         self.hazards = []
         self.undo_steps = 0
         self.faults = []                  # callables (op, params) -> exception or None
+        # callables (op, params) -> "Timeout" / "ConnectionClosed" / None: the request is run to
+        # the end, as Live runs a task it gave up waiting on, and then answered with that error
+        self.cuts = []
         self._undo_depth = 0
         self._step_changed = False
         self._dirty, self._moves = set(), {}
@@ -623,7 +642,14 @@ class FakeLive(object):
         self._dirty, self._moves = set(), {}
         self.requests.append({"op": op, "leaves": leaves(op, params), "module": module})
         try:
-            return self.dispatch(op, params)
+            result = self.dispatch(op, params)
+            for cut in self.cuts:
+                kind = cut(op, params)
+                if kind:
+                    raise type(kind, (Exception,), {})(
+                        "main thread did not respond in 15.0s" if kind == "Timeout"
+                        else "Live closed the connection before replying")
+            return result
         finally:
             if self.pending_time is not None:
                 self.song._time = self.pending_time + (1.48 if self.song.is_playing else 0.0)

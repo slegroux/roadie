@@ -154,20 +154,28 @@ class Bridge:
 
     # Many operations in few requests: see live_batch for what may share a request and why.
     # Each method gives back, per op, what that op sent alone would have: its result, or the
-    # LomError `request` would have raised for it (not raised here). A request that fails as a
-    # whole fails every op it carried; only a timeout on the connection is raised, as always.
+    # LomError `request` would have raised for it (not raised here). A read request that fails
+    # as a whole fails every read it carried; only a timeout on the connection is raised, as
+    # always. A write request that goes unanswered (Live's Timeout reply, a closed connection,
+    # no reply) ends the run with live_batch.StillRunning: Live keeps running a task it gave up
+    # waiting on, so its changes may still land and cannot be reported as not made.
 
     def _batch(self, op, ops, **params):
         """The results list of one get_batch or transaction, or one error per op."""
+        writes = op != "get_batch"
         try:
             return self._live.request(op, dict(params, **{
-                "specs" if op == "get_batch" else "ops": ops}))["results"], None
+                "ops" if writes else "specs": ops}))["results"], None
         except LiveError as e:
+            if writes and e.type in ("Timeout", "ConnectionClosed"):
+                raise live_batch.StillRunning(str(e))
             errors = [self._failure(e, o.get("op", "get"), o.get("path", "")) for o in ops]
             if isinstance(errors[0], TimeoutError):
                 raise errors[0]
             return None, errors
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError) as e:
+            if writes:
+                raise live_batch.StillRunning(str(e) or type(e).__name__)
             raise
         except OSError as e:
             return None, [self._unreachable(e)] * len(ops)
@@ -446,6 +454,18 @@ def write_clips(bridge, jobs, replace=False):
     clip — a trim that did not take — which the caller raises when it reaches
     it. Once a job has ended the run, no job after it is sent anything more.
 
+    THE FIRST CLIP GOES ALONE. It runs through every step on its own before the
+    rest are batched, so a trim that does not take on every clip (the bug below
+    that once shipped: 90 clips at full length) ends the run after ONE clip, as
+    when clips were written one at a time. A failure that hits a later clip only
+    ends the run at that clip too, but the clips batched with it in the same
+    requests have by then been written the same way.
+
+    Every loop and marker set is checked against the value Live answers with (a
+    set replies with the property as it reads after the write, in the same task),
+    and a mismatch ends the run like the read-back does, at no extra request.
+    Name and colour are not checked: Live keeps its own palette and names.
+
     The full length is read back AFTER warping and BEFORE trimming, because that
     is the only moment it means "how long the sample is, in beats" — and it is
     what the last scene's end has to be clamped against. Markers past the end of
@@ -470,17 +490,28 @@ def write_clips(bridge, jobs, replace=False):
     def live(ks):
         return [k for k in ks if out[k] is None and k < stop[0]]
 
-    def run(ks, make):
-        """One op per job, all sent; a failure ends that job."""
-        ks = live(ks)
-        for k, (_res, err) in zip(ks, bridge.ops([make(k) for k in ks])):
-            if err is not None:
-                out[k] = err
-        return live(ks)
-
     def end_run(k, exc):
         out[k] = exc
         stop[0] = min(stop[0], k)
+
+    def run(ks, make, checked=()):
+        """One op per job, all sent; a failure ends that job. A set of a property in `checked`
+        whose reply reads other than asked ends the run at that job."""
+        ks = live(ks)
+        sent = [make(k) for k in ks]
+        for k, op, (res, err) in zip(ks, sent, bridge.ops(sent)):
+            if err is not None:
+                out[k] = err
+                continue
+            sets = zip(op["ops"], res["results"]) if op["op"] == "transaction" else [(op, {
+                "result": res})]
+            for spec, entry in sets:
+                prop = spec.get("property")
+                if prop in checked and not _took(spec["value"], entry["result"]["value"]):
+                    end_run(k, RuntimeError(_did_not_take(jobs[k], prop, spec["value"],
+                                                          entry["result"]["value"])))
+                    break
+        return live(ks)
 
     seen, rounds = {}, []
     for k, job in enumerate(jobs):
@@ -488,6 +519,8 @@ def write_clips(bridge, jobs, replace=False):
         if n == len(rounds):
             rounds.append([])
         rounds[n].append(k)
+    if rounds and len(rounds[0]) > 1:
+        rounds[0:1] = [rounds[0][:1], rounds[0][1:]]          # the first clip goes alone
 
     bounds = {}
     for ks in rounds:
@@ -534,7 +567,7 @@ def write_clips(bridge, jobs, replace=False):
         # (160.38 bars) instead of its section length, while the run reported the
         # lengths it had ASKED for. Nothing failed; the trims simply never landed.
         ks = run(ks, lambda k: {"op": "set", "path": slot(k) + " clip",
-                                "property": "looping", "value": True})
+                                "property": "looping", "value": True}, ("looping",))
 
         def marks(k):
             clip, (_full, start, end) = slot(k) + " clip", bounds[k]
@@ -544,7 +577,7 @@ def write_clips(bridge, jobs, replace=False):
                 sets.append(("color", int(jobs[k]["color"])))
             return live_batch.seq([{"op": "set", "path": clip, "property": p, "value": v}
                                    for p, v in sets])
-        ks = run(ks, marks)
+        ks = run(ks, marks, live_batch.MARKERS)
 
         # Read the trim back. The failure this guards is silent by construction, so
         # believing the write is exactly how it got shipped the first time.
@@ -559,14 +592,31 @@ def write_clips(bridge, jobs, replace=False):
                 end_run(k, e)
                 continue
             full, start, _end = bounds[k]
-            if abs(got - start) > 1e-3:
-                end_run(k, RuntimeError(
-                    "trim did not take on track %d scene %d: asked start_marker %.4f, "
-                    "reads %.4f — the clip is untrimmed and will play the whole stem"
-                    % (jobs[k]["track"], jobs[k]["scene"], start, got)))
+            if not _took(start, got):
+                end_run(k, RuntimeError(_did_not_take(jobs[k], "start_marker", start, got)))
             else:
                 out[k] = full
     return out
+
+
+def _took(asked, got):
+    """Does a property read `got` after `asked` was written to it?"""
+    if isinstance(asked, bool) or not isinstance(asked, (int, float)):
+        return got == asked
+    try:
+        return abs(float(got) - asked) <= 1e-3
+    except (TypeError, ValueError):
+        return False
+
+
+def _did_not_take(job, prop, asked, got):
+    """The message a loop or marker write that did not stick ends the run with."""
+    if prop == "start_marker" and isinstance(got, (int, float)):
+        return ("trim did not take on track %d scene %d: asked start_marker %.4f, "
+                "reads %.4f — the clip is untrimmed and will play the whole stem"
+                % (job["track"], job["scene"], asked, float(got)))
+    return ("trim did not take on track %d scene %d: asked %s %s, reads %s — the clip "
+            "does not loop the section" % (job["track"], job["scene"], prop, asked, got))
 
 
 def build_session_view(stems_dir, period=None, grid_t0=None,

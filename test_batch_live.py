@@ -198,15 +198,15 @@ def test_measured_run_same_set_far_fewer_requests(tmp_path, analysis, monkeypatc
     assert counts(old) == {"set": 244, "get": 124, "call": 38, "count": 31, "ping": 1,
                            "warp_markers_set": 1}
     assert len(old.requests) == 439
-    assert counts(new) == {"ping": 1, "warp_markers_set": 1, "get_batch": 9,
-                           "transaction": 18, "set": 1}
-    assert len(new.requests) == 30
+    assert counts(new) == {"ping": 1, "warp_markers_set": 1, "get_batch": 12,
+                           "transaction": 22, "set": 1}
+    assert len(new.requests) == 37            # 7 of them the first session clip, on its own
     # The same operations reached Live; only how they were grouped changed. The new code reads
     # a few more (whole lists at once instead of stopping early) and nests its per-item steps.
     lo, ln = leaf_counts(old), leaf_counts(new)
     assert ln["call"] == lo["call"] and ln["set"] == lo["set"]
     # One undo step per request that changed something.
-    assert old.undo_steps == 282 and new.undo_steps == 19
+    assert old.undo_steps == 282 and new.undo_steps == 23
 
 
 def test_rerun_with_drift_locators_energy_map_and_a_session_grid(tmp_path, analysis,
@@ -278,12 +278,104 @@ def test_failed_items_inside_a_batch_are_reported_as_before(tmp_path, analysis,
     assert out.count("8/9 clips") == 2
 
 
+def _discarding(prop, path, value=0.0):
+    """A model on which writing `prop` at `path` is accepted and does nothing (answers `value`)."""
+    def make():
+        m = fake_live.FakeLive()
+        orig = m.dispatch
+
+        def dispatch(op, params):
+            if op == "set" and params.get("property") == prop and params.get("path") == path:
+                return {"path": path, "property": prop, "value": value}
+            return orig(op, params)
+        m.dispatch = dispatch
+        return m
+    return make
+
+
+def test_a_trim_that_takes_on_no_clip_stops_the_grid_after_one_clip_as_before(
+        tmp_path, analysis, monkeypatch, capsys):
+    """The first session clip goes through every step alone, so when the trim does not take
+    on it (as it would on every clip, the bug that once shipped), the run ends after that one
+    clip and the Set is exactly what the one-clip-at-a-time code left."""
+    stems = make_stems(str(tmp_path / "song_stems"), TEN)
+    res = both(_discarding("start_marker", "live_set tracks 2 clip_slots 0 clip"), stems,
+               [["--start-bar", "1", "--session"]], monkeypatch, capsys)
+    assert_same(res)
+    out = res["new"][1][0][0]
+    assert "session view failed (RuntimeError: trim did not take on track 2 scene 0" in out
+    slots = [s for t in res["new"][0].snapshot()["tracks"] for s in t["slots"] if s]
+    assert len(slots) == 1
+
+
+def test_a_marker_set_that_reads_back_otherwise_ends_the_grid(tmp_path, analysis,
+                                                             monkeypatch, capsys):
+    """Every loop and marker write is checked against Live's reply, not only start_marker:
+    a loop_end that did not take ends the run at that clip (the old code did not look)."""
+    stems = make_stems(str(tmp_path / "song_stems"), TEN)
+    model = _discarding("loop_end", "live_set tracks 4 clip_slots 1 clip", 99.0)()
+    out, _ = load("new", model, stems, ["--start-bar", "1", "--session"], monkeypatch, capsys)
+    assert "trim did not take on track 4 scene 1: asked loop_end " in out
+    assert "reads 99.0 — the clip does not loop the section" in out
+    assert model.hazards == []
+
+
+def test_an_arrangement_set_that_reads_back_otherwise_fails_that_trim(tmp_path, analysis,
+                                                                     monkeypatch, capsys):
+    """In the arrangement the reply check fails the one trim, and the clip is left as the
+    one-set-a-request code left it: the steps after the odd set still run."""
+    stems = make_stems(str(tmp_path / "song_stems"), TEN)
+    res = both(_discarding("loop_start", "live_set tracks 3 arrangement_clips 0", 7.0), stems,
+               [["--start-bar", "1"]], monkeypatch, capsys)
+    (o_out, _), (n_out, _) = res["old"][1][0], res["new"][1][0]
+    assert res["new"][0].snapshot() == res["old"][0].snapshot()
+    assert "[trim failed: loop_start did not take — asked 1.2000 s, reads 7.0000 s]" in n_out
+    assert o_out.replace("[trim failed: loop_start did not take — asked 1.2000 s, reads "
+                         "7.0000 s]", "trim 1.2000 s") == n_out.replace(
+        "[trim failed: loop_start did not take — asked 1.2000 s, reads 7.0000 s]",
+        "trim 1.2000 s")
+
+
+def test_warping_that_changes_after_it_was_read_fails_the_trim(tmp_path, analysis,
+                                                               monkeypatch, capsys):
+    """The trim is written in the unit `warping` gave when it was read. If Live turned warping
+    on afterwards (auto-warp landing late), the read-back sees it and the trim fails loudly."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
+    model = fake_live.FakeLive()
+    orig = model.dispatch
+
+    def dispatch(op, params):
+        res = orig(op, params)
+        if op == "set" and params.get("property") == "looping" and params.get("value") is False \
+                and params["path"] == "live_set tracks 3 arrangement_clips 0":
+            model.resolve(params["path"])._v["warping"] = True       # Live, on its own
+        return res
+    model.dispatch = dispatch
+    out, _ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert ("[trim failed: warping changed from False to True after it was read — the trim "
+            "was written in seconds]") in out
+    assert out.count("trim 1.2000 s") == 1
+
+
+def test_rows_found_before_the_run_ends_still_print(tmp_path, analysis, monkeypatch, capsys):
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick", "vocals"])
+    model = fake_live.FakeLive()
+    model.faults.append(lambda op, p: RuntimeError("injected: no room")
+                        if p.get("function") == "create_audio_clip"
+                        and "vocals" in str((p.get("args") or [""])[0]) else None)
+    model.cuts.append(lambda op, p: "Timeout" if op == "transaction" and any(
+        q.get("property") == "color" for _o, q in fake_live.leaves(op, p)) else None)
+    out, exit_ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert "  4  vocals          ERROR: injected: no room — track left untouched" in out
+    assert exit_.startswith("Live did not answer the last batch of changes")
+
+
 def test_a_trim_that_does_not_take_still_ends_the_grid_at_that_clip(tmp_path, analysis,
                                                                     monkeypatch, capsys):
     """The one place the end state can differ, and only on this failure: a session trim that
-    does not take raises at that clip, as before, but the clips sent with it in the same
-    requests were already written. Everything up to it is the same; the rest is only ever
-    clips of that same batch, written as they would have been."""
+    does not take on a LATER clip (the first one took) raises at that clip, as before, but the
+    clips sent with it in the same requests were already written. Everything up to it is the
+    same; the rest is only ever clips of that same batch, written as they would have been."""
     stems = make_stems(str(tmp_path / "song_stems"), TEN)
 
     def fault(op, p):
@@ -319,27 +411,71 @@ def test_a_trim_that_does_not_take_still_ends_the_grid_at_that_clip(tmp_path, an
     assert new["tracks"][5]["slots"][0] == old["tracks"][5]["slots"][0]
 
 
-def test_a_batch_live_refuses_as_a_whole_fails_each_item_it_carried(tmp_path, analysis,
-                                                                    monkeypatch, capsys):
-    """Live's own Timeout reply to a batch (its main thread was blocked): every item in that
-    request is reported with it, as each was when it timed out on its own, and the run goes on
-    to the next request."""
+def _placing(op, params):
+    return op == "transaction" and any(
+        p.get("function") == "create_audio_clip" and "clip_slots" not in p.get("path", "")
+        for _o, p in fake_live.leaves(op, params))
+
+
+def _filling_slots(op, params):
+    return op == "transaction" and any(
+        p.get("function") == "create_audio_clip" and "clip_slots" in p.get("path", "")
+        for _o, p in fake_live.leaves(op, params))
+
+
+@pytest.mark.parametrize("kind", ["Timeout", "ConnectionClosed"])
+def test_an_unanswered_write_batch_ends_the_run_and_its_items_are_not_called_untouched(
+        kind, tmp_path, analysis, monkeypatch, capsys):
+    """Live's own Timeout reply (its main thread gave up waiting) or a closed connection after
+    a batch of writes was sent: Live keeps running that task, so its changes may still land.
+    The run stops there with that said, and no item of the batch is reported as untouched."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick", "vocals"])
+    model = fake_live.FakeLive()
+    model.cuts.append(lambda op, p: kind if _placing(op, p) else None)
+    out, exit_ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert exit_.startswith("Live did not answer the last batch of changes")
+    assert "may still land" in exit_ and "left untouched" not in out
+    assert "trk  stem" in out                            # the table header, and no rows
+    # The batch did land: every clip is on its track, and the tracks are named.
+    tracks = model.snapshot()["tracks"]
+    assert [t["name"] for t in tracks][2:] == ["drums_kick", "bass", "vocals"]
+    assert all(len(t["clips"]) == 1 for t in tracks[2:])
+    assert len([r for r in model.requests if r["op"] == "transaction"]) == 2   # nothing after
+
+
+@pytest.mark.parametrize("kind", ["Timeout", "ConnectionClosed"])
+def test_an_unanswered_session_batch_ends_the_whole_run(kind, tmp_path, analysis, monkeypatch,
+                                                         capsys):
+    """The same in the Session grid: not "session view failed — the arrangement is unaffected"
+    and on to the next step, but the end of the run."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick", "vocals"])
+    model = fake_live.FakeLive()
+    model.cuts.append(lambda op, p: kind if _filling_slots(op, p) else None)
+    out, exit_ = load("new", model, stems, ["--start-bar", "1", "--session"], monkeypatch,
+                      capsys)
+    assert exit_.startswith("Live did not answer the last batch of changes")
+    assert "session view failed" not in out
+    assert model.snapshot()["tracks"][2]["slots"][0] is not None      # it landed
+
+
+def test_a_write_batch_refused_outright_still_fails_only_its_items(tmp_path, analysis,
+                                                                   monkeypatch, capsys):
+    """A batch Live answered with a refusal (it did not run it) fails each of its items with
+    that refusal, as each request did alone, and the run goes on."""
     stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick", "vocals"])
     model = fake_live.FakeLive()
     orig = model.request
 
     def request(op, params, module=None):
-        if op == "transaction" and any(p.get("function") == "create_audio_clip"
-                                       and "clip_slots" not in p.get("path", "")
-                                       for _o, p in fake_live.leaves(op, params)):
+        if _placing(op, params):
             model.requests.append({"op": op, "leaves": [], "module": module})
-            raise type("Timeout", (Exception,), {})("main thread did not respond in 15.0s")
+            raise type("HandlerLoadError", (Exception,), {})("handlers not loaded")
         return orig(op, params, module)
     model.request = request
     out, exit_ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
     assert exit_ is None
     for t, stem in ((2, "drums_kick"), (3, "bass"), (4, "vocals")):
-        assert ("%3d  %-14s  ERROR: main thread did not respond in 15.0s — track left untouched"
+        assert ("%3d  %-14s  ERROR: handlers not loaded — track left untouched"
                 % (t, stem)) in out
     assert [t["name"] for t in model.snapshot()["tracks"]][2:] == ["3-Audio", "4-Audio",
                                                                   "5-Audio"]

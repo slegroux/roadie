@@ -469,3 +469,22 @@ def test_a_discarded_trim_raises_instead_of_reporting_success(tmp_path, monkeypa
     (outcome,) = _one_clip(tmp_path, monkeypatch, model)
     assert isinstance(outcome, RuntimeError) and not isinstance(outcome, LomError)
     assert "trim did not take" in str(outcome)
+
+
+def test_a_track_without_a_clip_has_no_colour_and_one_with_has_its_clips(tmp_path, monkeypatch):
+    """Was the golden case sv.track_clip_color: one read for every track, None for a track with
+    no arrangement clip (its colour read fails on its own and is not used)."""
+    import numpy as np
+    import soundfile
+    from fake_live import FakeLive
+    from session_view import track_clip_colors
+    path = str(tmp_path / "x.wav")
+    soundfile.write(path, np.zeros(4000, dtype="float32"), 1000)
+    model = FakeLive()
+    model.request("call", {"path": "live_set tracks 3", "function": "create_audio_clip",
+                           "args": [path, 0.0]})
+    model.request("set", {"path": "live_set tracks 3 arrangement_clips 0", "property": "color",
+                          "value": 255})
+    model.install(monkeypatch)
+    assert track_clip_colors(Bridge(), [2, 3]) == {2: None, 3: 255}
+    assert len(model.requests) == 3

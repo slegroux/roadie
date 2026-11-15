@@ -152,8 +152,8 @@ def lom_count(path, child):
 
 # Many operations in few requests: see live_batch for what may share a request and why. Each
 # helper hands back the envelope `lom` would have returned for every op sent alone, so the
-# callers branch and print exactly as they did. A request that fails as a whole (Live's own
-# Timeout reply) fails every op it carried, with its envelope.
+# callers branch and print exactly as they did. A read request that fails as a whole fails
+# every read it carried, with its envelope; a write request that goes unanswered ends the run.
 
 def _envelope(entry):
     """One op's entry in a transaction's results, as the envelope of that op sent alone."""
@@ -183,6 +183,19 @@ def lom_reads(specs):
     return out
 
 
+def _write_batch(ops, stop_on_error):
+    """One `transaction`. A reply that never came, a closed connection, or Live's own Timeout
+    reply ends the run (live_batch.StillRunning): Live keeps running a task it gave up waiting
+    on, so these changes may still land, and none of them can be reported as not made."""
+    try:
+        r = lom("transaction", ops=ops, stop_on_error=stop_on_error, rollback_on_error=False)
+    except (RuntimeError, TimeoutError) as e:
+        raise live_batch.StillRunning(str(e))
+    if not r.get("ok") and r["error"].get("type") == "Timeout":
+        raise live_batch.StillRunning(lom_err(r))
+    return r
+
+
 def lom_ops(ops):
     """Run sets and calls in order, none stopping another: one envelope each.
 
@@ -191,7 +204,7 @@ def lom_ops(ops):
     """
     out = []
     for chunk in live_batch.pack(ops):
-        r = lom("transaction", ops=chunk, stop_on_error=False, rollback_on_error=False)
+        r = _write_batch(chunk, False)
         if not r.get("ok"):
             out.extend([r] * len(chunk))
             continue
@@ -204,7 +217,7 @@ def lom_steps(ops):
     failed it is the last."""
     out = []
     for chunk in live_batch.pack(ops):
-        r = lom("transaction", ops=chunk, stop_on_error=True, rollback_on_error=False)
+        r = _write_batch(chunk, True)
         out.extend([r] if not r.get("ok")
                    else [_envelope(e) for e in r["result"]["results"]])
         if not out[-1].get("ok"):
@@ -717,16 +730,19 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
     """
     paths = ["live_set tracks %d arrangement_clips %d" % c for c in clips]
     out = [None] * len(paths)
-    value = {}
+    value, unwritten = {}, {}
     for k, r in enumerate(lom_reads([{"path": p, "property": "warping"} for p in paths])):
         if not r.get("ok"):
             out[k] = (False, "get %s.warping: %s" % (paths[k], lom_err(r)))
             continue
         warping = bool(r["result"]["value"])
         value[k] = (sample_time_to_beats(trim_sec, warp_map, period) if warping
-                    else trim_sec, "beats" if warping else "s")
+                    else trim_sec, "beats" if warping else "s", warping)
 
-    # (property, value) per step; None is the clip's own trim value.
+    # (property, value) per step; None is the clip's own trim value. A set answers with the
+    # property as it reads after the write, in the same task: one that reads other than asked
+    # fails the trim at the end, but does not stop the steps, so the clip ends up as the
+    # one-set-a-request code left it.
     for step in ((("looping", True),), (("loop_start", None), ("start_marker", None)),
                  (("looping", False),)):
         live = [k for k in value if out[k] is None]
@@ -734,27 +750,55 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
                                 "value": value[k][0] if val is None else val}
                                for prop, val in step]) for k in live]
         for k, env in zip(live, lom_ops(ops)):
-            for (prop, _val), r in zip(step, seq_results(env)):
+            for (prop, val), r in zip(step, seq_results(env)):
                 if not r.get("ok"):
                     out[k] = (False, "%s: %s" % (prop, lom_err(r)))
                     break
+                asked, got = value[k][0] if val is None else val, r["result"].get("value")
+                if k not in unwritten and not _took(asked, got):
+                    unwritten[k] = ("%s did not take — asked %s, reads %s"
+                                    % (prop, _shown(asked, value[k][1]), _shown(got, value[k][1])))
 
     # Read back, because the failure this guards against is SILENT: without the
-    # loop dance above the write is accepted and the marker stays at 0.0.
+    # loop dance above the write is accepted and the marker stays at 0.0. `warping`
+    # is read again with it: the trim was written in the unit the first read gave,
+    # and a clip whose warping changed since then holds it in the wrong one.
     live = [k for k in value if out[k] is None]
-    backs = lom_reads([{"path": paths[k], "property": "start_marker"} for k in live])
-    for k, r in zip(live, backs):
+    backs = iter(lom_reads([{"path": paths[k], "property": prop} for k in live
+                            for prop in ("start_marker", "warping")]))
+    for k in live:
+        r, w = next(backs), next(backs)
         if not r.get("ok"):
             out[k] = (False, "get %s.start_marker: %s" % (paths[k], lom_err(r)))
             continue
         got = float(r["result"]["value"])
-        v, unit = value[k]
+        v, unit, warping = value[k]
         if abs(got - v) > 1e-3:
             out[k] = (False, "start_marker did not take — asked %.4f %s, reads %.4f"
                       % (v, unit, got))
+        elif w.get("ok") and bool(w["result"]["value"]) != warping:
+            out[k] = (False, "warping changed from %s to %s after it was read — the trim "
+                             "was written in %s" % (warping, not warping,
+                                                    "beats" if warping else "seconds"))
+        elif k in unwritten:
+            out[k] = (False, unwritten[k])
         else:
             out[k] = (True, "trim %.4f %s" % (v, unit))
     return out
+
+
+def _took(asked, got):
+    """Does a property read `got` after `asked` was written to it?"""
+    if isinstance(asked, bool) or not isinstance(asked, (int, float)):
+        return got == asked
+    try:
+        return abs(float(got) - asked) <= 1e-3
+    except (TypeError, ValueError):
+        return False
+
+
+def _shown(v, unit):
+    return "%.4f %s" % (v, unit) if isinstance(v, float) else str(v)
 
 
 def settle(time):
@@ -1228,120 +1272,125 @@ def main():
     # failed to land. A failed placement must leave the Set as it found it.
     # So the name and the fader are nested after the create, and Live runs them
     # only once it has succeeded.
-    ops = []
-    for row in rows:
-        ti = row["ti"]
-        after = [{"op": "set", "path": "live_set tracks %d" % ti, "property": "name",
-                  "value": row["name"]}]
-        if args.headroom:
-            try:
-                after.append(track_headroom_op(ti, -abs(args.headroom)))
-            except ValueError as e:
-                row["headroom_error"] = str(e)
-        ops.append(live_batch.seq([
-            {"op": "call", "path": "live_set tracks %d" % ti,
-             "function": "create_audio_clip", "args": [paths[row["name"]], START]},
-            live_batch.seq(after, stop=False)]))
-    for row, env in zip(rows, lom_ops(ops)):
-        placed = seq_results(env)
-        row["clip"] = placed[0]
-        if not placed[0].get("ok"):
-            row["lines"].append("%3d  %-14s  ERROR: %s — track left untouched"
-                                % (row["ti"], row["name"], lom_err(placed[0])))
-            continue
-        row["placed"] = True
-        if args.headroom:
-            hr = seq_results(placed[1])[1:]
-            detail = row.get("headroom_error") or (
-                lom_err(hr[0]) if hr and not hr[0].get("ok") else None)
-            if detail:
-                row["lines"].append("%3d  %-14s  headroom not applied: %s"
-                                    % (row["ti"], row["name"], detail))
+    # Rows of the table print from a finally, so whatever the steps so far found still prints
+    # when the run ends early (a refused write batch, a lost connection).
+    try:
+        ops = []
+        for row in rows:
+            ti = row["ti"]
+            after = [{"op": "set", "path": "live_set tracks %d" % ti, "property": "name",
+                      "value": row["name"]}]
+            if args.headroom:
+                try:
+                    after.append(track_headroom_op(ti, -abs(args.headroom)))
+                except ValueError as e:
+                    row["headroom_error"] = str(e)
+            ops.append(live_batch.seq([
+                {"op": "call", "path": "live_set tracks %d" % ti,
+                 "function": "create_audio_clip", "args": [paths[row["name"]], START]},
+                live_batch.seq(after, stop=False)]))
+        for row, env in zip(rows, lom_ops(ops)):
+            placed = seq_results(env)
+            row["clip"] = placed[0]
+            if not placed[0].get("ok"):
+                row["lines"].append("%3d  %-14s  ERROR: %s — track left untouched"
+                                    % (row["ti"], row["name"], lom_err(placed[0])))
+                continue
+            row["placed"] = True
+            if args.headroom:
+                hr = seq_results(placed[1])[1:]
+                detail = row.get("headroom_error") or (
+                    lom_err(hr[0]) if hr and not hr[0].get("ok") else None)
+                if detail:
+                    row["lines"].append("%3d  %-14s  headroom not applied: %s"
+                                        % (row["ti"], row["name"], detail))
 
-    # Resolve the clip we just made BY ITS START TIME. Never index 0 — see
-    # find_placed_clip. Everything after this point addresses `ci`. Read in a
-    # request after the one that placed the clips.
-    placed = [row for row in rows if row.get("placed")]
-    lists = arrangement_clips([row["ti"] for row in placed])
-    for row in placed:
-        ti, name, clips = row["ti"], row["name"], lists[row["ti"]]
-        if isinstance(clips, RuntimeError):
-            row["lines"].append("%3d  %-14s  ERROR: could not list arrangement clips (%s) — "
-                                "colour, mute, warp and trim SKIPPED for this track"
-                                % (ti, name, clips))
-            continue
-        ci = find_placed_clip(clips, START)
-        if ci is None:
-            # Not a silent fallback to 0: acting on the wrong clip is what this
-            # whole path exists to prevent.
-            row["lines"].append("%3d  %-14s  ERROR: no clip starts at beat %.4f (found %s) — "
-                                "colour, mute, warp and trim SKIPPED for this track"
-                                % (ti, name, START,
-                                   ", ".join("%.4f" % s for _i, s, _e in clips) or "none"))
-            continue
-        row["ci"], row["clips"] = ci, clips
+        # Resolve the clip we just made BY ITS START TIME. Never index 0 — see
+        # find_placed_clip. Everything after this point addresses `ci`. Read in a
+        # request after the one that placed the clips.
+        placed = [row for row in rows if row.get("placed")]
+        lists = arrangement_clips([row["ti"] for row in placed])
+        for row in placed:
+            ti, name, clips = row["ti"], row["name"], lists[row["ti"]]
+            if isinstance(clips, RuntimeError):
+                row["lines"].append("%3d  %-14s  ERROR: could not list arrangement clips (%s) — "
+                                    "colour, mute, warp and trim SKIPPED for this track"
+                                    % (ti, name, clips))
+                continue
+            ci = find_placed_clip(clips, START)
+            if ci is None:
+                # Not a silent fallback to 0: acting on the wrong clip is what this
+                # whole path exists to prevent.
+                row["lines"].append("%3d  %-14s  ERROR: no clip starts at beat %.4f (found %s) — "
+                                    "colour, mute, warp and trim SKIPPED for this track"
+                                    % (ti, name, START,
+                                       ", ".join("%.4f" % s for _i, s, _e in clips) or "none"))
+                continue
+            row["ci"], row["clips"] = ci, clips
 
-    found = [row for row in placed if "ci" in row]
-    ops = []
-    for row in found:
-        ti, cpath = row["ti"], "live_set tracks %d arrangement_clips %d" % (row["ti"], row["ci"])
-        # Colour the TRACK to match its clip. The module docstring used to say
-        # only clip colour was settable — true of the AbletonMCP bridge, which
-        # had no handler for it, and false here: LOM reaches Track.color
-        # directly (verified: 11958214 -> 16725558). Without it the track
-        # headers stay Live's default palette while the clips carry the ramp,
-        # so the frequency ordering is invisible until you look at the clips.
-        mine = [{"op": "set", "path": cpath, "property": "color", "value": row["rgb"]},
-                {"op": "set", "path": "live_set tracks %d" % ti, "property": "color",
-                 "value": row["rgb"]}]
-        if row["name"] in muted:
-            mine.append({"op": "set", "path": cpath, "property": "muted", "value": True})
-        # Warp only a drifting set, and stop trying after the bridge says it has
-        # never heard of the command — that answer will not change mid-run.
-        if warp_map and warp_state != "unsupported":
-            mine.append(warp_map_op(ti, row["ci"], warp_map))
-        ops.append(live_batch.seq(mine, stop=False))
-    for row, env in zip(found, lom_ops(ops)):
-        done = seq_results(env)
-        row["col"] = done[0]
-        # Leftovers are AUDIBLE DUPLICATE AUDIO, not a cosmetic wart: the stale
-        # clip still plays. Collected and reported loudly after the table.
-        row["leftovers"] = [(s, e) for j, s, e in row["clips"] if j != row["ci"]]
-        if row["leftovers"]:
-            stale.append((row["ti"], row["name"], row["leftovers"]))
-        # A track after the one that said "unknown op" was sent the map too, and
-        # Live changed nothing for it; it reads as if it was never sent.
-        row["warp_note"] = ""
-        if warp_map and warp_state != "unsupported":
-            warp_state, detail = warp_outcome(done[-1])
-            if warp_state == "ok":
-                row["warp_note"] = "  " + detail
-            elif warp_state == "unsupported":
-                row["warp_note"] = "  [no warp]"
-            else:
-                row["warp_note"] = "  [warp failed: %s]" % detail
+        found = [row for row in placed if "ci" in row]
+        ops = []
+        for row in found:
+            ti, cpath = row["ti"], "live_set tracks %d arrangement_clips %d" % (row["ti"], row["ci"])
+            # Colour the TRACK to match its clip. The module docstring used to say
+            # only clip colour was settable — true of the AbletonMCP bridge, which
+            # had no handler for it, and false here: LOM reaches Track.color
+            # directly (verified: 11958214 -> 16725558). Without it the track
+            # headers stay Live's default palette while the clips carry the ramp,
+            # so the frequency ordering is invisible until you look at the clips.
+            mine = [{"op": "set", "path": cpath, "property": "color", "value": row["rgb"]},
+                    {"op": "set", "path": "live_set tracks %d" % ti, "property": "color",
+                     "value": row["rgb"]}]
+            if row["name"] in muted:
+                mine.append({"op": "set", "path": cpath, "property": "muted", "value": True})
+            # Warp only a drifting set, and stop trying after the bridge says it has
+            # never heard of the command — that answer will not change mid-run.
+            if warp_map and warp_state != "unsupported":
+                mine.append(warp_map_op(ti, row["ci"], warp_map))
+            ops.append(live_batch.seq(mine, stop=False))
+        for row, env in zip(found, lom_ops(ops)):
+            done = seq_results(env)
+            row["col"] = done[0]
+            # Leftovers are AUDIBLE DUPLICATE AUDIO, not a cosmetic wart: the stale
+            # clip still plays. Collected and reported loudly after the table.
+            row["leftovers"] = [(s, e) for j, s, e in row["clips"] if j != row["ci"]]
+            if row["leftovers"]:
+                stale.append((row["ti"], row["name"], row["leftovers"]))
+            # A track after the one that said "unknown op" was sent the map too, and
+            # Live changed nothing for it; it reads as if it was never sent.
+            row["warp_note"] = ""
+            if warp_map and warp_state != "unsupported":
+                warp_state, detail = warp_outcome(done[-1])
+                if warp_state == "ok":
+                    row["warp_note"] = "  " + detail
+                elif warp_state == "unsupported":
+                    row["warp_note"] = "  [no warp]"
+                else:
+                    row["warp_note"] = "  [warp failed: %s]" % detail
 
-    # AFTER the warp map, never before: the trim's unit is seconds on an
-    # unwarped clip and beats on a warped one, so `warping` has to have
-    # settled before trim_clip_starts reads it, a request later.
-    for row in found:
-        row["trim_note"] = ""
-    if TRIM > 0:
-        trims = trim_clip_starts([(row["ti"], row["ci"]) for row in found],
-                                 TRIM, period, warp_map)
-        for row, (ok, detail) in zip(found, trims):
-            row["trim_note"] = "  " + detail if ok else "  [trim failed: %s]" % detail
-
-    for row in rows:
-        for line in row["lines"]:
-            print(line)
-        if "ci" in row:
-            print("%3d  %-14s %8.0fHz   #%06X  clip=%s col=%s%s%s%s%s"
-                  % (row["ti"], row["name"], cent[row["name"]], row["rgb"],
-                     status(row["clip"]), status(row["col"]),
-                     "  [muted: parts present]" if row["name"] in muted else "",
-                     row["warp_note"], row["trim_note"],
-                     "  [+%d STALE]" % len(row["leftovers"]) if row["leftovers"] else ""))
+        # AFTER the warp map, never before: the trim's unit is seconds on an
+        # unwarped clip and beats on a warped one, so `warping` has to have
+        # settled before trim_clip_starts reads it, a request later.
+        for row in found:
+            row["trim_note"] = ""
+        if TRIM > 0:
+            trims = trim_clip_starts([(row["ti"], row["ci"]) for row in found],
+                                     TRIM, period, warp_map)
+            for row, (ok, detail) in zip(found, trims):
+                row["trim_note"] = "  " + detail if ok else "  [trim failed: %s]" % detail
+        for row in found:
+            row["finished"] = True
+    finally:
+        for row in rows:
+            for line in row["lines"]:
+                print(line)
+            if row.get("finished"):
+                print("%3d  %-14s %8.0fHz   #%06X  clip=%s col=%s%s%s%s%s"
+                      % (row["ti"], row["name"], cent[row["name"]], row["rgb"],
+                         status(row["clip"]), status(row["col"]),
+                         "  [muted: parts present]" if row["name"] in muted else "",
+                         row["warp_note"], row["trim_note"],
+                         "  [+%d STALE]" % len(row["leftovers"]) if row["leftovers"] else ""))
 
     # STALE CLIPS ARE AUDIBLE, so this is a hard warning rather than a note. It
     # happens when a Set is re-run at a different --start-bar: the new clip

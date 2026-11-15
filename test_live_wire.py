@@ -187,12 +187,15 @@ def test_session_view_sends_what_the_raw_client_sent(name, wire):
     assert _as_json(ret) == gold["ret"]
 
 
-# Batched, and still the old operations in the old order: (golden names, reply, call, what the
-# old call returned). The new call's return is the old one's, in the batched function's shape.
+# Batched, and still the old operations in the old order: (golden names, reply, call[, reads
+# added at the end since]). The new call's return is the old one's, in the batched function's
+# shape.
 REGROUPED = {
     "s2l.trim_clip_start.warped": (
         ["s2l.trim_clip_start.warped"], _generic,
-        lambda: S.trim_clip_starts([(2, 1)], 0.237, PERIOD, [])[0]),
+        lambda: S.trim_clip_starts([(2, 1)], 0.237, PERIOD, [])[0],
+        # added since: `warping` read again with the read-back, to catch a unit change
+        [["get", {"path": "live_set tracks 2 arrangement_clips 1", "property": "warping"}]]),
     "s2l.apply_warp_map": (
         ["s2l.apply_warp_map"], _generic,
         lambda: S.warp_outcome(S.lom_ops([S.warp_map_op(2, 1, [[0, 0.0], [4, 1.92]])])[0])),
@@ -221,12 +224,12 @@ def test_batched_functions_still_send_the_old_operations_in_the_old_order(name, 
     the same params, the same order. The golden calls are the old code's, not regenerated."""
     import fake_live
     install, calls = wire
-    golden, reply, fn = REGROUPED[name]
+    golden, reply, fn, added = (REGROUPED[name] + ([],))[:4]
     install(fake_live.with_batches(reply))
     ret = fn()
     sent = [[op, {k: v for k, v in p.items() if k != "op"}]
             for op, params in calls for op, p in fake_live.leaves(op, params)]
-    assert sent == [c for g in golden for c in GOLDEN[g]["calls"]]
+    assert sent == [c for g in golden for c in GOLDEN[g]["calls"]] + added
     assert _as_json(ret) == GOLDEN[golden[-1]]["ret"]
     assert capsys.readouterr().out == "".join(GOLDEN[g]["out"] for g in golden)
     assert len(calls) < len(sent) or calls[0][0] == "transaction", "grouped in batches"
@@ -315,10 +318,13 @@ def test_stems2live_lives_own_timeout_reply_fails_one_operation_not_the_run(wire
                             + [{"ok": False, "error": "IndexError: out of range"}]
                             * (len(p["specs"]) - 1)} if op == "get_batch"
                            else _remote_timeout(op, p)))
-    with pytest.raises(SystemExit) as e:                 # as the old code did
+    # The old code exited with "create_audio_track failed: ...". The creates are one batch
+    # now, and Live keeps running a task it gave up waiting on, so the tracks may still be
+    # made: the run ends saying so (test_batch_live has the model where they land).
+    with pytest.raises(SystemExit) as e:
         S.audio_track_targets(5, 2)
-    assert str(e.value) == ("create_audio_track failed: "
-                            "Live's main thread was busy for 15s")
+    assert str(e.value).startswith("Live did not answer the last batch of changes "
+                                   "(Live's main thread was busy for 15s)")
 
 
 def test_session_view_lives_own_timeout_reply_is_a_lom_error_the_run_survives(wire):

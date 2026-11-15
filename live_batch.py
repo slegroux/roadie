@@ -30,6 +30,23 @@ OPS_PER_REQUEST = 256
 
 _HEAVY_CALLS = ("create_audio_clip",)
 
+# A clip's loop and marker properties: the ones whose writes are checked against Live's reply.
+MARKERS = ("loop_start", "loop_end", "start_marker", "end_marker")
+
+
+class StillRunning(SystemExit):
+    """A batch of writes Live did not answer: its main thread gave up waiting (Live's own Timeout
+    reply), the connection closed, or no reply came. Live keeps running a task it gave up on, so
+    the batch's changes may still land. Ends the run, from either script and through stems2live's
+    guard around the Session grid (it is not an Exception): sending more on top of a batch that
+    may still be landing, or reporting its items as untouched, would both be wrong."""
+
+    def __init__(self, why):
+        super().__init__(
+            "Live did not answer the last batch of changes (%s). Live may still be running it, "
+            "so its changes may still land: stopped here and sent nothing more. Check the Set, "
+            "or undo and re-run on a fresh Set." % why)
+
 
 def seq(ops, stop=True):
     """`ops` as ONE op of a batch: a nested transaction that runs them in order and, with `stop`,
