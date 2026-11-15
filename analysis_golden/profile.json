@@ -1,0 +1,668 @@
+{
+ "kind": "reference_profile",
+ "version": 6,
+ "mix": "DIR/ref/mix.wav",
+ "tempo": 120.0,
+ "beats_per_bar": 4,
+ "t0": 0.25,
+ "sample_rate": 48000,
+ "notes": [],
+ "inputs": {
+  "mix": [
+   {
+    "path": "DIR/ref/mix.wav",
+    "mtime": 1700000000.0,
+    "size": 9312088
+   }
+  ],
+  "stems": {
+   "kick": [
+    {
+     "path": "DIR/ref/kick.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ],
+   "bass": [
+    {
+     "path": "DIR/ref/bass.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ],
+   "synth": [
+    {
+     "path": "DIR/ref/synth.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ],
+   "hh": [
+    {
+     "path": "DIR/ref/hh.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ],
+   "snare": [
+    {
+     "path": "DIR/ref/snare.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ],
+   "drums": [
+    {
+     "path": "DIR/ref/hh.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    },
+    {
+     "path": "DIR/ref/snare.wav",
+     "mtime": 1700000000.0,
+     "size": 9312088
+    }
+   ]
+  }
+ },
+ "sections": [
+  {
+   "name": "A",
+   "start_bar": 0,
+   "bars": 4,
+   "mix": {
+    "level_db": -15.97,
+    "integrated_lufs": -15.27,
+    "width": 0.0,
+    "bands_db": {
+     "sub": -17.96,
+     "bass": -21.89,
+     "low_mid": -44.66,
+     "mid": -29.38,
+     "high_mid": -35.02,
+     "high": -29.42
+    },
+    "per_bar_db": [
+     -15.97,
+     -15.97,
+     -15.97,
+     -15.97
+    ]
+   },
+   "stems_sum": {
+    "level_db": -15.67,
+    "per_bar_db": [
+     -15.67,
+     -15.67,
+     -15.67,
+     -15.67
+    ],
+    "core_bar_db": [
+     -15.76,
+     -15.76,
+     -15.76,
+     -15.76
+    ]
+   },
+   "roles": {
+    "kick": {
+     "absent": false,
+     "trace": false,
+     "level_db": -22.05,
+     "vs_kick_db": 0.0,
+     "per_bar_db": [
+      -22.05,
+      -22.05,
+      -22.05,
+      -22.05
+     ],
+     "core_bar_db": [
+      -22.58,
+      -22.58,
+      -22.58,
+      -22.58
+     ],
+     "bands_db": {
+      "sub": -34.36,
+      "bass": -22.5,
+      "low_mid": -54.65,
+      "mid": -63.74,
+      "high_mid": -81.91,
+      "high": -95.22
+     },
+     "width": 0.0
+    },
+    "bass": {
+     "absent": false,
+     "trace": false,
+     "level_db": -17.94,
+     "vs_kick_db": 4.11,
+     "per_bar_db": [
+      -17.94,
+      -17.94,
+      -17.94,
+      -17.94
+     ],
+     "core_bar_db": [
+      -17.91,
+      -17.91,
+      -17.91,
+      -17.91
+     ],
+     "bands_db": {
+      "sub": -18.08,
+      "bass": -31.88,
+      "low_mid": -47.73,
+      "mid": -49.25,
+      "high_mid": -55.74,
+      "high": -59.57
+     },
+     "width": 0.0
+    },
+    "synth": {
+     "absent": false,
+     "trace": false,
+     "level_db": -30.03,
+     "vs_kick_db": -7.98,
+     "per_bar_db": [
+      -30.03,
+      -30.03,
+      -30.03,
+      -30.03
+     ],
+     "core_bar_db": [
+      -30.13,
+      -30.13,
+      -30.13,
+      -30.13
+     ],
+     "bands_db": {
+      "sub": -70.4,
+      "bass": -63.51,
+      "low_mid": -60.62,
+      "mid": -30.01,
+      "high_mid": -71.5,
+      "high": -85.84
+     },
+     "width": 0.0
+    },
+    "hh": {
+     "absent": false,
+     "trace": false,
+     "level_db": -36.64,
+     "vs_kick_db": -14.59,
+     "per_bar_db": [
+      -36.64,
+      -36.64,
+      -36.64,
+      -36.64
+     ],
+     "core_bar_db": [
+      -36.55,
+      -36.55,
+      -36.55,
+      -36.55
+     ],
+     "bands_db": {
+      "sub": -66.11,
+      "bass": -61.35,
+      "low_mid": -56.49,
+      "mid": -48.63,
+      "high_mid": -44.15,
+      "high": -38.69
+     },
+     "width": 0.0
+    },
+    "snare": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.72,
+     "vs_kick_db": -5.67,
+     "per_bar_db": [
+      -27.72,
+      -27.72,
+      -27.72,
+      -27.72
+     ],
+     "core_bar_db": [
+      -27.63,
+      -27.63,
+      -27.63,
+      -27.63
+     ],
+     "bands_db": {
+      "sub": -53.18,
+      "bass": -46.35,
+      "low_mid": -47.23,
+      "mid": -38.85,
+      "high_mid": -35.6,
+      "high": -29.98
+     },
+     "width": 0.0
+    },
+    "drums": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.19,
+     "vs_kick_db": -5.14,
+     "per_bar_db": [
+      -27.19,
+      -27.19,
+      -27.19,
+      -27.19
+     ],
+     "core_bar_db": [
+      -27.11,
+      -27.11,
+      -27.11,
+      -27.11
+     ],
+     "bands_db": {
+      "sub": -52.96,
+      "bass": -46.22,
+      "low_mid": -46.74,
+      "mid": -38.42,
+      "high_mid": -35.04,
+      "high": -29.43
+     },
+     "width": 0.0
+    }
+   }
+  },
+  {
+   "name": "B",
+   "start_bar": 4,
+   "bars": 4,
+   "mix": {
+    "level_db": -16.15,
+    "integrated_lufs": -15.56,
+    "width": 0.0,
+    "bands_db": {
+     "sub": -17.96,
+     "bass": -21.89,
+     "low_mid": -44.24,
+     "mid": -38.16,
+     "high_mid": -35.02,
+     "high": -29.42
+    },
+    "per_bar_db": [
+     -16.15,
+     -16.15,
+     -16.15,
+     -16.15
+    ]
+   },
+   "stems_sum": {
+    "level_db": -15.83,
+    "per_bar_db": [
+     -15.83,
+     -15.83,
+     -15.83,
+     -15.83
+    ],
+    "core_bar_db": [
+     -15.92,
+     -15.92,
+     -15.92,
+     -15.92
+    ]
+   },
+   "roles": {
+    "kick": {
+     "absent": false,
+     "trace": false,
+     "level_db": -22.05,
+     "vs_kick_db": 0.0,
+     "per_bar_db": [
+      -22.05,
+      -22.05,
+      -22.05,
+      -22.05
+     ],
+     "core_bar_db": [
+      -22.58,
+      -22.58,
+      -22.58,
+      -22.58
+     ],
+     "bands_db": {
+      "sub": -34.36,
+      "bass": -22.5,
+      "low_mid": -54.65,
+      "mid": -63.74,
+      "high_mid": -81.91,
+      "high": -95.22
+     },
+     "width": 0.0
+    },
+    "bass": {
+     "absent": false,
+     "trace": false,
+     "level_db": -17.94,
+     "vs_kick_db": 4.11,
+     "per_bar_db": [
+      -17.94,
+      -17.94,
+      -17.94,
+      -17.94
+     ],
+     "core_bar_db": [
+      -17.91,
+      -17.91,
+      -17.91,
+      -17.91
+     ],
+     "bands_db": {
+      "sub": -18.08,
+      "bass": -31.88,
+      "low_mid": -47.73,
+      "mid": -49.25,
+      "high_mid": -55.74,
+      "high": -59.57
+     },
+     "width": 0.0
+    },
+    "synth": {
+     "absent": true,
+     "per_bar_db": [
+      null,
+      null,
+      null,
+      null
+     ],
+     "core_bar_db": [
+      null,
+      null,
+      null,
+      null
+     ]
+    },
+    "hh": {
+     "absent": false,
+     "trace": false,
+     "level_db": -36.64,
+     "vs_kick_db": -14.59,
+     "per_bar_db": [
+      -36.64,
+      -36.64,
+      -36.64,
+      -36.64
+     ],
+     "core_bar_db": [
+      -36.55,
+      -36.55,
+      -36.55,
+      -36.55
+     ],
+     "bands_db": {
+      "sub": -66.11,
+      "bass": -61.35,
+      "low_mid": -56.49,
+      "mid": -48.63,
+      "high_mid": -44.15,
+      "high": -38.69
+     },
+     "width": 0.0
+    },
+    "snare": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.72,
+     "vs_kick_db": -5.67,
+     "per_bar_db": [
+      -27.72,
+      -27.72,
+      -27.72,
+      -27.72
+     ],
+     "core_bar_db": [
+      -27.63,
+      -27.63,
+      -27.63,
+      -27.63
+     ],
+     "bands_db": {
+      "sub": -53.18,
+      "bass": -46.35,
+      "low_mid": -47.23,
+      "mid": -38.85,
+      "high_mid": -35.6,
+      "high": -29.98
+     },
+     "width": 0.0
+    },
+    "drums": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.19,
+     "vs_kick_db": -5.14,
+     "per_bar_db": [
+      -27.19,
+      -27.19,
+      -27.19,
+      -27.19
+     ],
+     "core_bar_db": [
+      -27.11,
+      -27.11,
+      -27.11,
+      -27.11
+     ],
+     "bands_db": {
+      "sub": -52.96,
+      "bass": -46.22,
+      "low_mid": -46.74,
+      "mid": -38.42,
+      "high_mid": -35.04,
+      "high": -29.43
+     },
+     "width": 0.0
+    }
+   }
+  },
+  {
+   "name": "C",
+   "start_bar": 8,
+   "bars": 4,
+   "mix": {
+    "level_db": -15.97,
+    "integrated_lufs": -15.27,
+    "width": 0.0,
+    "bands_db": {
+     "sub": -17.96,
+     "bass": -21.89,
+     "low_mid": -44.66,
+     "mid": -29.38,
+     "high_mid": -35.02,
+     "high": -29.42
+    },
+    "per_bar_db": [
+     -15.97,
+     -15.97,
+     -15.97,
+     -15.97
+    ]
+   },
+   "stems_sum": {
+    "level_db": -15.67,
+    "per_bar_db": [
+     -15.67,
+     -15.67,
+     -15.67,
+     -15.67
+    ],
+    "core_bar_db": [
+     -15.76,
+     -15.76,
+     -15.76,
+     -15.76
+    ]
+   },
+   "roles": {
+    "kick": {
+     "absent": false,
+     "trace": false,
+     "level_db": -22.05,
+     "vs_kick_db": 0.0,
+     "per_bar_db": [
+      -22.05,
+      -22.05,
+      -22.05,
+      -22.05
+     ],
+     "core_bar_db": [
+      -22.58,
+      -22.58,
+      -22.58,
+      -22.58
+     ],
+     "bands_db": {
+      "sub": -34.36,
+      "bass": -22.5,
+      "low_mid": -54.65,
+      "mid": -63.74,
+      "high_mid": -81.91,
+      "high": -95.22
+     },
+     "width": 0.0
+    },
+    "bass": {
+     "absent": false,
+     "trace": false,
+     "level_db": -17.94,
+     "vs_kick_db": 4.11,
+     "per_bar_db": [
+      -17.94,
+      -17.94,
+      -17.94,
+      -17.94
+     ],
+     "core_bar_db": [
+      -17.91,
+      -17.91,
+      -17.91,
+      -17.91
+     ],
+     "bands_db": {
+      "sub": -18.08,
+      "bass": -31.88,
+      "low_mid": -47.73,
+      "mid": -49.25,
+      "high_mid": -55.74,
+      "high": -59.57
+     },
+     "width": 0.0
+    },
+    "synth": {
+     "absent": false,
+     "trace": false,
+     "level_db": -30.03,
+     "vs_kick_db": -7.98,
+     "per_bar_db": [
+      -30.03,
+      -30.03,
+      -30.03,
+      -30.03
+     ],
+     "core_bar_db": [
+      -30.13,
+      -30.13,
+      -30.13,
+      -30.13
+     ],
+     "bands_db": {
+      "sub": -70.4,
+      "bass": -63.51,
+      "low_mid": -60.62,
+      "mid": -30.01,
+      "high_mid": -71.5,
+      "high": -85.84
+     },
+     "width": 0.0
+    },
+    "hh": {
+     "absent": false,
+     "trace": false,
+     "level_db": -36.64,
+     "vs_kick_db": -14.59,
+     "per_bar_db": [
+      -36.64,
+      -36.64,
+      -36.64,
+      -36.64
+     ],
+     "core_bar_db": [
+      -36.55,
+      -36.55,
+      -36.55,
+      -36.55
+     ],
+     "bands_db": {
+      "sub": -66.11,
+      "bass": -61.35,
+      "low_mid": -56.49,
+      "mid": -48.63,
+      "high_mid": -44.15,
+      "high": -38.69
+     },
+     "width": 0.0
+    },
+    "snare": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.72,
+     "vs_kick_db": -5.67,
+     "per_bar_db": [
+      -27.72,
+      -27.72,
+      -27.72,
+      -27.72
+     ],
+     "core_bar_db": [
+      -27.63,
+      -27.63,
+      -27.63,
+      -27.63
+     ],
+     "bands_db": {
+      "sub": -53.18,
+      "bass": -46.35,
+      "low_mid": -47.23,
+      "mid": -38.85,
+      "high_mid": -35.6,
+      "high": -29.98
+     },
+     "width": 0.0
+    },
+    "drums": {
+     "absent": false,
+     "trace": false,
+     "level_db": -27.19,
+     "vs_kick_db": -5.14,
+     "per_bar_db": [
+      -27.19,
+      -27.19,
+      -27.19,
+      -27.19
+     ],
+     "core_bar_db": [
+      -27.11,
+      -27.11,
+      -27.11,
+      -27.11
+     ],
+     "bands_db": {
+      "sub": -52.96,
+      "bass": -46.22,
+      "low_mid": -46.74,
+      "mid": -38.42,
+      "high_mid": -35.04,
+      "high": -29.43
+     },
+     "width": 0.0
+    }
+   }
+  }
+ ],
+ "json_path": "DIR/ref.profile.json"
+}

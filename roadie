@@ -9,6 +9,7 @@
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
 #   roadie batch plan|run|verify-sources ...   unattended overnight batch   (batch.py)
 #   roadie stats                     summarise the local usage log
+#   roadie mcp                       MCP server (stdio) for the analysis tools (roadie_mcp.py)
 #
 # `roadie <command> --help` shows that command's own options. Every argument
 # after the command is passed through untouched, except that `split` turns a
@@ -134,6 +135,10 @@ case "$cmd" in
     # Not logged to the usage log: each track it processes calls roadie itself.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
     exec "$PY" "$REPO/batch.py" "$@" ;;
+  mcp)
+    # Not logged: an MCP client starts it and keeps it running. stdout is the protocol.
+    PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
+    exec "$PY" "$REPO/roadie_mcp.py" "$@" ;;
   stats)
     if [[ -z "$LOG" ]]; then echo "usage log is off (ROADIE_LOG is empty)"; exit 0; fi
     if [[ ! -s "$LOG" ]]; then echo "no usage logged yet ($LOG)"; exit 0; fi

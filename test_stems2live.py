@@ -7,23 +7,23 @@ and index 0 is then the leftover stub. On a real run that sent the trim to the
 stub, whose read-back check passed because the stub really had been trimmed,
 while the clip that mattered stayed untrimmed and half a beat out of alignment.
 
-The mock bridge below speaks the real wire format (newline-delimited JSON, one
-reply per line, nested `params`) over a real loopback socket, so the client's
-framing is exercised too and not just its call arguments. Nothing here touches
-Ableton Live.
+The mock bridge below stands in for `sideman.client.Live.request`: it receives
+the op and the nested `params` exactly as the client would put them on the wire
+(round-tripped through JSON), and answers or refuses the way the remote script
+does. The wire itself belongs to the client; that what goes out is unchanged is
+pinned in test_live_wire.py. Nothing here touches Ableton Live.
 """
 
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
-import threading
 
 import pytest
 
 import stems2live as S
+from sideman.client import Live, LiveError
 
 # The stub the real run left behind: an old placement at bar 1.8766 whose head
 # survived in front of the new clip at bar 9.
@@ -43,18 +43,12 @@ class MockBridge(object):
     ALWAYS returned sorted by start_time, which is the behaviour under test.
     """
 
-    def __init__(self, tracks):
+    def __init__(self, tracks, monkeypatch):
         self.tracks = tracks              # {index: [clip dict, ...]}
         self.calls = []                   # every (op, params) received
-        self.sock = socket.socket()
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(5)
-        self.port = self.sock.getsockname()[1]
-        self.running = True
-        self.thread = threading.Thread(target=self._serve)
-        self.thread.daemon = True
-        self.thread.start()
+        # A bound method does not re-bind on the instance, so wrap it.
+        monkeypatch.setattr(Live, "request",
+                            lambda _live, op, params=None: self._request(op, params))
 
     # -- object model ----------------------------------------------------
     def clips(self, track_index):
@@ -91,37 +85,18 @@ class MockBridge(object):
                     "removed": 0, "remove_failed": 1}
         raise ValueError("unknown op %r; known: ['get', 'set']" % op)
 
-    # -- wire ------------------------------------------------------------
-    def _serve(self):
-        while self.running:
-            try:
-                conn, _ = self.sock.accept()
-            except OSError:
-                return
-            buf = b""
-            while b"\n" not in buf:
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-            if b"\n" not in buf:
-                conn.close()
-                continue
-            req = json.loads(buf.split(b"\n", 1)[0].decode())
-            params = req.get("params") or {}
-            self.calls.append((req["op"], params))
-            try:
-                out = {"id": req["id"], "ok": True,
-                       "result": self.handle(req["op"], params)}
-            except Exception as e:                       # noqa: BLE001
-                out = {"id": req["id"], "ok": False,
-                       "error": {"type": type(e).__name__, "message": str(e)}}
-            conn.sendall(json.dumps(out).encode() + b"\n")
-            conn.close()
+    # -- the client ------------------------------------------------------
+    def _request(self, op, params=None):
+        # What the socket would have carried: tuples arrive as lists.
+        params = json.loads(json.dumps(params or {}))
+        self.calls.append((op, params))
+        try:
+            return self.handle(op, params)
+        except Exception as e:                           # noqa: BLE001
+            raise LiveError(type(e).__name__, str(e))
 
     def close(self):
-        self.running = False
-        self.sock.close()
+        pass
 
 
 def make_clip(start, end, **kw):
@@ -136,8 +111,7 @@ def make_clip(start, end, **kw):
 def bridge(monkeypatch):
     """A track carrying a leftover stub AND the newly placed clip."""
     b = MockBridge({2: [make_clip(STUB_START, STUB_END),
-                        make_clip(NEW_START, NEW_END)]})
-    monkeypatch.setattr(S, "PORT", b.port)
+                        make_clip(NEW_START, NEW_END)]}, monkeypatch)
     yield b
     b.close()
 
@@ -236,8 +210,7 @@ def test_warp_map_is_written_to_the_resolved_clip(bridge):
 
 def test_a_fresh_track_still_resolves_to_its_only_clip(monkeypatch):
     """The single-clip case the old code got right must keep working."""
-    b = MockBridge({2: []})
-    monkeypatch.setattr(S, "PORT", b.port)
+    b = MockBridge({2: []}, monkeypatch)
     try:
         S.lom("call", path="live_set tracks 2",
               function="create_audio_clip", args=["/tmp/x.flac", NEW_START])
@@ -252,8 +225,7 @@ def test_a_fresh_track_still_resolves_to_its_only_clip(monkeypatch):
 def test_placing_a_second_clip_later_leaves_the_first_addressable(monkeypatch):
     """Re-running at a later --start-bar: the new clip is index 1, and that is
     the one every subsequent property must be written to."""
-    b = MockBridge({2: [make_clip(STUB_START, STUB_END)]})
-    monkeypatch.setattr(S, "PORT", b.port)
+    b = MockBridge({2: [make_clip(STUB_START, STUB_END)]}, monkeypatch)
     try:
         S.lom("call", path="live_set tracks 2",
               function="create_audio_clip", args=["/tmp/x.flac", NEW_START])
