@@ -323,6 +323,15 @@ add is reachable without patching:
 | track and clip colour | native |
 | clip deletion | unreachable, and unnecessary — creating a clip at the same position replaces it |
 
+**Few requests, few undo steps.** A request to Live costs about 400 ms whatever it
+carries (it waits on Live's main thread), so `roadie load` and `roadie scenes` send
+reads that do not depend on each other in one `get_batch` and writes in one
+`transaction`. A ten-stem load with `--session` into a fresh Set is 30 requests
+instead of 439, and each transaction is one Cmd-Z on Live 12.4+ (about 20 to undo
+a load instead of about 280). Anything that depends on an earlier step (a clip
+addressed after the request that made it, a read-back after its write, the play-head
+moves for locators) still waits for a later request: `live_batch.py` lists them.
+
 **The decisive difference is reload.** Sideman's `handlers.py` is re-imported on
 `{"op": "reload"}` — **no Live restart**. The AbletonMCP path needs a full quit
 and reopen for every remote-script change, because Python keeps the module in
