@@ -15,6 +15,16 @@ Two things are pinned here, and neither needs Live or a socket server:
    up; the remote script only echoes it back) and the `id` key of the envelope
    `stems2live.lom` returns.
 
+   Since the batching (live_batch.py), the functions that read or write many
+   things send them in `get_batch` and `transaction` requests, so their wire
+   changed by design and their golden entries are no longer compared request
+   for request. They are kept in the golden file as the record of what was
+   sent. What replaces them as the proof is test_batch_live.py: the old code
+   and the new each run a whole load against a state model of Live, and the
+   Set they leave is compared. Where a batched function still sends exactly
+   the old operations in the old order, only grouped, the test below says so
+   against the golden calls.
+
 2. HOW FAILURES SURFACE. A refused connection, a closed one, a timeout and an
    error reply each ended the old code a particular way; they still do.
 
@@ -135,18 +145,7 @@ S2L = {
     "s2l.lom.notes_add": (_generic, lambda: S.lom("notes_add", path="c", notes=[{"pitch": 84, "start_time": 0.0, "duration": 4.0, "velocity": 90}])),
     "s2l.probe_bridge.ok": (_generic, S.probe_bridge),
     "s2l.probe_bridge.nowarp": (_unknown_warp, S.probe_bridge),
-    "s2l.arrangement_clips": (_generic, lambda: S.arrangement_clips(2)),
-    "s2l.arrangement_clips.noend": (_no_end_time, lambda: S.arrangement_clips(2)),
     "s2l.lom.remote_timeout": (_remote_timeout, lambda: S.lom("call", path="live_set", function="create_audio_track", args=[-1])),
-    "s2l.apply_warp_map.remote_timeout": (_remote_timeout, lambda: S.apply_warp_map(2, 1, [[0, 0.0]])),
-    "s2l.apply_warp_map": (_generic, lambda: S.apply_warp_map(2, 1, [[0, 0.0], [4, 1.92]])),
-    "s2l.apply_warp_map.unsupported": (_unknown_op, lambda: S.apply_warp_map(2, 1, [[0, 0.0]])),
-    "s2l.set_track_headroom": (_generic, lambda: S.set_track_headroom(3, -6.0)),
-    "s2l.set_track_headroom.err": (_unknown_op, lambda: S.set_track_headroom(3, -6.0)),
-    "s2l.is_audio_track": (_generic, lambda: S.is_audio_track(4)),
-    "s2l.audio_track_targets": (_generic, lambda: S.audio_track_targets(1, 5)),
-    "s2l.write_energy_map": (_generic, lambda: S.write_energy_map(NOTES, ["kick", "bass"], [{"beat": 3}, {"beat": 64}], 4.0, shift_beats=-3)),
-    "s2l.trim_clip_start.warped": (_generic, lambda: S.trim_clip_start(2, 1, 0.237, PERIOD, [])),
 }
 
 SV = {
@@ -156,11 +155,6 @@ SV = {
     "sv.call_args": lambda b: b.call("live_set", "create_scene", [-1]),
     "sv.call_confirm": lambda b: b.call("live_set tracks 0 clip_slots 0", "delete_clip", confirm=True),
     "sv.count": lambda b: b.count("live_set", "tracks"),
-    "sv.map_stems_to_tracks": lambda b: V.map_stems_to_tracks(b, ["bass", "x", "gone"]),
-    "sv.track_clip_color": lambda b: V.track_clip_color(b, 2),
-    "sv.ensure_scenes": lambda b: V.ensure_scenes(b, [{"scene": i, "name": "S%d" % i} for i in range(4)]),
-    "sv.write_clip": lambda b: V.write_clip(b, 1, 0, "/tmp/a.flac", 8.0, 40.0, "Intro", color=255),
-    "sv.clear_slot": lambda b: V.clear_slot(b, 1, 0),
     "sv.many_in_one_run": lambda b: [b.count("live_set", "tracks"), b.get("live_set", "tempo"), b.get("live_set", "tempo")],
 }
 
@@ -191,6 +185,51 @@ def test_session_view_sends_what_the_raw_client_sent(name, wire):
     gold = GOLDEN[name]
     assert calls == gold["calls"]
     assert _as_json(ret) == gold["ret"]
+
+
+# Batched, and still the old operations in the old order: (golden names, reply, call, what the
+# old call returned). The new call's return is the old one's, in the batched function's shape.
+REGROUPED = {
+    "s2l.trim_clip_start.warped": (
+        ["s2l.trim_clip_start.warped"], _generic,
+        lambda: S.trim_clip_starts([(2, 1)], 0.237, PERIOD, [])[0]),
+    "s2l.apply_warp_map": (
+        ["s2l.apply_warp_map"], _generic,
+        lambda: S.warp_outcome(S.lom_ops([S.warp_map_op(2, 1, [[0, 0.0], [4, 1.92]])])[0])),
+    "s2l.apply_warp_map.unsupported": (
+        ["s2l.apply_warp_map.unsupported"], _unknown_op,
+        lambda: S.warp_outcome(S.lom_ops([S.warp_map_op(2, 1, [[0, 0.0]])])[0])),
+    "sv.ensure_scenes": (
+        ["sv.ensure_scenes"], _generic,
+        lambda: V.ensure_scenes(V.Bridge(), [{"scene": i, "name": "S%d" % i} for i in range(4)])),
+    "sv.write_clip": (
+        ["sv.write_clip"], _generic,
+        lambda: V.write_clips(V.Bridge(), [{"track": 1, "scene": 0, "path": "/tmp/a.flac",
+                                            "start": 8.0, "end": 40.0, "name": "Intro",
+                                            "color": 255}])[0]),
+    "sv.clear_slot+write_clip": (
+        ["sv.clear_slot", "sv.write_clip"], _generic,
+        lambda: V.write_clips(V.Bridge(), [{"track": 1, "scene": 0, "path": "/tmp/a.flac",
+                                            "start": 8.0, "end": 40.0, "name": "Intro",
+                                            "color": 255}], replace=True)[0]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(REGROUPED))
+def test_batched_functions_still_send_the_old_operations_in_the_old_order(name, wire, capsys):
+    """Flattened, the batches carry what the old code sent one request at a time: the same ops,
+    the same params, the same order. The golden calls are the old code's, not regenerated."""
+    import fake_live
+    install, calls = wire
+    golden, reply, fn = REGROUPED[name]
+    install(fake_live.with_batches(reply))
+    ret = fn()
+    sent = [[op, {k: v for k, v in p.items() if k != "op"}]
+            for op, params in calls for op, p in fake_live.leaves(op, params)]
+    assert sent == [c for g in golden for c in GOLDEN[g]["calls"]]
+    assert _as_json(ret) == GOLDEN[golden[-1]]["ret"]
+    assert capsys.readouterr().out == "".join(GOLDEN[g]["out"] for g in golden)
+    assert len(calls) < len(sent) or calls[0][0] == "transaction", "grouped in batches"
 
 
 @pytest.mark.parametrize("name, reply", [
@@ -270,7 +309,11 @@ def test_stems2live_lives_own_timeout_reply_fails_one_operation_not_the_run(wire
     r = S.lom("call", path="live_set", function="create_audio_track", args=[-1])
     assert r == {"ok": False, "error": {"type": "Timeout",
                                         "message": "Live's main thread was busy for 15s"}}
-    install(lambda op, p: ({"count": 2} if op == "count"
+    # The track list reads (two tracks, so none to reuse past index 5); the
+    # creates, one batch now, get Live's Timeout reply.
+    install(lambda op, p: ({"results": [{"ok": True, "value": [{}, {}]}]
+                            + [{"ok": False, "error": "IndexError: out of range"}]
+                            * (len(p["specs"]) - 1)} if op == "get_batch"
                            else _remote_timeout(op, p)))
     with pytest.raises(SystemExit) as e:                 # as the old code did
         S.audio_track_targets(5, 2)

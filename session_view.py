@@ -66,6 +66,7 @@ except ModuleNotFoundError as _e:
         raise
     sys.exit("sideman is not installed in .venv: run ./install.sh")
 
+import live_batch
 from sections import (BEATS_PER_BAR, PHRASE_BARS, analyze_sections, cli_grid,
                       stem_paths)
 
@@ -95,9 +96,11 @@ class Bridge:
     """The AbletonLOM remote script, through `sideman.client.Live`.
 
     One connection is held for the life of the Bridge, through the client's
-    `with` protocol: a full grid is ~7 calls per clip and ~90 clips, and a held
-    connection saves Live a tick on each (measured on a ten-stem Set: 389 ms a
-    request against 603 ms connecting every time). `close()` closes it.
+    `with` protocol, which saves Live a tick on every request (measured on a
+    ten-stem Set: 389 ms a request against 603 ms connecting every time).
+    `close()` closes it. A full grid is ~90 clips of ~10 operations each; `reads`,
+    `ops` and `steps` send them a step at a time for every clip, in a few
+    requests instead of one each.
 
     `Live.request` takes `params` as a dict and nests it for the wire; a flat
     body reaches the handler with no `path` key and comes back as
@@ -118,29 +121,111 @@ class Bridge:
         try:
             return self._live.request(op, params)
         except LiveError as e:
-            if e.type == "ConnectionRefused":
-                raise LomError(
-                    "nothing listening on %s:%d.\nOpen Ableton Live and set "
-                    "Preferences -> Link, Tempo & MIDI -> Control Surface = "
-                    "AbletonLOM." % (self.host, self.port))
-            if e.type == "ConnectionClosed":
-                raise LomError("Live closed the connection during %r" % op)
-            # Only a timeout waiting on the connection; Live's own "Timeout" reply is a
-            # refusal of this one request and falls through to LomError below.
-            if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
-                raise TimeoutError("no reply from Live within %gs" % self.timeout)
-            raise LomError("%s %s: %s" % (op, params.get("path", ""), e))
+            raise self._failure(e, op, params.get("path", ""))
         except (ConnectionResetError, BrokenPipeError):
             # Mid-request, with Live there a moment ago: not "nothing listening".
             raise
         except OSError as e:
-            # Unreachable host, a connect that timed out: the client lets these
-            # through unwrapped, and the run has always reported them as "no
-            # bridge" rather than crashing.
-            raise LomError(
-                "nothing listening on %s:%d (%s).\nOpen Ableton Live and set "
+            raise self._unreachable(e)
+
+    def _failure(self, e, op, path):
+        """The exception a LiveError on `op` at `path` is raised as."""
+        if e.type == "ConnectionRefused":
+            return LomError(
+                "nothing listening on %s:%d.\nOpen Ableton Live and set "
                 "Preferences -> Link, Tempo & MIDI -> Control Surface = "
-                "AbletonLOM." % (self.host, self.port, e))
+                "AbletonLOM." % (self.host, self.port))
+        if e.type == "ConnectionClosed":
+            return LomError("Live closed the connection during %r" % op)
+        # Only a timeout waiting on the connection; Live's own "Timeout" reply is a
+        # refusal of this one request and falls through to LomError below.
+        if e.type == "Timeout" and isinstance(e.__context__, TimeoutError):
+            return TimeoutError("no reply from Live within %gs" % self.timeout)
+        return LomError("%s %s: %s" % (op, path, e))
+
+    def _unreachable(self, e):
+        # Unreachable host, a connect that timed out: the client lets these
+        # through unwrapped, and the run has always reported them as "no
+        # bridge" rather than crashing.
+        return LomError(
+            "nothing listening on %s:%d (%s).\nOpen Ableton Live and set "
+            "Preferences -> Link, Tempo & MIDI -> Control Surface = "
+            "AbletonLOM." % (self.host, self.port, e))
+
+    # Many operations in few requests: see live_batch for what may share a request and why.
+    # Each method gives back, per op, what that op sent alone would have: its result, or the
+    # LomError `request` would have raised for it (not raised here). A request that fails as a
+    # whole fails every op it carried; only a timeout on the connection is raised, as always.
+
+    def _batch(self, op, ops, **params):
+        """The results list of one get_batch or transaction, or one error per op."""
+        try:
+            return self._live.request(op, dict(params, **{
+                "specs" if op == "get_batch" else "ops": ops}))["results"], None
+        except LiveError as e:
+            errors = [self._failure(e, o.get("op", "get"), o.get("path", "")) for o in ops]
+            if isinstance(errors[0], TimeoutError):
+                raise errors[0]
+            return None, errors
+        except (ConnectionResetError, BrokenPipeError):
+            raise
+        except OSError as e:
+            return None, [self._unreachable(e)] * len(ops)
+
+    def _entry(self, spec, entry):
+        """(result, error) for one op's entry in a batch's results."""
+        if not entry.get("ok"):
+            return None, LomError("%s %s: %s" % (spec.get("op", "get"), spec.get("path", ""),
+                                                  entry.get("error")))
+        if spec.get("op") == "transaction":
+            # A nested live_batch.seq: its first failed op is its error.
+            for sub, res in zip(spec["ops"], entry["result"]["results"]):
+                if not res.get("ok"):
+                    return entry["result"], self._entry(sub, res)[1]
+        return entry.get("result"), None
+
+    def reads(self, specs):
+        """Read every {path, property}: (value, error) each, in order. `get_batch` never fails
+        as a whole, so an unreadable property costs only its own entry."""
+        out = []
+        for chunk in live_batch.pack([dict(s, op="get") for s in specs]):
+            res, errors = self._batch("get_batch", [{"path": s["path"],
+                                                     "property": s["property"]}
+                                                    for s in chunk])
+            if errors:
+                out.extend((None, e) for e in errors)
+                continue
+            for s, entry in zip(chunk, res):
+                if entry.get("ok"):
+                    out.append((entry["value"], None))
+                else:
+                    out.append(self._entry(s, entry))
+        return out
+
+    def ops(self, ops):
+        """Run sets and calls in order, none stopping another: (result, error) each. Each request
+        is one `transaction`, so ONE undo step."""
+        out = []
+        for chunk in live_batch.pack(ops):
+            res, errors = self._batch("transaction", chunk, stop_on_error=False,
+                                      rollback_on_error=False)
+            if errors:
+                out.extend((None, e) for e in errors)
+            else:
+                out.extend(self._entry(s, entry) for s, entry in zip(chunk, res))
+        return out
+
+    def steps(self, ops):
+        """Run ops in order; raise the LomError of the first that fails, as one request each did."""
+        for chunk in live_batch.pack(ops):
+            res, errors = self._batch("transaction", chunk, stop_on_error=True,
+                                      rollback_on_error=False)
+            if errors:
+                raise errors[0]
+            for s, entry in zip(chunk, res):
+                err = self._entry(s, entry)[1]
+                if err is not None:
+                    raise err
 
     def get(self, path, prop):
         """The property's VALUE, not the bridge's envelope around it.
@@ -260,9 +345,22 @@ def map_stems_to_tracks(bridge, stem_names):
     stems are ordered by measured spectral centroid, so the mapping changes with
     the material, and any track the user has added or moved since silently
     shifts every clip onto the wrong instrument.
+
+    One read: Live lists up to 64 tracks with their names. A longer list comes
+    back as a count, and the names are then read in a second request.
     """
-    n = bridge.count("live_set", "tracks")
-    names = [bridge.get("live_set tracks %d" % i, "name") for i in range(n)]
+    ((tracks, err),) = bridge.reads([{"path": "live_set", "property": "tracks"}])
+    if err is not None:
+        raise err
+    if isinstance(tracks, list) and all("name" in t for t in tracks):
+        names = [t["name"] for t in tracks]
+    else:
+        names = []
+        for value, err in bridge.reads([{"path": "live_set tracks %d" % i, "property": "name"}
+                                        for i in range(live_batch.vector_len(tracks))]):
+            if err is not None:
+                raise err
+            names.append(value)
     lowered = {}
     for i, nm in enumerate(names):
         lowered.setdefault(str(nm).strip().lower(), i)
@@ -278,25 +376,39 @@ def map_stems_to_tracks(bridge, stem_names):
     return mapping, missing, names
 
 
-def track_clip_color(bridge, track_index):
-    """Colour of the track's first arrangement clip, or None if it has none.
+def track_clip_colors(bridge, track_indices, *specs):
+    """{track index: colour of its first arrangement clip, or None if it has none}.
 
     Reused rather than recomputed so a column of session clips matches the
     arrangement clip `stems2live` already coloured by spectral centroid. Reading
     it back is what keeps the two views in step without this file having to know
     anything about how that ramp is derived.
+
+    One request for every track: the clip list (its length is the count) and
+    clip 0's colour, read together. A track with no clip fails the colour read
+    on its own, and that read is not used. With `specs` those reads go in the
+    same request, and ({track: colour}, their (value, error)s) comes back.
     """
-    try:
-        if bridge.count("live_set tracks %d" % track_index,
-                        "arrangement_clips") < 1:
-            return None
-        return int(bridge.get("live_set tracks %d arrangement_clips 0"
-                              % track_index, "color"))
-    except (LomError, TypeError, ValueError):
-        return None
+    reads = list(specs)
+    for ti in track_indices:
+        reads += [{"path": "live_set tracks %d" % ti, "property": "arrangement_clips"},
+                  {"path": "live_set tracks %d arrangement_clips 0" % ti, "property": "color"}]
+    got = bridge.reads(reads)
+    extra, got = got[:len(specs)], got[len(specs):]
+    out = {}
+    for k, ti in enumerate(track_indices):
+        (clips, err), (color, color_err) = got[2 * k], got[2 * k + 1]
+        try:
+            if err is not None or live_batch.vector_len(clips) < 1 or color_err is not None:
+                out[ti] = None
+                continue
+            out[ti] = int(color)
+        except (TypeError, ValueError):
+            out[ti] = None
+    return (out, extra) if specs else out
 
 
-def ensure_scenes(bridge, scenes, verbose=True):
+def ensure_scenes(bridge, scenes, verbose=True, have=None):
     """Rename the Set's existing scenes, creating only the shortfall.
 
     A new Live Set ships with 8 empty scenes. Appending one scene per section on
@@ -304,81 +416,157 @@ def ensure_scenes(bridge, scenes, verbose=True):
     them by hand before anything is launchable. Reusing what is there first
     keeps scene 0 as the first section, which is what "launch the top row"
     should mean.
+
+    The creates go in one request and the names in the next, so no scene is
+    named by index in the request that made it. Both stop at the first failure
+    and raise it, as one request each did. `have` is the scene count when the
+    caller has read it.
     """
-    have = bridge.count("live_set", "scenes")
+    if have is None:
+        have = bridge.count("live_set", "scenes")
     need = len(scenes)
     if need > have:
         if verbose:
             print("scenes: %d present, creating %d more" % (have, need - have))
-        for _ in range(need - have):
-            bridge.call("live_set", "create_scene", [-1])
+        bridge.steps([{"op": "call", "path": "live_set", "function": "create_scene",
+                       "args": [-1], "confirm": False}] * (need - have))
     elif verbose:
         print("scenes: reusing %d of %d existing" % (need, have))
-    for sc in scenes:
-        bridge.set("live_set scenes %d" % sc["scene"], "name", sc["name"])
+    bridge.steps([{"op": "set", "path": "live_set scenes %d" % sc["scene"],
+                   "property": "name", "value": sc["name"]} for sc in scenes])
 
 
-def write_clip(bridge, track_index, scene_index, path, start, end, name,
-               color=None):
-    """Create, warp, trim and loop one session clip. Returns its full length.
+def write_clips(bridge, jobs, replace=False):
+    """Clear (with `replace`), create, warp, trim and loop session clips.
+
+    `jobs` are dicts of track, scene, path, start, end, name and color, in the
+    order the clips used to be written one at a time. One outcome per job, in
+    that order: the clip's full length, the LomError that stopped it (as
+    `request` would have raised it), or an exception that ended the run at that
+    clip — a trim that did not take — which the caller raises when it reaches
+    it. Once a job has ended the run, no job after it is sent anything more.
 
     The full length is read back AFTER warping and BEFORE trimming, because that
     is the only moment it means "how long the sample is, in beats" — and it is
     what the last scene's end has to be clamped against. Markers past the end of
     the sample are rejected by Live one clip at a time, which turns one bad
     number into 10 identical failures with no obvious cause.
+
+    Each step is one request (or a few, see live_batch) for every clip still
+    standing, and every step that depended on the one before it in the
+    one-clip-at-a-time code is still a request after it: the delete before the
+    create into that slot, the create before anything addresses the new clip,
+    `warping` before the length is read, `looping` before the markers, the
+    markers before the read-back. Two stems on one track write the same slots:
+    the second is a round of its own after the first, so it sees the slot as
+    the first left it.
     """
-    slot = "live_set tracks %d clip_slots %d" % (track_index, scene_index)
-    bridge.call(slot, "create_audio_clip", [path])
-    clip = slot + " clip"
+    out = [None] * len(jobs)
+    stop = [len(jobs)]                        # the first job that ended the run
 
-    # Warping switches every marker on this clip from seconds to beats. Read the
-    # length only after it, or the clamp below compares beats against seconds.
-    bridge.set(clip, "warping", True)
-    full = float(bridge.get(clip, "end_marker"))
+    def slot(j):
+        return "live_set tracks %d clip_slots %d" % (jobs[j]["track"], jobs[j]["scene"])
 
-    start = max(0.0, min(float(start), full))
-    end = max(start, min(float(end), full))
+    def live(ks):
+        return [k for k in ks if out[k] is None and k < stop[0]]
 
-    # LOOP FIRST, THEN THE MARKERS. `start_marker` is SILENTLY IGNORED while the
-    # clip is not looping: the write answers ok and the property reads back 0.0.
-    # This shipped the wrong way round — start_marker first, looping last — and
-    # every one of 90 clips came back at the sample's full 641.515 beats
-    # (160.38 bars) instead of its section length, while the run reported the
-    # lengths it had ASKED for. Nothing failed; the trims simply never landed.
-    bridge.set(clip, "looping", True)
-    bridge.set(clip, "loop_start", start)
-    bridge.set(clip, "loop_end", end)
-    bridge.set(clip, "start_marker", start)
-    bridge.set(clip, "end_marker", end)
-    bridge.set(clip, "name", name)
-    if color is not None:
-        bridge.set(clip, "color", int(color))
+    def run(ks, make):
+        """One op per job, all sent; a failure ends that job."""
+        ks = live(ks)
+        for k, (_res, err) in zip(ks, bridge.ops([make(k) for k in ks])):
+            if err is not None:
+                out[k] = err
+        return live(ks)
 
-    # Read the trim back. The failure this guards is silent by construction, so
-    # believing the write is exactly how it got shipped the first time.
-    got = float(bridge.get(clip, "start_marker"))
-    if abs(got - start) > 1e-3:
-        raise RuntimeError(
-            "trim did not take on track %d scene %d: asked start_marker %.4f, "
-            "reads %.4f — the clip is untrimmed and will play the whole stem"
-            % (track_index, scene_index, start, got))
-    return full
+    def end_run(k, exc):
+        out[k] = exc
+        stop[0] = min(stop[0], k)
 
+    seen, rounds = {}, []
+    for k, job in enumerate(jobs):
+        n = seen[slot(k)] = seen.get(slot(k), -1) + 1
+        if n == len(rounds):
+            rounds.append([])
+        rounds[n].append(k)
 
-def clear_slot(bridge, track_index, scene_index):
-    """Delete an existing clip in the slot. True if there was one to delete.
+    bounds = {}
+    for ks in rounds:
+        # `create_audio_clip` refuses a slot that is already full, so without the
+        # clear a second run fails on every clip it succeeded at the first time —
+        # the failure mode of a tool you are meant to re-run while tuning the
+        # section detection. Gated behind --replace because deleting clips is the
+        # user's call.
+        if replace:
+            ks = live(ks)
+            full = []
+            for k, (has, err) in zip(ks, bridge.reads([{"path": slot(k), "property": "has_clip"}
+                                                      for k in ks])):
+                if err is not None:
+                    out[k] = err
+                elif has:
+                    full.append(k)
+            run(full, lambda k: {"op": "call", "path": slot(k), "function": "delete_clip",
+                                 "args": [], "confirm": True})
+        ks = run(ks, lambda k: {"op": "call", "path": slot(k), "function": "create_audio_clip",
+                                "args": [jobs[k]["path"]], "confirm": False})
 
-    `create_audio_clip` refuses a slot that is already full, so without this a
-    second run fails on every clip it succeeded at the first time — the failure
-    mode of a tool you are meant to re-run while tuning the section detection.
-    Gated behind --replace because deleting clips is the user's call.
-    """
-    slot = "live_set tracks %d clip_slots %d" % (track_index, scene_index)
-    if not bridge.get(slot, "has_clip"):
-        return False
-    bridge.call(slot, "delete_clip", confirm=True)
-    return True
+        # Warping switches every marker on this clip from seconds to beats. Read the
+        # length only after it, or the clamp below compares beats against seconds.
+        ks = run(ks, lambda k: {"op": "set", "path": slot(k) + " clip",
+                                "property": "warping", "value": True})
+        for k, (value, err) in zip(ks, bridge.reads([{"path": slot(k) + " clip",
+                                                      "property": "end_marker"} for k in ks])):
+            if err is not None:
+                out[k] = err
+                continue
+            try:
+                full = float(value)
+            except Exception as e:
+                end_run(k, e)
+                continue
+            start = max(0.0, min(float(jobs[k]["start"]), full))
+            bounds[k] = (full, start, max(start, min(float(jobs[k]["end"]), full)))
+
+        # LOOP FIRST, THEN THE MARKERS. `start_marker` is SILENTLY IGNORED while the
+        # clip is not looping: the write answers ok and the property reads back 0.0.
+        # This shipped the wrong way round — start_marker first, looping last — and
+        # every one of 90 clips came back at the sample's full 641.515 beats
+        # (160.38 bars) instead of its section length, while the run reported the
+        # lengths it had ASKED for. Nothing failed; the trims simply never landed.
+        ks = run(ks, lambda k: {"op": "set", "path": slot(k) + " clip",
+                                "property": "looping", "value": True})
+
+        def marks(k):
+            clip, (_full, start, end) = slot(k) + " clip", bounds[k]
+            sets = [("loop_start", start), ("loop_end", end), ("start_marker", start),
+                    ("end_marker", end), ("name", jobs[k]["name"])]
+            if jobs[k]["color"] is not None:
+                sets.append(("color", int(jobs[k]["color"])))
+            return live_batch.seq([{"op": "set", "path": clip, "property": p, "value": v}
+                                   for p, v in sets])
+        ks = run(ks, marks)
+
+        # Read the trim back. The failure this guards is silent by construction, so
+        # believing the write is exactly how it got shipped the first time.
+        for k, (value, err) in zip(ks, bridge.reads([{"path": slot(k) + " clip",
+                                                      "property": "start_marker"} for k in ks])):
+            if err is not None:
+                out[k] = err
+                continue
+            try:
+                got = float(value)
+            except Exception as e:
+                end_run(k, e)
+                continue
+            full, start, _end = bounds[k]
+            if abs(got - start) > 1e-3:
+                end_run(k, RuntimeError(
+                    "trim did not take on track %d scene %d: asked start_marker %.4f, "
+                    "reads %.4f — the clip is untrimmed and will play the whole stem"
+                    % (jobs[k]["track"], jobs[k]["scene"], start, got)))
+            else:
+                out[k] = full
+    return out
 
 
 def build_session_view(stems_dir, period=None, grid_t0=None,
@@ -461,25 +649,33 @@ def build_session_view(stems_dir, period=None, grid_t0=None,
 
     written = failed = 0
     try:
-        colors = {s: track_clip_color(bridge, mapping[s]) for s in ordered}
-        ensure_scenes(bridge, scenes, verbose=verbose)
+        # The scene count goes with the colours: both are reads, nothing is written before.
+        by_track, ((have, err),) = track_clip_colors(
+            bridge, [mapping[s] for s in ordered], {"path": "live_set", "property": "scenes"})
+        if err is not None:
+            raise err
+        colors = {s: by_track[mapping[s]] for s in ordered}
+        ensure_scenes(bridge, scenes, verbose=verbose, have=live_batch.vector_len(have))
+        jobs = [{"track": mapping[stem], "scene": sc["scene"], "path": paths[stem],
+                 "start": sc["clip_start"], "end": sc["clip_end"],
+                 "name": "%s %s" % (sc["name"], stem), "color": colors.get(stem)}
+                for sc in scenes for stem in ordered]
+        outcomes = iter(write_clips(bridge, jobs, replace=replace))
         for sc in scenes:
             done = []
             for stem in ordered:
                 ti = mapping[stem]
-                try:
-                    if replace:
-                        clear_slot(bridge, ti, sc["scene"])
-                    write_clip(bridge, ti, sc["scene"], paths[stem],
-                               sc["clip_start"], sc["clip_end"],
-                               "%s %s" % (sc["name"], stem), colors.get(stem))
-                    written += 1
-                    done.append(stem)
-                except LomError as e:
+                outcome = next(outcomes)
+                if isinstance(outcome, LomError):
                     failed += 1
                     if verbose:
                         print("  clip failed: scene %d track %d (%s): %s"
-                              % (sc["scene"], ti, stem, e))
+                              % (sc["scene"], ti, stem, outcome))
+                elif isinstance(outcome, BaseException):
+                    raise outcome
+                else:
+                    written += 1
+                    done.append(stem)
             # Per scene rather than per clip: 90 lines of output is as unreadable
             # as none, but a silent 90-call run looks hung.
             if verbose:

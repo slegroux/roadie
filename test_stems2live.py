@@ -22,6 +22,7 @@ import sys
 
 import pytest
 
+import fake_live
 import stems2live as S
 from sideman.client import Live, LiveError
 
@@ -61,6 +62,9 @@ class MockBridge(object):
     def handle(self, op, p):
         if op == "count":
             return {"count": len(self.tracks[int(p["path"].split()[2])])}
+        if op == "get" and p["property"] == "arrangement_clips":
+            return {"value": [{"__lom__": "Clip"}
+                              for _c in self.clips(int(p["path"].split()[2]))]}
         if op == "get":
             return {"value": self._resolve_clip(p["path"])[p["property"]]}
         if op == "set":
@@ -89,9 +93,11 @@ class MockBridge(object):
     def _request(self, op, params=None):
         # What the socket would have carried: tuples arrive as lists.
         params = json.loads(json.dumps(params or {}))
-        self.calls.append((op, params))
+        self.calls.extend(fake_live.leaves(op, params))
         try:
-            return self.handle(op, params)
+            # The batch ops the client sends, served the way the Remote Script
+            # serves them: each op inside a batch is one `handle` call.
+            return fake_live.with_batches(self.handle)(op, params)
         except Exception as e:                           # noqa: BLE001
             raise LiveError(type(e).__name__, str(e))
 
@@ -155,14 +161,14 @@ def test_find_placed_clip_survives_clips_in_any_order():
 # --------------------------------------------------------- against the bridge
 
 def test_arrangement_clips_reads_every_clip_with_its_times(bridge):
-    assert S.arrangement_clips(2) == [(0, STUB_START, STUB_END),
+    assert S.arrangement_clips([2])[2] == [(0, STUB_START, STUB_END),
                                       (1, NEW_START, NEW_END)]
 
 
 def test_trim_lands_on_the_new_clip_and_not_the_stub(bridge):
     """THE BUG, END TO END. The stub must come back untouched."""
-    ci = S.find_placed_clip(S.arrangement_clips(2), NEW_START)
-    ok, detail = S.trim_clip_start(2, ci, 0.237, PERIOD, [])
+    ci = S.find_placed_clip(S.arrangement_clips([2])[2], NEW_START)
+    ok, detail = S.trim_clip_starts([(2, ci)], 0.237, PERIOD, [])[0]
     assert ok, detail
 
     stub, new = bridge.clips(2)
@@ -174,15 +180,15 @@ def test_trim_lands_on_the_new_clip_and_not_the_stub(bridge):
 def test_trimming_index_zero_is_what_the_bug_did(bridge):
     """Pins the failure mode itself, so a regression cannot pass unnoticed:
     addressing index 0 trims the stub and the read-back check still passes."""
-    ok, _ = S.trim_clip_start(2, 0, 0.237, PERIOD, [])
+    ok, _ = S.trim_clip_starts([(2, 0)], 0.237, PERIOD, [])[0]
     assert ok, "the old code's check passed on the wrong clip — that is the bug"
     assert bridge.clips(2)[1]["start_marker"] == 0.0
 
 
 def test_trim_leaves_looping_off_and_sets_the_loop_first(bridge):
     """start_marker is silently ignored unless the loop is set up first."""
-    ci = S.find_placed_clip(S.arrangement_clips(2), NEW_START)
-    assert S.trim_clip_start(2, ci, 0.237, PERIOD, [])[0]
+    ci = S.find_placed_clip(S.arrangement_clips([2])[2], NEW_START)
+    assert S.trim_clip_starts([(2, ci)], 0.237, PERIOD, [])[0][0]
 
     order = [p["property"] for op, p in bridge.calls
              if op == "set" and "arrangement_clips" in p["path"]]
@@ -192,17 +198,18 @@ def test_trim_leaves_looping_off_and_sets_the_loop_first(bridge):
 
 def test_trim_uses_beats_on_a_warped_clip(bridge):
     bridge.clips(2)[1]["warping"] = True
-    ci = S.find_placed_clip(S.arrangement_clips(2), NEW_START)
-    ok, detail = S.trim_clip_start(2, ci, 0.237, PERIOD,
-                                   [[10.0, 4.8], [110.0, 52.8]])
+    ci = S.find_placed_clip(S.arrangement_clips([2])[2], NEW_START)
+    ok, detail = S.trim_clip_starts([(2, ci)], 0.237, PERIOD,
+                                    [[10.0, 4.8], [110.0, 52.8]])[0]
     assert ok, detail
     assert "beats" in detail
     assert bridge.clips(2)[1]["start_marker"] == pytest.approx(0.4938, abs=1e-4)
 
 
 def test_warp_map_is_written_to_the_resolved_clip(bridge):
-    ci = S.find_placed_clip(S.arrangement_clips(2), NEW_START)
-    state, _detail = S.apply_warp_map(2, ci, [[0.0, 0.0], [4.0, 2.0]])
+    ci = S.find_placed_clip(S.arrangement_clips([2])[2], NEW_START)
+    state, _detail = S.warp_outcome(
+        S.lom_ops([S.warp_map_op(2, ci, [[0.0, 0.0], [4.0, 2.0]])])[0])
     assert state == "ok"
     assert bridge.clips(2)[1]["warping"] is True
     assert bridge.clips(2)[0]["warping"] is False, "warped the leftover stub"
@@ -214,9 +221,9 @@ def test_a_fresh_track_still_resolves_to_its_only_clip(monkeypatch):
     try:
         S.lom("call", path="live_set tracks 2",
               function="create_audio_clip", args=["/tmp/x.flac", NEW_START])
-        ci = S.find_placed_clip(S.arrangement_clips(2), NEW_START)
+        ci = S.find_placed_clip(S.arrangement_clips([2])[2], NEW_START)
         assert ci == 0
-        assert S.trim_clip_start(2, ci, 0.237, PERIOD, [])[0]
+        assert S.trim_clip_starts([(2, ci)], 0.237, PERIOD, [])[0][0]
         assert b.clips(2)[0]["start_marker"] == pytest.approx(0.237)
     finally:
         b.close()
@@ -229,7 +236,7 @@ def test_placing_a_second_clip_later_leaves_the_first_addressable(monkeypatch):
     try:
         S.lom("call", path="live_set tracks 2",
               function="create_audio_clip", args=["/tmp/x.flac", NEW_START])
-        clips = S.arrangement_clips(2)
+        clips = S.arrangement_clips([2])[2]
         assert len(clips) == 2
         ci = S.find_placed_clip(clips, NEW_START)
         assert ci == 1
@@ -320,7 +327,7 @@ def test_energy_map_notes_move_to_the_trimmed_clip_start(monkeypatch):
     def fake_lom(op, **p):
         calls.append((op, p))
         return {"ok": True, "result": {"count": 0}}
-    monkeypatch.setattr(S, "lom", fake_lom)
+    monkeypatch.setattr(S, "lom", fake_live.lom_with_batches(fake_lom))
     notes = [{"pitch": 84, "start_time": 3.0, "duration": 32.0, "velocity": 90},
              {"pitch": 88, "start_time": 1.0, "duration": 4.0, "velocity": 90}]
     S.write_energy_map(notes, ["x"], [{"beat": 3}], 4.0, shift_beats=-3)
@@ -353,7 +360,7 @@ class _NamedSet:
 
 def test_energy_map_replaces_its_track_instead_of_stacking(monkeypatch):
     live = _NamedSet(["kick", "bass"])
-    monkeypatch.setattr(S, "lom", live)
+    monkeypatch.setattr(S, "lom", fake_live.lom_with_batches(live))
     notes = [{"pitch": 84, "start_time": 0.0, "duration": 32.0, "velocity": 90}]
     for _ in range(3):
         S.write_energy_map(notes, ["x"], [{"beat": 0}], 0.0)
@@ -362,7 +369,7 @@ def test_energy_map_replaces_its_track_instead_of_stacking(monkeypatch):
 
 def test_energy_map_finds_its_old_track_wherever_it_was_moved(monkeypatch):
     live = _NamedSet(["kick", "ENERGY MAP", "bass"])
-    monkeypatch.setattr(S, "lom", live)
+    monkeypatch.setattr(S, "lom", fake_live.lom_with_batches(live))
     S.write_energy_map([], ["x"], [{"beat": 0}], 0.0)
     assert live.names == ["ENERGY MAP", "kick", "bass"]
 
@@ -485,6 +492,8 @@ class _TypedSet:
     def __call__(self, op, **p):
         if op == "count" and p.get("child") == "tracks":
             return {"ok": True, "result": {"count": len(self.kinds)}}
+        if op == "get" and p.get("property") == "tracks":
+            return {"ok": True, "result": {"value": [{"__lom__": "Track"}] * len(self.kinds)}}
         if op == "get" and p.get("property") == "has_audio_input":
             i = int(p["path"].split()[-1])
             return {"ok": True, "result": {"value": self.kinds[i]}}
@@ -508,7 +517,7 @@ def test_midi_tracks_are_stepped_over_not_written_to(monkeypatch, capsys):
     # 0,1 MIDI (below first_track) | 2 MIDI | 3,4 audio | 5,6,7 MIDI | 8.. audio
     st = _TypedSet([False, False, False, True, True, False, False, False,
                     True, True, True, True])
-    monkeypatch.setattr(s2l, "lom", st)
+    monkeypatch.setattr(s2l, "lom", fake_live.lom_with_batches(st))
 
     targets = s2l.audio_track_targets(first_track=2, count=6)
 
@@ -522,7 +531,7 @@ def test_enough_audio_tracks_are_created_when_the_set_is_short(monkeypatch, caps
     """A sufficient TOTAL is not a sufficient number of AUDIO tracks."""
     import stems2live as s2l
     st = _TypedSet([False] * 10)          # ten tracks, none of them audio
-    monkeypatch.setattr(s2l, "lom", st)
+    monkeypatch.setattr(s2l, "lom", fake_live.lom_with_batches(st))
 
     targets = s2l.audio_track_targets(first_track=2, count=3)
 
@@ -540,7 +549,7 @@ def test_a_track_that_cannot_take_the_clip_is_never_renamed(monkeypatch):
     """
     import stems2live as s2l
     st = _TypedSet([True, True, True])
-    monkeypatch.setattr(s2l, "lom", st)
+    monkeypatch.setattr(s2l, "lom", fake_live.lom_with_batches(st))
 
     clip = {"ok": False, "error": {"message": "Audio clips can only be created "
                                               "on audio tracks"}}

@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from session_view import (Bridge, LomError, MIN_SECTION_BARS, build_session_view,
                           clip_offset_beats,
                           map_stems_to_tracks, plan_session, section_clip_beats,
-                          write_clip)
+                          write_clips)
 
 PERIOD = 0.479989      # 125.003 BPM, from the reference track
 GRID_T0 = 0.237
@@ -373,16 +373,15 @@ def test_a_refusal_raises_rather_than_returning_none(monkeypatch):
 # --------------------------------------------------------------------------
 
 class _NamedBridge:
-    """Stands in for a Set whose tracks carry these names, in this order."""
+    """Stands in for a Set whose tracks carry these names, in this order: the
+    track list as Live's `get` lists it, each track with its name."""
 
     def __init__(self, names):
         self.names = names
 
-    def count(self, _path, _child):
-        return len(self.names)
-
-    def get(self, path, _prop):
-        return self.names[int(path.split()[-1])]
+    def reads(self, specs):
+        assert specs == [{"path": "live_set", "property": "tracks"}]
+        return [([{"__lom__": "Track", "name": n} for n in self.names], None)]
 
 
 def test_stems_map_onto_the_tracks_named_after_them():
@@ -417,57 +416,56 @@ def test_an_exact_match_beats_a_case_insensitive_one():
 # clip write ordering
 # --------------------------------------------------------------------------
 
-class _RecordingBridge:
-    """Records the order properties are set in, and MODELS LIVE'S REAL QUIRK:
-    `start_marker` is silently ignored while the clip is not looping.
+def _one_clip(tmp_path, monkeypatch, model):
+    """write_clips for one session clip in slot 0 of track 2, against `model`."""
+    import soundfile
+    import numpy as np
+    path = str(tmp_path / "x.wav")
+    soundfile.write(path, np.zeros(64000, dtype="float32"), 1000)    # 64 s: 128 beats
+    model.install(monkeypatch)
+    b = Bridge()
+    return write_clips(b, [{"track": 2, "scene": 0, "path": path, "start": 64.4938,
+                            "end": 128.4938, "name": "Drop 1", "color": None}])
 
-    A mock that just accepts every write cannot catch the bug this guards. The
-    shipped order set start_marker first and looping last, so on real hardware
-    all 90 clips came back at the sample's full length while the run reported
-    the lengths it had asked for — nothing raised, the trims never landed.
+
+def test_the_loop_is_set_before_the_markers(tmp_path, monkeypatch):
+    """REGRESSION: start_marker is a no-op until the clip is looping.
+
+    The model (fake_live) has Live's real quirk: `start_marker` is accepted and
+    discarded while the clip is not looping. A mock that just accepted every
+    write could not catch the bug this guards: the shipped order set
+    start_marker first and looping last, so on real hardware all 90 clips came
+    back at the sample's full length while the run reported the lengths it had
+    asked for — nothing raised, the trims never landed.
     """
-
-    def __init__(self, full=641.5147):
-        self.order = []
-        self.props = {"end_marker": full, "start_marker": 0.0, "looping": False}
-
-    def call(self, _path, _fn, _args=None):
-        return None
-
-    def set(self, _path, prop, value):
-        self.order.append(prop)
-        # The quirk: this write is accepted and discarded unless looping is on.
-        if prop == "start_marker" and not self.props.get("looping"):
-            return None
-        self.props[prop] = value
-        return None
-
-    def get(self, _path, prop):
-        return self.props[prop]
-
-
-def test_the_loop_is_set_before_the_markers():
-    """REGRESSION: start_marker is a no-op until the clip is looping."""
-    b = _RecordingBridge()
-    write_clip(b, 2, 0, "/tmp/x.flac", 64.4938, 128.4938, "Drop 1")
-
-    assert b.order.index("looping") < b.order.index("start_marker"), \
+    from fake_live import FakeLive
+    model = FakeLive()
+    (outcome,) = _one_clip(tmp_path, monkeypatch, model)
+    order = [p["property"] for r in model.requests for op, p in r["leaves"]
+             if op == "set" and p.get("path", "").endswith(" clip")]
+    assert order.index("looping") < order.index("start_marker"), \
         "looping must be enabled before start_marker, or the trim is discarded"
-    assert b.props["start_marker"] == pytest.approx(64.4938, abs=1e-4)
+    clip = model.snapshot()["tracks"][2]["slots"][0]
+    assert clip["markers"][2] == pytest.approx(64.4938, abs=1e-4)
+    assert outcome == pytest.approx(128.0)
+    assert model.hazards == []
 
 
-def test_a_discarded_trim_raises_instead_of_reporting_success():
+def test_a_discarded_trim_raises_instead_of_reporting_success(tmp_path, monkeypatch):
     """The failure is silent at the API, so the code must read it back.
 
-    Modelled by a bridge that never lets the trim stick; write_clip must notice
-    rather than return a length it only asked for.
+    Modelled by a Set that never lets the trim stick; write_clips must hand
+    back the error that ends the run rather than a length it only asked for.
     """
-    class _NeverSticks(_RecordingBridge):
-        def set(self, _path, prop, value):
-            self.order.append(prop)
-            if prop != "start_marker":
-                self.props[prop] = value
-            return None
+    from fake_live import FakeLive
+    model = FakeLive()
+    orig = model.dispatch
 
-    with pytest.raises(RuntimeError, match="trim did not take"):
-        write_clip(_NeverSticks(), 2, 0, "/tmp/x.flac", 64.4938, 128.4938, "Drop 1")
+    def dispatch(op, params):
+        if op == "set" and params.get("property") == "start_marker":
+            return {"path": params["path"], "property": "start_marker", "value": 0.0}
+        return orig(op, params)
+    model.dispatch = dispatch
+    (outcome,) = _one_clip(tmp_path, monkeypatch, model)
+    assert isinstance(outcome, RuntimeError) and not isinstance(outcome, LomError)
+    assert "trim did not take" in str(outcome)
