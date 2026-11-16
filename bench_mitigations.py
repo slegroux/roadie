@@ -4,7 +4,10 @@ better, scored by benchmark.py --truth on the folder it writes.
 
     bench_mitigations.py residual MANIFEST STEMS [--drums full|subs]   (b) mix minus the stems: level, what it holds
     bench_mitigations.py wiener   MANIFEST STEMS OUT                    (c) soft-mask re-mask of the stems over the mix
+    bench_mitigations.py oracle   MANIFEST OUT                          (c) the same mask built from the TRUE stems: its ceiling
     bench_mitigations.py gate     MANIFEST STEMS OUT                    (d) silence the hits mark_bleed marks as bleed
+    bench_mitigations.py gate     MANIFEST STEMS OUT --oracle           (d) silence every hit with no true onset of the stem's own sources: the most gating can do
+    bench_mitigations.py bars     MANIFEST STEMS_A STEMS_B              (e) the share of active bars where B's SI-SDR beats A's, per stem
     bench_mitigations.py assemble MANIFEST NAME                         (e) name another model's outputs as stems
     bench_mitigations.py compare  SCORES.json [SCORES.json ...]         SI-SDR per stem, side by side
 
@@ -17,21 +20,26 @@ under the manifest's out_dir; the mix and the truth are read only.
 first, non-iterative step of a Wiener filter with the stems themselves as the variance estimates.
 (d) zeroes, in each drum stem, the cut of every hit that belongs to a group mark_bleed marked, with 2 ms fades;
 --coincidence-only also zeroes the groups that pass its coincidence test alone (a counterfactual, not the module's rule).
+--oracle zeroes instead every hit that has no true onset of its stem's own sources (the manifest's drum sources with that role)
+within the roles' tolerance (25 ms): what gating could at most do, were it right about every hit. It never touches a stem with no
+own source (the ride).
+`oracle` is `wiener` with the true role stems (truth/, `returns` included so the masks sum to the mix) as the variance estimates:
+what the mask gives when it is told the right answer, which is the ceiling of any soft-mask re-mask over the mix's phase.
 """
 import argparse
 import json
 import os
 import shutil
-import sys
 
 BLOCK = 1 << 19
-LEAVES = ("drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash", "bass", "synths", "vocals")
+LEAVES = ("drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash", "bass", "synths", "vocals", "returns")
 DRUM_SUBS = LEAVES[:6]
 NFFT = 4096
 HOP = NFFT // 4
 SEGMENT = 1 << 20          # samples per re-mask segment
 POWER = 2.0
 FADE_S = 0.002
+TOL_S = 0.025            # a hit has a true onset when one of its stem's own sources has one this near (bench_roles.TOL_S)
 
 # (e): how another model's output files become benchmark.py stems. {source file glob (inside the folder): stem}.
 # A stem built from several files is their sum (as yt2stems.sh sums other+piano+guitar into synths).
@@ -65,17 +73,25 @@ def audio(folder, name):
 
 
 def write_sum(paths, out, sr_expected=None, subtype="PCM_24"):
-    """Sum of files (as float64), written to out, one block at a time; the shortest file sets the length."""
+    """Sum of files (as float64), written to out, one block at a time; the shortest file sets the length. FLAC cannot hold
+    a sample at or over full scale, so a sum that reaches 1.0 raises ValueError (out is removed): nothing is clipped."""
+    import numpy as np
     import soundfile as sf
     files = [sf.SoundFile(p) for p in paths]
     try:
         sr, ch, total = files[0].samplerate, files[0].channels, min(f.frames for f in files)
+        peak = 0.0
         with sf.SoundFile(out, "w", samplerate=sr, channels=ch, subtype=subtype, format="FLAC") as w:
             done = 0
             while done < total:
                 n = min(BLOCK, total - done)
-                w.write(sum(f.read(n, dtype="float64", always_2d=True) for f in files))
+                block = sum(f.read(n, dtype="float64", always_2d=True) for f in files)
+                peak = max(peak, float(np.abs(block).max()))
+                w.write(block)
                 done += n
+        if peak >= 1.0:
+            os.remove(out)
+            raise ValueError("the sum of %d files peaks at %.3f (full scale 1.0): writing it as %s would clip" % (len(paths), peak, subtype))
         return sr, total
     finally:
         for f in files:
@@ -168,27 +184,57 @@ def wiener(mix_path, stem_paths, out_dir, power=POWER):
             w.close()
 
 
-def gate_stem(x, sr, result, groups, fade_s=FADE_S):
-    """x [samples, ch] of a drum stem with the cut of every hit of `groups` (ids; measured and assigned hits) silenced:
-    from 2 ms before its onset to its cut's end, with `fade_s` fades at both edges. `result` is the stem's hit_groups
-    result (its hits carry the stem's sample positions). Returns (gated copy, number of hits gated)."""
+def gate_hits(x, sr, hits, fade_s=FADE_S):
+    """x [samples, ch] of a drum stem with the cut of every hit in `hits` (hit dicts with "start" and "end", samples of the
+    stem) silenced: from `fade_s` before its onset to its cut's end, with fades of `fade_s` at both edges. Returns (gated
+    copy, number of hits gated)."""
     import numpy as np
     y = np.array(x, dtype=np.float64)
     gain = np.ones(len(y))
     f = max(1, int(round(fade_s * sr)))
     n = 0
-    ids = set(groups)
-    for h in result["hits"]:
-        if h["group"] in ids and h["status"] in ("grouped", "assigned"):
-            a, b = max(0, h["start"] - f), min(len(y), h["end"] + f)
-            if b - a <= 2 * f:
-                continue
-            g = np.zeros(b - a)
-            g[:f] = np.linspace(1.0, 0.0, f, endpoint=False)         # 1 -> 0 over f samples, silent, 0 -> 1 over f
-            g[-f:] = np.linspace(0.0, 1.0, f, endpoint=False)
-            gain[a:b] = np.minimum(gain[a:b], g)
-            n += 1
+    for h in hits:
+        a, b = max(0, h["start"] - f), min(len(y), h["end"] + f)
+        if b - a <= 2 * f:
+            continue
+        g = np.zeros(b - a)
+        g[:f] = np.linspace(1.0, 0.0, f, endpoint=False)         # 1 -> 0 over f samples, silent, 0 -> 1 over f
+        g[-f:] = np.linspace(0.0, 1.0, f, endpoint=False)
+        gain[a:b] = np.minimum(gain[a:b], g)
+        n += 1
     return y * gain[:, None], n
+
+
+def gate_stem(x, sr, result, groups, fade_s=FADE_S):
+    """gate_hits on the measured and assigned hits of `groups` (ids) of a stem's hit_groups `result` (its hits carry the
+    stem's sample positions)."""
+    ids = set(groups)
+    return gate_hits(x, sr, [h for h in result["hits"] if h["group"] in ids and h["status"] in ("grouped", "assigned")], fade_s)
+
+
+def hits_without_true_onset(result, onsets, tol=TOL_S):
+    """The hits of a stem's hit_groups `result`, whatever their status, with no true onset (seconds, `onsets`) within `tol`:
+    the ones a gate that knew the truth would silence."""
+    import numpy as np
+    ons = np.asarray(sorted(onsets), dtype=float)
+    if not len(ons):
+        return list(result["hits"])
+    out = []
+    for h in result["hits"]:
+        i = np.searchsorted(ons, h["onset_s"])
+        near = min(abs(h["onset_s"] - ons[max(i - 1, 0)]), abs(h["onset_s"] - ons[min(i, len(ons) - 1)]))
+        if near > tol:
+            out.append(h)
+    return out
+
+
+def coincidence_groups(result, bleed, minimum=4, rate=0.7, p=0.01):
+    """The ids of a stem's groups of at least `minimum` hits that coincide with another stem's group at `rate` or more, at
+    a chance of `p` or less: the coincidence test of mark_bleed alone, its level and likeness conditions left out. `bleed`
+    is the stem's mark_bleed entry ({group id: {"evidence": ... or None}})."""
+    return {g["id"] for g in result["groups"]
+            if g["count"] >= minimum and bleed[g["id"]]["evidence"]
+            and bleed[g["id"]]["evidence"]["rate"] >= rate and bleed[g["id"]]["evidence"]["p"] <= p}
 
 
 # ---------------------------------------------------------------- commands
@@ -227,6 +273,11 @@ def cmd_residual(a):
     with open(out[:-5] + ".json", "w") as fh:
         json.dump(res, fh, indent=1)
     print("wrote %s" % out)
+    if a.add_back:       # the residual added back to one stem, to score it: benchmark.py --truth MANIFEST --stems <this folder>
+        back = os.path.join(out_dir, "plus_%s_%s" % (a.add_back, a.drums))
+        os.makedirs(back, exist_ok=True)
+        write_sum([paths[a.add_back], out], os.path.join(back, a.add_back + ".flac"))
+        print("wrote %s: %s + the residual (score it with benchmark.py --truth %s --stems %s)" % (back, a.add_back, a.manifest, back))
 
 
 def cmd_wiener(a):
@@ -244,25 +295,75 @@ def cmd_wiener(a):
     print("wrote %s (%d frames, peak %.2f dBFS)" % (out, r["frames"], r["peak_dbfs"]))
 
 
+def cmd_oracle(a):
+    """The soft-mask re-mask with the true role stems as the variance estimates (what the mask gives when told the answer)."""
+    m = load_manifest(a.manifest)
+    a.stems = os.path.join(m["out_dir"], "truth")
+    cmd_wiener(a)
+
+
+def cmd_bars(a):
+    """Per stem and reading, the share of its active bars (the true role's, benchmark.active_bars) where stem set B has the
+    higher SI-SDR than stem set A, and the median difference (dB) over them."""
+    import numpy as np
+    import soundfile as sf
+    import benchmark as B
+    m = load_manifest(a.manifest)
+    sr = sf.info(os.path.join(m["out_dir"], "mix.wav")).samplerate
+    edges = B.bar_edges(m["bars"], m["beats_per_bar"] * 60.0 / m["bpm"], sr, m.get("bar1_s", 0.0))
+    true_paths = B.true_role_paths(m, m["out_dir"])
+    source_paths = {s["drum_source"]: B.find_audio(os.path.join(m["out_dir"], "truth_sources"), s["drum_source"])
+                    for s in m["sources"] if s.get("drum_source")}
+    print("%-18s %8s %8s %8s %8s" % ("stem", "active", "B > A", "share", "median B-A"))
+    out = {}
+    for label, stems, names in B.scored_readings(m, true_paths):
+        est = [[B.find_audio(d, s) for s in stems] for d in (a.a, a.b)]
+        refs = [B.resolve_truth(n, true_paths, source_paths) for n in names]
+        if not names or not all(refs) or not all(all(e) for e in est):
+            continue
+        st = [B.bar_stats(e, refs, edges) for e in est]
+        sdr = [B.si_sdr_from_stats(v["ss"], v["se"], v["ee"]) for v in st]
+        act = B.active_bars(B.energy_db(st[0]["ms_ref"]))
+        d = (sdr[1] - sdr[0])[act]
+        d = d[np.isfinite(d)]
+        if not len(d):
+            continue
+        out[label] = {"active": int(len(d)), "b_better": int((d > 0).sum()), "share": float((d > 0).mean()), "median_db": float(np.median(d))}
+        print("%-18s %8d %8d %7.0f%% %+8.1f" % (label[:18], len(d), (d > 0).sum(), 100 * (d > 0).mean(), np.median(d)))
+    if a.json:
+        with open(a.json, "w") as fh:
+            json.dump(out, fh, indent=1)
+
+
 def cmd_gate(a):
     import soundfile as sf
     import bench_roles
-    from roadie_analysis.drumroles import load
     m = load_manifest(a.manifest)
     cache = os.path.join(m["out_dir"], "roles")
     paths = {k: audio(a.stems, k) for k in DRUM_SUBS}
     paths = {k: v for k, v in paths.items() if v}
     results, named, bleed = bench_roles.run_set(a.set, paths, m["bpm"], m.get("bar1_s", 0.0), cache, 1, False)
+    own = {}                  # --oracle: the true onsets of each stem's own sources
+    if a.oracle:
+        src = bench_roles.sources_stage(m, m["out_dir"], cache)
+        for k in paths:
+            own[k] = sorted(t for v in src["info"].values() if v["role"] == k for t in v["onsets"])
     out = os.path.expanduser(a.out)
     os.makedirs(out, exist_ok=True)
     report = {}
     for stem, p in paths.items():
         marked = sorted(g for g, b in bleed.get(stem, {}).items() if b["bleed"])
         if a.coincidence_only:       # not the module's rule: every group of 4+ hits that coincides 70 %+, at p <= 1 %, with another stem's group
-            marked = sorted(set(marked) | {g["id"] for g in results[stem]["groups"] if g["count"] >= 4 and bleed[stem][g["id"]]["evidence"]
-                                           and bleed[stem][g["id"]]["evidence"]["rate"] >= 0.7 and bleed[stem][g["id"]]["evidence"]["p"] <= 0.01})
+            marked = sorted(set(marked) | coincidence_groups(results[stem], bleed[stem]))
         x, sr = sf.read(p, dtype="float64", always_2d=True)
-        # hit_groups ran on the stem as load() read it, DC removed; gate the stem as read, so its sample positions agree
+        # hit_groups removes the stem's DC before it looks at it, which moves no sample: its hit positions are the file's
+        if a.oracle:
+            gated = hits_without_true_onset(results[stem], own[stem]) if own[stem] else []
+            y, n = gate_hits(x, sr, gated) if gated else (x, 0)
+            report[stem] = {"own_onsets": len(own[stem]), "hits_gated": n, "hits": len(results[stem]["hits"])}
+            print("  %-12s %5d true onsets of its own sources, %d hits gated of %d" % (stem, len(own[stem]), n, len(results[stem]["hits"])))
+            sf.write(os.path.join(out, stem + ".flac"), y, sr, subtype="PCM_24", format="FLAC")
+            continue
         y, n = gate_stem(x, sr, results[stem], marked) if marked else (x, 0)
         sf.write(os.path.join(out, stem + ".flac"), y, sr, subtype="PCM_24", format="FLAC")
         near = []        # unmarked groups that coincide with another stem's group at 70 % or more: which condition they failed
@@ -321,17 +422,28 @@ def main():
     p = sub.add_parser("residual")
     p.add_argument("manifest"), p.add_argument("stems")
     p.add_argument("--drums", choices=("full", "subs"), default="full")
+    p.add_argument("--add-back", metavar="STEM", help="also write plus_STEM_DRUMS/STEM.flac: that stem with the residual added back")
     p.set_defaults(fn=cmd_residual)
     p = sub.add_parser("wiener")
     p.add_argument("manifest"), p.add_argument("stems"), p.add_argument("out")
     p.add_argument("--power", type=float, default=POWER, help="the mask's exponent: 2 is the power (Wiener) mask, 1 the magnitude mask")
     p.set_defaults(fn=cmd_wiener)
+    p = sub.add_parser("oracle")
+    p.add_argument("manifest"), p.add_argument("out")
+    p.add_argument("--power", type=float, default=POWER, help="the mask's exponent: 2 is the power (Wiener) mask, 1 the magnitude mask")
+    p.set_defaults(fn=cmd_oracle)
+    p = sub.add_parser("bars")
+    p.add_argument("manifest"), p.add_argument("a"), p.add_argument("b")
+    p.add_argument("--json")
+    p.set_defaults(fn=cmd_bars)
     p = sub.add_parser("gate")
     p.add_argument("manifest"), p.add_argument("stems"), p.add_argument("out")
     p.add_argument("--set", default="separated", help="the bench_roles cache name of this stems folder (default separated)")
     p.add_argument("--coincidence-only", action="store_true",
                    help="not mark_bleed's rule: also gate every group of 4+ hits that coincides 70 %%+ (p <= 1 %%) with another stem's group, "
                         "level and likeness unchecked; a counterfactual for what mark_bleed's two other conditions are worth")
+    p.add_argument("--oracle", action="store_true",
+                   help="silence every hit with no true onset of its stem's own sources within 25 ms (the most gating can do) instead of mark_bleed's groups")
     p.set_defaults(fn=cmd_gate)
     p = sub.add_parser("assemble")
     p.add_argument("manifest"), p.add_argument("name", choices=sorted(ASSEMBLE))
