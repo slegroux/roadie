@@ -30,9 +30,9 @@ A request can also be answered with Live's Timeout reply or a closed connection 
 WHAT IT DOES NOT MODEL, and so cannot vouch for:
   - time: the 15 s main-thread limit is only an error the test injects (`cuts`), never a
     consequence of how much a request carries; no op has a cost;
-  - Live changing a clip's `warping` on its own after the create (auto-warp landing later):
-    `warping` is set at creation here, and only the scripts change it (stems2live re-reads it
-    with the trim read-back to catch this on Live);
+  - Live changing a clip's `warping` on its own after the create (auto-warp landing later,
+    measured on Live 2026-11-15, markers not converted): only the scripts change it here,
+    unless a test patches `dispatch` to flip it (test_batch_live's `_auto_warp`);
   - order inside one task between writes to DIFFERENT properties of one clip (loop_start, then
     loop_end, then start_marker, ...): setters apply at once and never constrain each other,
     except that start_marker is ignored while the clip is not looping (the scripts check every

@@ -198,9 +198,9 @@ def test_measured_run_same_set_far_fewer_requests(tmp_path, analysis, monkeypatc
     assert counts(old) == {"set": 244, "get": 124, "call": 38, "count": 31, "ping": 1,
                            "warp_markers_set": 1}
     assert len(old.requests) == 439
-    assert counts(new) == {"ping": 1, "warp_markers_set": 1, "get_batch": 12,
+    assert counts(new) == {"ping": 1, "warp_markers_set": 1, "get_batch": 13,
                            "transaction": 22, "set": 1}
-    assert len(new.requests) == 37            # 7 of them the first session clip, on its own
+    assert len(new.requests) == 38            # 7 the first session clip alone, 1 the late auto-warp check
     # The same operations reached Live; only how they were grouped changed. The new code reads
     # a few more (whole lists at once instead of stopping early) and nests its per-item steps.
     lo, ln = leaf_counts(old), leaf_counts(new)
@@ -380,6 +380,53 @@ def test_warping_that_changes_twice_fails_the_trim(tmp_path, analysis, monkeypat
     assert ("[trim failed: warping changed again, to False, after the trim was redone in "
             "beats]") in out
     assert out.count("trim 1.2000 s") == 1
+
+
+def test_a_read_back_that_cannot_read_warping_fails_the_trim(tmp_path, analysis, monkeypatch,
+                                                             capsys):
+    """Without the second `warping` the trim's unit is unknown, so it is not reported ok."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
+    model = fake_live.FakeLive()
+    path = "live_set tracks 3 arrangement_clips 0"
+    _auto_warp(model, path)
+    seen = [0]
+
+    def fault(op, p):
+        if op == "get" and p.get("path") == path and p.get("property") == "warping":
+            seen[0] += 1
+            if seen[0] == 2:
+                return RuntimeError("injected: no warping")
+        return None
+    model.faults.append(fault)
+    out, _ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert "[trim failed: cannot tell the trim's unit: get %s.warping: injected: no warping]" \
+        % path in out
+    assert out.count("trim 1.2000 s") == 1
+
+
+def test_auto_warp_after_the_read_back_is_warned_at_the_end(tmp_path, analysis, monkeypatch,
+                                                           capsys):
+    """Auto-warp on a long stem can land after the trim's read-back: one read at the end of
+    the run lists the clips whose trim is now in the wrong unit."""
+    stems = make_stems(str(tmp_path / "song_stems"), ["bass", "drums_kick"])
+    model = fake_live.FakeLive()
+    path = "live_set tracks 3 arrangement_clips 0"
+    orig, reads = model.dispatch, [0]
+
+    def dispatch(op, params):
+        res = orig(op, params)
+        if op == "get_batch" and any(s.get("path") == path and s.get("property") == "warping"
+                                     for s in params.get("specs", [])):
+            reads[0] += 1
+            if reads[0] == 2:                       # just after the trim's read-back
+                model.resolve(path)._v["warping"] = True
+        return res
+    model.dispatch = dispatch
+    out, _ = load("new", model, stems, ["--start-bar", "1"], monkeypatch, capsys)
+    assert out.count("trim 1.2000 s") == 2
+    assert "WARNING: Live auto-warped 1 clip(s) after their trim was checked:" in out
+    assert ("track 3   warping turned on after the trim — its start marker is in seconds; "
+            "re-run the load") in out
 
 
 def test_rows_found_before_the_run_ends_still_print(tmp_path, analysis, monkeypatch, capsys):

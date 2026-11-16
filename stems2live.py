@@ -189,7 +189,7 @@ def _write_batch(ops, stop_on_error):
     on, so these changes may still land, and none of them can be reported as not made."""
     try:
         r = lom("transaction", ops=ops, stop_on_error=stop_on_error, rollback_on_error=False)
-    except (RuntimeError, TimeoutError) as e:
+    except (RuntimeError, TimeoutError, ConnectionResetError, BrokenPipeError) as e:
         raise live_batch.StillRunning(str(e))
     if not r.get("ok") and r["error"].get("type") == "Timeout":
         raise live_batch.StillRunning(lom_err(r))
@@ -707,7 +707,7 @@ def sample_time_to_beats(sec, warp_map, period):
     return lo[0] + (sec - lo[1]) * (hi[0] - lo[0]) / span
 
 
-def trim_clip_starts(clips, trim_sec, period, warp_map):
+def trim_clip_starts(clips, trim_sec, period, warp_map, units=None):
     """Drop `trim_sec` of lead-in off the front of each (track, clip index). One
     (ok, detail) per clip, in order.
 
@@ -727,6 +727,9 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
     applied `looping` before any marker is written, the markers before
     `looping` goes off, and all of it before the read-back. A clip stops at its
     first failed step and is left out of the steps after it.
+
+    `units`, if given, gets {(track, clip): warping} for every clip trimmed, for
+    check_trim_units at the end of the run.
     """
     paths = ["live_set tracks %d arrangement_clips %d" % c for c in clips]
     out = [None] * len(paths)
@@ -785,7 +788,12 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
                 continue
             got = float(r["result"]["value"])
             v, unit, warping = value[k]
-            if w.get("ok") and bool(w["result"]["value"]) != warping:
+            if not w.get("ok"):
+                # Without it the trim's unit is unknown: a clip Live warped since the first
+                # read would pass the marker check below in the wrong unit.
+                out[k] = (False, "cannot tell the trim's unit: get %s.warping: %s"
+                          % (paths[k], lom_err(w)))
+            elif bool(w["result"]["value"]) != warping:
                 if attempt == 1:
                     in_unit(k, not warping)
                     unwritten.pop(k, None)
@@ -801,9 +809,29 @@ def trim_clip_starts(clips, trim_sec, period, warp_map):
                 out[k] = (False, unwritten[k])
             else:
                 out[k] = (True, "trim %.4f %s" % (v, unit))
+                if units is not None:
+                    units[clips[k]] = warping
         if not pending:
             break
     return out
+
+
+def check_trim_units(units):
+    """Auto-warp can land after the trim's read-back too, on a long stem. Re-read `warping`
+    on every trimmed clip, once, at the end of the run (one request), and list the clips
+    whose trim now sits in the wrong unit. Returns the warning lines; [] when none."""
+    if not units:
+        return []
+    clips = sorted(units)
+    lines = []
+    for (ti, ci), r in zip(clips, lom_reads([{"path": "live_set tracks %d arrangement_clips %d"
+                                               % c, "property": "warping"} for c in clips])):
+        if r.get("ok") and bool(r["result"]["value"]) != units[(ti, ci)]:
+            lines.append("  track %-3d warping turned %s after the trim — its start marker is "
+                         "in %s; re-run the load"
+                         % (ti, "on" if not units[(ti, ci)] else "off",
+                            "beats" if units[(ti, ci)] else "seconds"))
+    return lines
 
 
 def _took(asked, got):
@@ -1264,6 +1292,7 @@ def main():
     warp_map = grid_info.get("warp_map") or []
     warp_state = None if warp_ok else "unsupported"
     stale = []           # tracks left carrying clips from an earlier run
+    trim_units = {}      # (track, clip) -> warping the trim was written under
 
     print("%3s  %-14s %9s   colour" % ("trk", "stem", "centroid"))
     # THE TABLE IS BUILT IN STEPS, EACH ONE REQUEST (OR A FEW) FOR EVERY TRACK,
@@ -1388,13 +1417,15 @@ def main():
                     row["warp_note"] = "  [warp failed: %s]" % detail
 
         # AFTER the warp map, never before: the trim's unit is seconds on an
-        # unwarped clip and beats on a warped one, so `warping` has to have
-        # settled before trim_clip_starts reads it, a request later.
+        # unwarped clip and beats on a warped one, so the warp op's `warping` has to
+        # be in place before trim_clip_starts reads it. Live's own auto-warp is not:
+        # it can land later (trim_clip_starts redoes the trim; check_trim_units
+        # looks once more at the end of the run).
         for row in found:
             row["trim_note"] = ""
         if TRIM > 0:
             trims = trim_clip_starts([(row["ti"], row["ci"]) for row in found],
-                                     TRIM, period, warp_map)
+                                     TRIM, period, warp_map, trim_units)
             for row, (ok, detail) in zip(found, trims):
                 row["trim_note"] = "  " + detail if ok else "  [trim failed: %s]" % detail
         for row in found:
@@ -1576,6 +1607,11 @@ def main():
             # missing extra, not a reason to look like the whole run failed.
             print("session view failed (%s: %s) — the arrangement is unaffected"
                   % (type(e).__name__, e))
+
+    late = check_trim_units(trim_units)
+    if late:
+        print("\nWARNING: Live auto-warped %d clip(s) after their trim was checked:" % len(late))
+        print("\n".join(late))
 
     # After the table, so it is the last thing on screen rather than buried in
     # it. The clips are placed and usable — only the drift correction is missing.

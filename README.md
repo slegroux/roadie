@@ -326,8 +326,9 @@ add is reachable without patching:
 **Few requests, few undo steps.** A request to Live costs about 400 ms whatever it
 carries (it waits on Live's main thread), so `roadie load` and `roadie scenes` send
 reads that do not depend on each other in one `get_batch` and writes in one
-`transaction`. A ten-stem load with `--session` into a fresh Set is 37 requests
-instead of 439, and each transaction is one Cmd-Z on Live 12.4+ (about 23 to undo
+`transaction`. A ten-stem load with `--session` into a fresh Set is 38 requests
+instead of 439 (measured on 10 stems of 92 s: 185 s before, 38.6 s after), and
+each transaction is one Cmd-Z on Live 12.4+ (about 23 to undo
 a load instead of about 280). Anything that depends on an earlier step (a clip
 addressed after the request that made it, a read-back after its write, the play-head
 moves for locators) still waits for a later request: `live_batch.py` lists them.

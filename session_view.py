@@ -546,7 +546,7 @@ def write_clips(bridge, jobs, replace=False):
         # Warping switches every marker on this clip from seconds to beats. Read the
         # length only after it, or the clamp below compares beats against seconds.
         ks = run(ks, lambda k: {"op": "set", "path": slot(k) + " clip",
-                                "property": "warping", "value": True})
+                                "property": "warping", "value": True}, ("warping",))
         for k, (value, err) in zip(ks, bridge.reads([{"path": slot(k) + " clip",
                                                       "property": "end_marker"} for k in ks])):
             if err is not None:
