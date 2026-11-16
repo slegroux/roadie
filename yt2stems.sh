@@ -50,10 +50,11 @@
 # and it wins 86-99% of the active bars on kick, snare, bass and synths. The
 # synths stem carries half the bass it did (15.0% against 29.9% of its energy).
 # That is ONE track, a remix pack with no master bus, so easier than a rip: read
-# the margins as a direction, not a constant. Cost: on an M3 Pro the separation
-# runs on the GPU (MPS) at roughly 2.2x realtime, and the drum pass is the same
-# as before; see ~/.omc/reports/studies-separation-benchmark/default-switch-*.md
-# for the end-to-end times against htdemucs_6s.
+# the margins as a direction, not a constant. Cost, timed back to back on an
+# M3 Pro (a 5:43 mix, whole `-s` run): 5:26 against 3:35 for htdemucs_6s. The
+# separation is 2:25 against 0:34, on the GPU (MPS); the drum pass (3:00) is the
+# same. Peak memory 2.3 GB; an 11:25 mix took 10:32 and 3.3 GB, no CPU fallback.
+# Report: ~/.omc/reports/studies-separation-benchmark/default-switch-*.md
 #
 # History of the old default, kept because -m still selects it: htdemucs_6s was
 # chosen for deep/melodic house on a bass-deficit measure. Across 5 windows of one
