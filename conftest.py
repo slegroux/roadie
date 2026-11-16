@@ -2,6 +2,11 @@
 import pytest
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: takes over 6 s (real audio through hit_groups with regrouping); "
+                                       "deselect with -m \"not slow\", runs by default")
+
+
 @pytest.fixture(autouse=True)
 def _no_held_live_connection():
     """stems2live keeps one `sideman.client.Live` for a run in a module global. A test that reached a
