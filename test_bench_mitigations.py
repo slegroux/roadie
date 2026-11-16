@@ -165,6 +165,28 @@ def test_the_oracle_mask_built_from_the_true_stems_gives_them_back_and_sums_to_t
     assert np.abs(sum(got.values()) - (bass + synths + ret))[mid].max() < 1e-3
 
 
+def test_oracle_score_reads_the_mask_in_memory_with_and_without_the_returns(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    monkeypatch.setattr(M, "SEGMENT", SR * 2)
+    m, path, out = _manifest(tmp_path)
+    t = np.arange(SR * 8) / SR
+    bass = np.stack([np.sin(2 * np.pi * 110 * t)] * 2, 1) * 0.3
+    synths = np.stack([np.sin(2 * np.pi * 2500 * t)] * 2, 1) * 0.2
+    ret = np.stack([np.sin(2 * np.pi * 130 * t)] * 2, 1) * 0.15                  # returns that sit next to the bass
+    for k, v in (("bass", bass), ("synths", synths), ("returns", ret)):
+        _w(out / "truth" / (k + ".flac"), v)
+    sf.write(str(out / "mix.wav"), bass + synths + ret, SR, subtype="PCM_24")
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+    M.cmd_oracle_score(argparse.Namespace(manifest=path, power=2.0, json=str(tmp_path / "s.json")))
+    got = json.load(open(tmp_path / "s.json"))
+    assert sorted(p.name for p in tmp_path.rglob("*")) == sorted(before + ["s.json"])      # no audio written
+    assert set(got["with_returns"]) == {"bass", "synths"}
+    assert got["with_returns"]["bass"] > 20                                       # told the right answer, the mask gives the stem back
+    assert got["no_returns"]["bass"] < got["with_returns"]["bass"] - 5            # the returns' share goes to the stem it overlaps
+    assert "no returns" in capsys.readouterr().out
+
+
 def test_bars_counts_the_active_bars_where_the_second_set_has_the_higher_sdr(tmp_path, capsys):
     import argparse
     m, path, out = _manifest(tmp_path)

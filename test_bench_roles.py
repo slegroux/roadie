@@ -116,6 +116,15 @@ def test_assign_roles_gives_each_role_to_one_source_among_the_roles_that_sound_r
     assert got["kick"]["k"] == 0 and got["hat"] is None
 
 
+def test_timing_best_filters_on_precision_before_it_takes_the_best_f1():
+    def sc(k, f, p):
+        return {"k": k, "f1": f, "precision": p, "recall": f}
+    scores = [sc(0, 0.80, 0.76), sc(1, 0.58, 0.99), sc(2, 0.90, 0.5)]
+    assert R.timing_best(scores)["k"] == 1                                   # the P 0.76 role does not hide the P 0.99 one
+    assert R.timing_best(scores, 0.0)["k"] == 2                              # the raw best, which score_sources keeps in the JSON
+    assert R.timing_best([sc(0, 0.0, 1.0), sc(1, 0.8, 0.5)]) is None         # no F1, or no precision: none
+
+
 def test_the_sound_condition_does_not_hide_a_role_with_precision_one():
     # the source plays on steps 0 (a kick-like sound) and 2, 6, 10, 14 (hats). The role that sounds like it is the kick's (the
     # reference is a kick): recall .2 at precision .25. The hat role matches its hits (recall .8, precision 1.0) and does not
@@ -128,11 +137,41 @@ def test_the_sound_condition_does_not_hide_a_role_with_precision_one():
     true = [t0 + (b * 16 + s) * STEP for b in range(8) for s in (0, 2, 6, 10, 14)]
     row = R.score_sources(results, named, {"src": {"onsets": true}}, {"src": kick}, SR)["src"]
     assert row["best"]["stem"] == "drums_kick" and row["best"]["sound"] is True and row["best"]["f1"] < 0.5
-    tb = row["timing_best"]
+    tb = row["timing_shown"]
+    assert row["timing_best"]["stem"] == "drums_hh" and row["timing_best"]["qualifies"] is True
     assert tb["stem"] == "drums_hh" and tb["precision"] >= 0.9 and tb["f1"] > row["best"]["f1"] and tb["alike"] is False
     # a source the pick already finds shows no timing best
     only_kick = [t0 + (b * 16 + s) * STEP for b in range(8) for s in (0, 4, 8, 12)]
-    assert R.score_sources(results, named, {"k": {"onsets": only_kick}}, {"k": kick}, SR)["k"]["timing_best"] is None
+    assert R.score_sources(results, named, {"k": {"onsets": only_kick}}, {"k": kick}, SR)["k"]["timing_shown"] is None
+
+
+def test_the_number_of_sources_with_a_role_comes_before_the_f1_sum():
+    a = [{"k": 0, "f1": 0.9, "alike": True}, {"k": 1, "f1": 0.0, "alike": False}]
+    b = [{"k": 0, "f1": 0.5, "alike": True}, {"k": 1, "f1": 0.4, "alike": True}]
+    got = R.assign_roles({"a": a, "b": b})
+    assert got["a"]["k"] == 0 and got["b"]["k"] == 1
+    c = [{"k": 0, "f1": 0.6, "alike": True}, {"k": 1, "f1": 0.0, "alike": False}]
+    got = R.assign_roles({"a": a, "c": c})                               # one role, and both want it: the better F1 takes it
+    assert got["a"]["k"] == 0 and got["c"] is None
+
+
+def test_sources_with_the_same_timing_share_a_role_and_say_so():
+    assert R.shares_timing([1.0, 2.0, 3.0], [1.01, 2.0, 3.02])
+    assert not R.shares_timing([1.0, 2.0, 3.0], [1.0])                       # one of the three: not the other's
+    assert not R.shares_timing([], [])
+    kick = _kick()
+    xk, t0 = _stem(kick, [0, 4, 8, 12])
+    results = {"drums_kick": drumroles.hit_groups(xk, BPM, t0, sr=SR)}
+    named = {"drums_kick": drumroles.name_roles(results["drums_kick"], "kick")}
+    on = [t0 + (b * 16 + s) * STEP for b in range(8) for s in (0, 4, 8, 12)]
+    srcs = {"a": {"onsets": on, "role": "drums_snare"}, "b": {"onsets": [t + 0.004 for t in on], "role": "drums_snare"}}
+    rows = R.score_sources(results, named, srcs, {"a": kick, "b": kick}, SR)
+    assert rows["a"]["shares_with"] == ["b"] and rows["b"]["shares_with"] == ["a"]
+    assert rows["a"]["best"]["stem"] == rows["b"]["best"]["stem"] == "drums_kick" and rows["a"]["alone"] is None and rows["b"]["alone"] is None
+    assert any("shares the role with: b" in l for l in R.table({"s": rows}).splitlines())
+    srcs["b"]["role"] = "drums_hh"                                           # in another role stem it is another source: one role, one source
+    rows = R.score_sources(results, named, srcs, {"a": kick, "b": kick}, SR)
+    assert rows["a"]["shares_with"] == [] and (rows["a"]["best"] is None) != (rows["b"]["best"] is None)
 
 
 def test_a_role_goes_to_one_source_and_the_other_reads_what_it_would_have_taken_alone():
@@ -259,9 +298,9 @@ def test_group_distances_find_the_sound_wherever_it_sits(drum_set):
 
 
 def test_a_sound_condition_keeps_a_source_off_the_role_that_merely_plays_on_its_steps():
-    true = [1.0, 2.0, 3.0, 4.0]
-    kick_like = ("kick", _role("kick", [0]), [1.0, 2.0, 3.0, 4.0, 5.0])     # plays where the source plays, and elsewhere
-    hat_like = ("hh", _role("hh", [1]), [1.0, 2.0, 3.0])                     # fewer of them, but the right sound
+    true = [float(i) for i in range(1, 11)]
+    kick_like = ("kick", _role("kick", [0]), true + [11.0])                  # plays where the source plays (P 0.91), and elsewhere
+    hat_like = ("hh", _role("hh", [1]), true[:7])                            # fewer of them, but the right sound
     assert _alone(true, [kick_like, hat_like])["role"]["name"] == "kick"                # timing alone
     dist = {"kick": 4.0, "hh": 1.4}
     sc, _ = R.role_scores(true, [], [kick_like, hat_like], lambda s, r: dist[s])
@@ -279,7 +318,7 @@ def test_score_sources_rows_carry_recall_precision_detected_and_distance(drum_se
     rows = R.score_sources(d["results"], d["named"], {"kick": {"onsets": true}}, {"kick": d["kick"]}, SR)
     b = rows["kick"]["best"]
     assert (b["stem"], b["recall"], b["precision"], b["detected"], b["sound"]) == ("drums_kick", 1.0, 1.0, 1.0, True)
-    assert rows["kick"]["exclusive"] == 32 and rows["kick"]["alone"] is None and rows["kick"]["timing_best"] is None
+    assert rows["kick"]["exclusive"] == 32 and rows["kick"]["alone"] is None and rows["kick"]["timing_shown"] is None
     assert b["dist"] < 0.5 and b["dist_main"] < 0.5 and rows["kick"]["closest"]["stem"] == "drums_kick" and rows["kick"]["true_hits"] == 32
     # a source with no onset in the stems at all: the best role has recall 0
     none = R.score_sources(d["results"], d["named"], {"ghost": {"onsets": [100.0, 101.0]}}, {"ghost": None}, SR)["ghost"]
@@ -354,6 +393,15 @@ def test_aligned_average_finds_a_known_shift_and_logs_it():
     x2, res2, g2 = _shifted_group([ms(10)] * 5, sample)
     edge = R.average_hits(x2, SR, res2, g2, sample.reshape(-1, 1), sample)
     assert edge["lag_edge"] == 1.0 and abs(edge["lag_median_ms"] + 10.0) < 0.1
+
+
+def test_an_aligned_cut_ends_at_its_own_end():
+    sample = _hat(4, tau=0.03, length=0.2)
+    ms = lambda m: int(round(m * SR / 1000))                                       # noqa: E731
+    x, res, g = _shifted_group([-ms(8)] * 6, sample)                               # onsets read 8 ms early: the move is 8 ms later
+    got = R.average_hits(x, SR, res, g, sample.reshape(-1, 1), sample)
+    assert abs(got["lag_median_ms"] - 8.0) < 0.1
+    assert abs(got["length_ms"] - (200.0 - 8.0)) < 0.1                             # each cut stops at the hit's `end`, not 8 ms past it
 
 
 def test_the_average_takes_complete_members_only():
@@ -431,6 +479,11 @@ def test_file_key_follows_size_and_mtime_and_code_hash_follows_the_code(tmp_path
     fake.write_text("x = 1\n")
     monkeypatch.setattr(drumroles, "__file__", str(fake))
     assert R.code_hash() != h                                                # a different drumroles.py is a different hash
+    monkeypatch.undo()
+    fake = tmp_path / "listen.py"
+    fake.write_text("y = 1\n")
+    assert R.code_hash(files=(str(fake),)) != h                              # another file listed is another hash
+    assert R.code_hash(R.group_audio) != R.code_hash(R.medoid_cut)
 
 
 class _Inline:
@@ -498,3 +551,22 @@ def test_sources_stage_is_cached_and_follows_the_source_files(tmp_path, monkeypa
     assert len(calls) == 2
     R.sources_stage({**manifest, "bpm": BPM + 1}, str(tmp_path), cache)                        # a different tempo
     assert len(calls) == 3
+    for field, value in (("role", "drums_snare"), ("file", "HAT2.aif")):                      # the manifest's role or file of a source
+        changed = {**manifest, "sources": [{**manifest["sources"][0], field: value}, manifest["sources"][1]]}
+        n = len(calls)
+        R.sources_stage(changed, str(tmp_path), cache)
+        assert len(calls) == n + 1, field
+        R.sources_stage(changed, str(tmp_path), cache)
+        assert len(calls) == n + 1
+        R.sources_stage({**manifest, "bpm": BPM + 1}, str(tmp_path), cache)                    # back: the cache was rewritten
+    from sideman import listen
+    other = tmp_path / "listen.py"
+    other.write_text("z = 1\n")
+    monkeypatch.setattr(listen, "__file__", str(other))                                         # another sideman/listen.py
+    n = len(calls)
+    R.sources_stage({**manifest, "bpm": BPM + 1}, str(tmp_path), cache)
+    assert len(calls) == n + 1
+    monkeypatch.setattr(R, "group_audio", lambda *a, **k: (None, False))                        # the functions reference_hit calls
+    n = len(calls)
+    R.sources_stage({**manifest, "bpm": BPM + 1}, str(tmp_path), cache)
+    assert len(calls) == n + 1

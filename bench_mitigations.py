@@ -6,7 +6,8 @@ better, scored by benchmark.py --truth on the folder it writes.
     bench_mitigations.py wiener   MANIFEST STEMS OUT                    (c) soft-mask re-mask of the stems over the mix
     bench_mitigations.py oracle   MANIFEST OUT                          (c) the same mask built from the TRUE stems: its ceiling
     bench_mitigations.py gate     MANIFEST STEMS OUT                    (d) silence the hits mark_bleed marks as bleed
-    bench_mitigations.py gate     MANIFEST STEMS OUT --oracle           (d) silence every hit with no true onset of the stem's own sources: the most gating can do
+    bench_mitigations.py gate     MANIFEST STEMS OUT --oracle           (d) hit-level oracle (the detector's cuts, perfect labels): silence every hit with no true onset of the stem's own sources
+    bench_mitigations.py oracle-score MANIFEST [--power P]              (c) the oracle mask scored in memory, with and without `returns`: no audio written
     bench_mitigations.py bars     MANIFEST STEMS_A STEMS_B              (e) the share of active bars where B's SI-SDR beats A's, per stem
     bench_mitigations.py assemble MANIFEST NAME                         (e) name another model's outputs as stems
     bench_mitigations.py compare  SCORES.json [SCORES.json ...]         SI-SDR per stem, side by side
@@ -20,11 +21,14 @@ under the manifest's out_dir; the mix and the truth are read only.
 first, non-iterative step of a Wiener filter with the stems themselves as the variance estimates.
 (d) zeroes, in each drum stem, the cut of every hit that belongs to a group mark_bleed marked, with 2 ms fades;
 --coincidence-only also zeroes the groups that pass its coincidence test alone (a counterfactual, not the module's rule).
---oracle zeroes instead every hit that has no true onset of its stem's own sources (the manifest's drum sources with that role)
-within the roles' tolerance (25 ms): what gating could at most do, were it right about every hit. It never touches a stem with no
-own source (the ride).
-`oracle` is `wiener` with the true role stems (truth/, `returns` included so the masks sum to the mix) as the variance estimates:
-what the mask gives when it is told the right answer, which is the ceiling of any soft-mask re-mask over the mix's phase.
+--oracle is a hit-level oracle: the detector's cuts with perfect labels. It zeroes every cut of a hit that has no true onset of its
+stem's own sources (the manifest's drum sources with that role) within the roles' tolerance (25 ms). It is a heuristic, not an
+upper bound: a cut that holds a true hit and a false one (or a true hit with a late tail) goes whole, and the kick loses from that.
+It never touches a stem with no own source (the ride).
+`oracle` is `wiener` with the true role stems (truth/, `returns` included, so the masks sum to the mix) as the variance estimates,
+all in one mask over the mix: what the mask gives when it is told the right answer, with the mix's phase. `oracle-score` scores
+the same mask in memory, and again without `returns` among the variance estimates (the real re-mask has no returns stem: the
+returns' energy is then shared out among the stems), so the two rows are like for like with the stems of the re-mask.
 """
 import argparse
 import json
@@ -150,9 +154,24 @@ def wiener_segment(x, stems, power=POWER, nfft=NFFT, eps=1e-12):
     return out
 
 
+def wiener_segments(mix, files, power=POWER):
+    """The re-masked stems, one segment at a time: yields (a, b, {name: array [b - a, ch]}) for the samples a..b, over the
+    open SoundFiles `mix` and `files` ({name: SoundFile}). Segments of SEGMENT samples with a margin of two FFT frames each side
+    that is cut off after, so no segment edge reaches the output."""
+    total = min([mix.frames] + [f.frames for f in files.values()])
+    margin = 2 * NFFT
+    for a in range(0, total, SEGMENT):
+        b = min(total, a + SEGMENT)
+        lo, hi = max(0, a - margin), min(total, b + margin)
+        for f in [mix] + list(files.values()):
+            f.seek(lo)
+        x = mix.read(hi - lo, dtype="float64", always_2d=True)
+        segs = wiener_segment(x, [f.read(hi - lo, dtype="float64", always_2d=True) for f in files.values()], power)
+        yield a, b, {k: y[a - lo:b - lo] for k, y in zip(files, segs)}
+
+
 def wiener(mix_path, stem_paths, out_dir, power=POWER):
-    """Write the re-masked stems into out_dir (one FLAC each, the same names). Segments of SEGMENT samples with a
-    margin of two FFT frames each side that is cut off after, so no segment edge reaches the output."""
+    """Write the re-masked stems into out_dir (one FLAC each, the same names)."""
     import numpy as np
     import soundfile as sf
     os.makedirs(out_dir, exist_ok=True)
@@ -162,19 +181,11 @@ def wiener(mix_path, stem_paths, out_dir, power=POWER):
                                subtype="PCM_24", format="FLAC") for k in files}
     try:
         total = min([mix.frames] + [f.frames for f in files.values()])
-        margin = 2 * NFFT
         peak = 0.0
-        for a in range(0, total, SEGMENT):
-            b = min(total, a + SEGMENT)
-            lo, hi = max(0, a - margin), min(total, b + margin)
-            for f in [mix] + list(files.values()):
-                f.seek(lo)
-            x = mix.read(hi - lo, dtype="float64", always_2d=True)
-            segs = wiener_segment(x, [f.read(hi - lo, dtype="float64", always_2d=True) for f in files.values()], power)
-            for (k, w), y in zip(writers.items(), segs):
-                y = y[a - lo:b - lo]
+        for a, b, ys in wiener_segments(mix, files, power):
+            for k, y in ys.items():
                 peak = max(peak, float(np.abs(y).max()))
-                w.write(np.clip(y, -1.0, 1.0))
+                writers[k].write(np.clip(y, -1.0, 1.0))
         return {"frames": total, "peak_dbfs": db(peak)}
     finally:
         mix.close()
@@ -300,6 +311,66 @@ def cmd_oracle(a):
     m = load_manifest(a.manifest)
     a.stems = os.path.join(m["out_dir"], "truth")
     cmd_wiener(a)
+
+
+def oracle_scores(mix_path, stem_paths, readings, power=POWER):
+    """SI-SDR (dB, over the whole file, all channels pooled) of the soft mask built from `stem_paths` ({name: true stem file}),
+    in memory: nothing is written, nor clipped or rounded to 24 bits as a file would be. `readings` is [(label, [mask stems
+    summed], [truth files summed])]; a reading is the sum of those stems of the mask against the sum of those files."""
+    import numpy as np
+    import soundfile as sf
+    from benchmark import si_sdr_from_stats
+    mix = sf.SoundFile(mix_path)
+    files = {k: sf.SoundFile(p) for k, p in stem_paths.items()}
+    refs = [[sf.SoundFile(p) for p in paths] for _, _, paths in readings]
+    acc = [np.zeros(3) for _ in readings]
+    try:
+        for a, b, ys in wiener_segments(mix, files, power):
+            for k, (_, names, _) in enumerate(readings):
+                e = sum(ys[n] for n in names)
+                r = 0
+                for f in refs[k]:
+                    f.seek(a)
+                    r = r + f.read(b - a, dtype="float64", always_2d=True)[:len(e)]
+                n = min(len(e), len(r))
+                e, r = e[:n], r[:n]
+                acc[k] += ((r * r).sum(), (e * r).sum(), (e * e).sum())
+        return {label: float(si_sdr_from_stats(*acc[k])) for k, (label, _, _) in enumerate(readings)}
+    finally:
+        mix.close()
+        for f in list(files.values()) + [f for fs in refs for f in fs]:
+            f.close()
+
+
+def cmd_oracle_score(a):
+    """The oracle mask, scored in memory with `returns` among the variance estimates and without it, per stem and reading the
+    mask can give (a drum stem or role, bass, synths, `drums` = the sum of the drum parts)."""
+    import benchmark as B
+    m = load_manifest(a.manifest)
+    truth = os.path.join(m["out_dir"], "truth")
+    mix = os.path.join(m["out_dir"], "mix.wav")
+    true_paths = B.true_role_paths(m, m["out_dir"])
+    source_paths = {s["drum_source"]: B.find_audio(os.path.join(m["out_dir"], "truth_sources"), s["drum_source"])
+                    for s in m["sources"] if s.get("drum_source")}
+    avail = {k: audio(truth, k) for k in LEAVES}
+    avail = {k: v for k, v in avail.items() if v}
+    drums = [k for k in DRUM_SUBS if k in avail]
+    readings = []
+    for label, stems, names in B.scored_readings(m, true_paths):
+        parts = [p for s in stems for p in ([s] if s in avail else drums if s == "drums" else [None])]
+        refs = [B.resolve_truth(n, true_paths, source_paths) for n in names]
+        if names and None not in parts and all(refs):
+            readings.append((label, parts, refs))
+    out = {}
+    for tag, keep in (("with_returns", list(avail)), ("no_returns", [k for k in avail if k != "returns"])):
+        out[tag] = oracle_scores(mix, {k: avail[k] for k in keep}, readings, a.power)
+    print("%-18s %14s %14s" % ("SI-SDR dB, power %g" % a.power, "with returns", "no returns"))
+    for label, _, _ in readings:
+        print("%-18s %14.1f %14.1f" % (label[:18], out["with_returns"][label], out["no_returns"][label]))
+    if a.json:
+        with open(a.json, "w") as fh:
+            json.dump({"power": a.power, **out}, fh, indent=1)
+        print("wrote %s" % a.json)
 
 
 def cmd_bars(a):
@@ -432,6 +503,11 @@ def main():
     p.add_argument("manifest"), p.add_argument("out")
     p.add_argument("--power", type=float, default=POWER, help="the mask's exponent: 2 is the power (Wiener) mask, 1 the magnitude mask")
     p.set_defaults(fn=cmd_oracle)
+    p = sub.add_parser("oracle-score")
+    p.add_argument("manifest")
+    p.add_argument("--power", type=float, default=POWER)
+    p.add_argument("--json")
+    p.set_defaults(fn=cmd_oracle_score)
     p = sub.add_parser("bars")
     p.add_argument("manifest"), p.add_argument("a"), p.add_argument("b")
     p.add_argument("--json")
@@ -443,7 +519,8 @@ def main():
                    help="not mark_bleed's rule: also gate every group of 4+ hits that coincides 70 %%+ (p <= 1 %%) with another stem's group, "
                         "level and likeness unchecked; a counterfactual for what mark_bleed's two other conditions are worth")
     p.add_argument("--oracle", action="store_true",
-                   help="silence every hit with no true onset of its stem's own sources within 25 ms (the most gating can do) instead of mark_bleed's groups")
+                   help="hit-level oracle (the detector's cuts, perfect labels): silence every hit with no true onset of its stem's own sources "
+                        "within 25 ms instead of mark_bleed's groups")
     p.set_defaults(fn=cmd_gate)
     p = sub.add_parser("assemble")
     p.add_argument("manifest"), p.add_argument("name", choices=sorted(ASSEMBLE))

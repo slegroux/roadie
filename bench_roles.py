@@ -22,15 +22,20 @@ where they coincide, so a position another source plays at counts for neither re
 EXCL_MIN exclusive positions is scored on all of them (`excl` shows an `a`).
 
     role        one per source, assigned one to one: the assignment of roles (of any stem of the set) to sources that
-                maximises the sum of F1 (Hungarian, scipy.optimize.linear_sum_assignment) among the roles that sound
-                like the source (a group's hit within SOUND_MAX = 2.0 of its reference, drumroles' own "sound alike"
-                distance) and find some of its onsets; a source with none left reads `(no role)`. Recall is the share
+                maximises the number of sources that get a role first, then the sum of F1 (Hungarian,
+                scipy.optimize.linear_sum_assignment), among the roles that sound like the source (a group's hit within
+                SOUND_MAX = 2.0 of its reference, drumroles' own "sound alike" distance) and find some of its onsets; a source
+                with none left reads `(no role)`. Recall is the share
                 of the exclusive onsets with a role hit within TOL_S, precision the share of the role's hits away from every
                 other source's onsets that pair with one (a hit and an onset pair one to one: a greedy two-pointer matching,
-                optimal in one dimension). A role shared by sources that play together (SNARE and CLAP in `snare 1`) goes to
-                the one it matches best; the other reads `(no role)` or its next role and shows its own best as `alone`.
-    timing best the role with the best F1 by timing alone, whatever it sounds like, shown under the row when it is not the
-                pick, its precision is at least TIMING_P (0.9) and its F1 beats the pick's: what the sound condition hides
+                optimal in one dimension). Sources of one role stem whose onsets coincide (each has SHARE_MIN, 0.9, of its onsets paired with
+                the other's: SNARE and CLAP) are not told apart by timing: they SHARE the role that sounds right for them, each scored
+                on its own onsets, and the row says `shares with`. Without that the assignment would give the role to whichever
+                source has the better leftover, not the better fit.
+    timing best the role with the best F1 by timing alone, whatever it sounds like, among the roles with precision at least
+                TIMING_P (0.9); shown under the row when it is not the pick and its F1 beats the pick's: what the sound
+                condition hides. The JSON keeps `timing_best` (the best F1 at any precision, with its precision and whether it
+                qualifies) and `timing_shown` (the one the table shows, or None)
     detected    recall over every hit the role's stem found, grouped or not: what the grouping and the measurement rules lose
                 between "the onset was seen" and "it is in a role"
     dist        `oneshot.spectral_distance` from the nearest of the role's groups' hits to the true sample: one clean hit read
@@ -54,7 +59,8 @@ the JSON. Distance of the mean, the median and the single clean hit to the true 
 Results are cached per (set, stem) under out_dir/roles/ (the grouping of a whole hat stem
 takes minutes), each keyed on the stem file's mtime and size, a hash of drumroles.py and oneshot.py, the tempo and bar 1; a
 change to any of them redoes that result, --rerun redoes them all. The sources' cache (sources.pkl) is keyed the same way on the
-source files, the functions that read them and the reference's size. No pack audio is read or written here beyond
+source files, the manifest's file and role of each, the functions that read them (true_onsets, reference_hit, group_audio,
+medoid_cut), sideman/listen.py (the loader and band functions those import) and the reference's size. No pack audio is read or written here beyond
 truth_sources/, which bench_truth.py wrote. Local only.
 """
 import argparse
@@ -78,6 +84,7 @@ AVG_MIN_HITS = 3
 AVG_LAG_S = 0.010       # a hit may move this far either way to line up with the clean hit before it is averaged
 AVG_ALIGN_S = 0.030     # ...by the normalized cross-correlation of this much of its start with the clean hit's
 TIMING_P = 0.9          # a role by timing alone is shown when its precision is at least this and its F1 beats the pick's
+SHARE_MIN = 0.9         # two sources of one role stem share a role when each has at least this share of its onsets paired with the other's
 EXCL_MIN = 10           # a source is scored on its exclusive positions only when it has at least this many
 
 
@@ -180,27 +187,39 @@ def best_alone(scores):
     return max((s for s in scores if sounds_right(s)), key=lambda s: (s["f1"], s["recall"]), default=None)
 
 
-def timing_best(scores):
-    """The best F1 by timing alone (ties: the higher recall), whatever it sounds like."""
-    return max(scores, key=lambda s: (s["f1"], s["recall"]), default=None)
+def timing_best(scores, min_precision=TIMING_P):
+    """The best F1 by timing alone (ties: the higher recall), whatever it sounds like, among the roles with at least
+    `min_precision` and some F1 (the precision is the filter, applied before the best is taken: a role with a higher F1 and a
+    poor precision does not hide one that qualifies). None when none does."""
+    return max((s for s in scores if s["precision"] >= min_precision and s["f1"] > 0), key=lambda s: (s["f1"], s["recall"]), default=None)
+
+
+def shares_timing(a, b, minimum=SHARE_MIN):
+    """True when two sources' onsets (seconds) coincide within TOL_S: each has at least `minimum` of its own paired one to one
+    with the other's. By timing they cannot be told apart."""
+    n = match_onsets(a, b)
+    return bool(a) and bool(b) and n >= minimum * len(a) and n >= minimum * len(b)
 
 
 def assign_roles(scored):
     """One role per source and each role to one source, among the roles that sound right for it (sounds_right): the
-    assignment that maximises the sum of F1 over the sources (Hungarian, scipy.optimize.linear_sum_assignment).
+    assignment that maximises the number of sources with a role first, then the sum of F1 over the sources (Hungarian,
+    scipy.optimize.linear_sum_assignment; a role is worth len(sources) + 1 plus its F1, so no gain in F1 buys a source its
+    role back).
     {source: [its score dicts, one per candidate role]} in, {source: the assigned score dict, or None when no role that
     sounds right is left for it}. A role that does not sound like the source is never assigned: on timing alone a source
     takes a role that merely plays on its steps (a closed hat on every 8th lands on the kick), and by the sum it would take
     that role from the source that sounds like it; `timing_best` shows such a role instead. Sources that play one sound
-    together (SNARE and CLAP in one `snare 1` role) share a role: it goes to the one it matches best, and the other reads
-    None here and shows its own best role in `alone`."""
+    together (SNARE and CLAP in one `snare 1` role) are one source to this function: it gives the role to one and the
+    other reads None, or its leftover; score_sources then lets sources with identical timing (shares_timing) share it."""
     import numpy as np
     from scipy.optimize import linear_sum_assignment
     names = [n for n, sc in scored.items() if sc]
     out = {n: None for n in scored}
     if not names:
         return out
-    w = np.array([[s["f1"] + 1.0 if sounds_right(s) else -1e3 for s in scored[n]] for n in names])
+    bonus = len(names) + 1.0
+    w = np.array([[s["f1"] + bonus if sounds_right(s) else -1e3 * bonus for s in scored[n]] for n in names])
     for i, j in zip(*linear_sum_assignment(w, maximize=True)):
         out[names[i]] = scored[names[i]][j] if sounds_right(scored[names[i]][j]) else None
     return out
@@ -272,13 +291,13 @@ def reference_hit(x, sr, onsets, tempo, t0):
     return None, "no group"
 
 
-def code_hash(*funcs):
-    """Hash of the code whose output the caches hold: roadie_analysis' drumroles.py and oneshot.py, and the source text of
-    any `funcs` (this file's own functions the cached result also depends on)."""
+def code_hash(*funcs, files=()):
+    """Hash of the code whose output the caches hold: roadie_analysis' drumroles.py and oneshot.py, the source text of
+    any `funcs` (this file's own functions the cached result also depends on) and the contents of any other `files`."""
     import inspect
     from roadie_analysis import drumroles, oneshot
     h = hashlib.sha256()
-    for path in (drumroles.__file__, oneshot.__file__):
+    for path in (drumroles.__file__, oneshot.__file__, *files):
         with open(path, "rb") as fh:
             h.update(fh.read())
     for f in funcs:
@@ -411,7 +430,7 @@ def average_hits(x, sr, result, group, clean, ref, lag_s=AVG_LAG_S):
         if lag:
             s += align_lag(x, s, c, lag, win)
             lags.append(s - h["start"])
-        cut = x[max(0, s):s + (h["end"] - h["start"])][:L]
+        cut = x[max(0, s):min(s + (h["end"] - h["start"]), h["end"])][:L]
         stack[k, :len(cut)] = cut
     count = np.isfinite(stack[:, :, 0]).sum(0)
     keep = count >= max(AVG_MIN_HITS, 0.25 * len(ids))
@@ -444,10 +463,13 @@ def score_sources(results, named, sources, refs, sr, load_stem=None):
     """One row per true source for one set. `load_stem(stem)` reads a stem as hit_groups did (only called for a group
     that has no complete member to show). Every source is scored against every role on its exclusive positions
     (role_scores; the other sources of its role stem are the ones whose positions it leaves out), then the roles are
-    assigned to the sources one to one (assign_roles), a role that sounds like the source being preferred. `best` is the
-    assigned role (None: none matches a single onset), `alone` the role the source would take alone when that is not
-    `best`, `timing_best` the best F1 by timing whatever it sounds like, set only when it is not `best`, its precision
-    is at least TIMING_P and its F1 is higher than `best`'s (what a sound condition hides); `dist` is the nearest of
+    assigned to the sources one to one (assign_roles), a role that sounds like the source being preferred; sources of
+    one role stem with the same timing (shares_timing) share the role instead, each scored on its own onsets, and `shares_with`
+    names the others. `best` is the assigned role (None: none matches a single onset), `alone` the role the source would take
+    alone when that is not `best`, `timing_best` the best F1 by timing whatever it sounds like and at whatever precision (always kept, with its
+    precision and `qualifies`: at least TIMING_P), `timing_shown` the best F1 among the roles with a precision of at least
+    TIMING_P, set only when it is not `best` and its F1 is higher than `best`'s (what a sound condition hides; the table
+    prints this one); `dist` is the nearest of
     the role's groups to the source's reference hit, `dist_main` the role's biggest group's."""
     cands = candidates(results, named)
     others_of = {k: sorted(t for j, v in sources.items() if j != k and info.get("role") and v.get("role") == info["role"] for t in v["onsets"])
@@ -462,13 +484,23 @@ def score_sources(results, named, sources, refs, sr, load_stem=None):
             return min(ds) if ds else None
         scored[src], infos[src] = role_scores(info["onsets"], others_of[src], cands, role_dist if gd else None)
     assigned = assign_roles(scored)
+    shared = {k: [] for k in sources}          # sources of one role stem with the same timing share the role that sounds right for them
+    for k, info in sources.items():
+        for j in sources:
+            if j != k and info.get("role") and sources[j].get("role") == info["role"] and shares_timing(info["onsets"], sources[j]["onsets"]):
+                shared[k].append(j)
+    for k, mates in shared.items():
+        a = best_alone(scored[k])
+        taken = [j for j in mates if assigned[j] is not None and a is not None and assigned[j]["k"] == a["k"]]
+        if taken and (assigned[k] is None or assigned[k]["k"] != a["k"]):
+            assigned[k] = a
     rows = {}
     for src, info in sources.items():
         true_s, gd = info["onsets"], gds[src]
         b = assigned[src]
-        alone, tb = best_alone(scored[src]), timing_best(scored[src])
+        alone, tb, tq = best_alone(scored[src]), timing_best(scored[src], 0.0), timing_best(scored[src])
         row = {"true_hits": len(true_s), "exclusive": infos[src]["exclusive"], "exclusive_only": infos[src]["only"],
-               "best": None, "alone": None, "timing_best": None, "ref": info.get("reference")}
+               "best": None, "alone": None, "timing_best": None, "timing_shown": None, "shares_with": shared[src], "ref": info.get("reference")}
 
         def brief(c):
             groups = cands[c["k"]][1]["groups"]
@@ -478,8 +510,10 @@ def score_sources(results, named, sources, refs, sr, load_stem=None):
                     "near_group": min((g for g in groups if (c["stem"], g) in gd), key=lambda g: gd[(c["stem"], g)][0], default=None)}
         if alone and (b is None or alone["k"] != b["k"]):
             row["alone"] = brief(alone)
-        if tb and tb["f1"] > 0 and (b is None or tb["k"] != b["k"]) and tb["precision"] >= TIMING_P and (b is None or tb["f1"] > b["f1"]):
-            row["timing_best"] = brief(tb)
+        if tb:
+            row["timing_best"] = {**brief(tb), "qualifies": tb["precision"] >= TIMING_P}
+        if tq and (b is None or (tq["k"] != b["k"] and tq["f1"] > b["f1"])):
+            row["timing_shown"] = brief(tq)
         if b:
             stem, role = cands[b["k"]][0], cands[b["k"]][1]
             res = results[stem]
@@ -514,11 +548,15 @@ def score_sources(results, named, sources, refs, sr, load_stem=None):
 
 def sources_stage(manifest, out_dir, cache_dir):
     """Onsets and a reference clean hit of every true drum source (cached; the cache holds for the source files (mtime,
-    size), true_onsets and reference_hit, drumroles.py and oneshot.py, the tempo, bar 1 and the reference's size parameters)."""
+    size), the manifest's file and role of each, true_onsets, reference_hit, group_audio and medoid_cut, drumroles.py,
+    oneshot.py and sideman/listen.py, the tempo, bar 1 and the reference's size parameters)."""
     import soundfile as sf
+    from sideman import listen
     files = {s["drum_source"]: os.path.join(out_dir, "truth_sources", s["drum_source"] + ".flac")
              for s in manifest["sources"] if s.get("drum_source")}
-    key = {"inputs": {d: file_key(p) for d, p in files.items()}, "code": code_hash(true_onsets, reference_hit, _undc),
+    key = {"inputs": {d: file_key(p) for d, p in files.items()},
+           "manifest": {s["drum_source"]: [s["file"], s["role"]] for s in manifest["sources"] if s.get("drum_source")},
+           "code": code_hash(true_onsets, reference_hit, _undc, group_audio, medoid_cut, files=(listen.__file__,)),
            "bpm": manifest["bpm"], "bar1_s": manifest.get("bar1_s", 0.0), "ref": [REF_BARS, REF_MAX_HITS]}
     p = os.path.join(cache_dir, "sources.pkl")
     cached = read_cache(p, key)
@@ -563,7 +601,9 @@ def table(sets):
                 lines.append(head + "%-24s %5d %6.2f %6.2f %6.2f %6.2f %6s %6s  %-12s  %-24s" % (
                     ("%s%s" % (role_name(b), "" if b["sound"] else " ?"))[:24], b["hits"], b["recall"], b["precision"], b["f1"],
                     b["detected"], star(b["dist"], b["clean"]), star(b["dist_main"], True), al, cl))
-            for tag, c2 in (("alone", r["alone"]), ("timing best", r["timing_best"])):
+            if b and r["shares_with"]:
+                lines.append("%27s shares the role with: %s (the same timing: told apart by sound only)" % ("", ", ".join(r["shares_with"])))
+            for tag, c2 in (("alone", r["alone"]), ("timing best", r["timing_shown"])):
                 if c2:
                     lines.append("%27s %s: %s (group%s %s)  R %.2f  P %.2f  F1 %.2f%s%s" % (
                         "", tag, role_name(c2), "" if len(c2["groups"]) == 1 else "s", ",".join(str(g) for g in c2["groups"]),
@@ -573,8 +613,8 @@ def table(sets):
                  "(under %d are exclusive). hits: the role's hits away from the other sources' onsets. recall, precision, F1 and detect are over "
                  "those positions." % (round(1000 * TOL_S), EXCL_MIN))
     lines.append("  roles are assigned to sources one to one (Hungarian on F1) among the roles with a group within %.1f of the source's hit that "
-                 "find some of its onsets: a source that shares its role with another (SNARE and CLAP) reads `alone` for the role it would "
-                 "have taken, and `timing best` is the role with the best F1 by timing whatever it sounds like (dist is how far it is), "
+                 "find some of its onsets: sources that play the same onsets (SNARE and CLAP) share the role (`shares the role with`); a source "
+                 "that loses a role to another reads `alone` for the role it would have taken, and `timing best` is the role with the best F1 by timing whatever it sounds like (dist is how far it is), "
                  "shown when its precision is at least %.1f and its F1 beats the pick's." % (SOUND_MAX, TIMING_P))
     lines.append("  all alike: the union of the hits of every role of the set with a group within %.1f of the source's hit. * no complete "
                  "member to show: the medoid's cut stands in." % SOUND_MAX)
