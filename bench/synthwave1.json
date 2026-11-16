@@ -9,7 +9,12 @@
   "stems": ["drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash", "bass", "synths", "vocals"],
   "readings": {
     "synths+returns": {"stem": "synths", "truth": ["synths", "returns"]},
-    "drums": {"stem": "drums", "truth": ["drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash"]}
+    "drums": {"stem": "drums", "truth": ["drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_crash"]},
+    "crash+returns": {"stem": "drums_crash", "truth": ["drums_crash", "returns"]},
+    "snare+metal": {"stem": "drums_snare", "truth": ["snare", "snare2", "clap", "metal_hit"]},
+    "snare-s2+metal": {"stem": "drums_snare", "truth": ["snare", "clap", "metal_hit"]},
+    "hh+metal": {"stem": "drums_hh", "truth": ["chh1", "chh2", "chh3", "shaker", "metal_hit"]},
+    "hh+ride+metal": {"stem": ["drums_hh", "drums_ride"], "truth": ["chh1", "chh2", "chh3", "shaker", "metal_hit"]}
   },
   "excluded": [
     {"file": "Clap Sustain 11.aif", "reason": "not part of the pack: 178 KB, a one-shot sample, not 177 bars (the pack's 30 files are 90.6 MB each, 342.58 s); ffmpeg and libsndfile cannot read it (no COMM chunk); absent from the vault's track table"},

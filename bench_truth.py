@@ -10,6 +10,12 @@ This writes, into the manifest's out_dir (or --out):
 
     mix.wav               every pack file summed at unity, the pack's rate and bit depth
     truth/<role>.flac     one true stem per role that has at least one source
+    truth_sources/<drum_source>.flac
+                          one file per source the manifest gives a `drum_source` (bench_roles.py)
+
+A role with no source gets no stem, and a `truth/` or `truth_sources/` file the manifest no longer
+maps is deleted, so benchmark.py never scores against a stale one. `--sources-only` writes
+`truth_sources/` alone (ten files read from the pack, no mix, no role stems, no verification).
 
 then checks the files it wrote: the pack's frame count is 177 bars at 124 BPM, and
 the mix minus the sum of the role stems (and minus a fresh sum of the pack) is below
@@ -75,17 +81,49 @@ def db(x):
     return 20.0 * np.log10(max(float(x), 1e-12))
 
 
+def drop_stale(folder, keep):
+    """Delete the .flac files of `folder` whose name (without extension) is not in `keep`."""
+    if not os.path.isdir(folder):
+        return []
+    gone = [f for f in sorted(os.listdir(folder)) if f.endswith(".flac") and f[:-5] not in keep]
+    for f in gone:
+        os.remove(os.path.join(folder, f))
+    return gone
+
+
+def write_sources(m, out_dir):
+    """Only the drum sources, one file each, read whole and in turn from the pack."""
+    _frames, sr, _ch, subtype, _bars = pack_format(m)
+    names = [s["drum_source"] for s in m["sources"] if s.get("drum_source")]
+    os.makedirs(os.path.join(out_dir, "truth_sources"), exist_ok=True)
+    drop_stale(os.path.join(out_dir, "truth_sources"), names)
+    for s in m["sources"]:
+        if s.get("drum_source"):
+            x = sf.read(os.path.join(m["pack_dir"], s["file"]), dtype="float64", always_2d=True)[0]
+            sf.write(os.path.join(out_dir, "truth_sources", s["drum_source"] + ".flac"), x, sr,
+                     subtype=subtype, format="FLAC")
+    return names
+
+
 def build(m, out_dir):
     frames, sr, ch, subtype, bars = pack_format(m)
     roles = [r for r in m["stems"] + ["returns"] if any(s["role"] == r for s in m["sources"])]
     os.makedirs(os.path.join(out_dir, "truth"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "truth_sources"), exist_ok=True)
+    stale = drop_stale(os.path.join(out_dir, "truth"), roles)
+    drop_stale(os.path.join(out_dir, "truth_sources"), [s["drum_source"] for s in m["sources"] if s.get("drum_source")])
+    if stale:
+        print("removed stale truth stems: " + ", ".join(stale))
 
     # One whole file at a time, front to back: the pack sits on a cloud drive, where reading
     # 30 files in interleaved blocks was minutes slower than reading each in one go.
     acc = {r: np.zeros((frames, ch)) for r in roles}
     for s in m["sources"]:
-        acc[s["role"]] += sf.read(os.path.join(m["pack_dir"], s["file"]), dtype="float64",
-                                  always_2d=True)[0]
+        x = sf.read(os.path.join(m["pack_dir"], s["file"]), dtype="float64", always_2d=True)[0]
+        acc[s["role"]] += x
+        if s.get("drum_source"):
+            sf.write(os.path.join(out_dir, "truth_sources", s["drum_source"] + ".flac"), x, sr,
+                     subtype=subtype, format="FLAC")
     mix = sum(acc.values())
     peak = {"mix": float(np.abs(mix).max()), **{r: float(np.abs(acc[r]).max()) for r in roles}}
     if any(v >= 1.0 for v in peak.values()):
@@ -137,6 +175,8 @@ def main():
     ap.add_argument("--out", help="output folder (default: the manifest's out_dir)")
     ap.add_argument("--verify-only", action="store_true",
                     help="check the files already written; do not rebuild")
+    ap.add_argument("--sources-only", action="store_true",
+                    help="write truth_sources/ (the drum sources, one file each) and stop")
     args = ap.parse_args()
 
     m = load_manifest(args.manifest)
@@ -144,6 +184,11 @@ def main():
     check_manifest(m)
     print("%d pack files, %d excluded (%s)"
           % (len(m["sources"]), len(m["excluded"]), ", ".join(e["file"] for e in m["excluded"])))
+
+    if args.sources_only:
+        names = write_sources(m, out_dir)
+        print("truth_sources: " + ", ".join(names))
+        return
 
     if args.verify_only:
         frames, sr, _ch, subtype, bars = pack_format(m)
