@@ -42,3 +42,24 @@ Sideman client (`SIDEMAN_SRC`; `passes.py` needs `sideman.oneshot.distance_terms
 `bandreport.py` (per-zone balance, crest, width, LFO, pedal partials), `envelopes.py` (per-note amp/brightness
 envelopes), `score.py` (alignment helpers), `mrstft_score.py` (whole-loop MR-STFT distance), `f0track.py`,
 `lfo_cal.py`, `build_strip.py` (Instrument Rack `.adg` from a saved `.als` track, plug-in states included).
+
+## Tuning strategy (learned 2026-11-15, 12 tracks, 38 passes)
+
+The decoded patch does most of the work: 149 of 156 knobs ended within ±0.15 of the mapped values. Blind ± coordinate
+descent (`passes.py` today) rejected about 84 % of its tries. Next version, in order:
+
+1. **Verify the target** before tuning: reference pitches inside the song MIDI's range, plus a REF track to listen to.
+   A wrong target wastes every pass.
+2. **Corrected map:** compress the top of the cutoff map (high cutoffs always came down: 0.64→0.46, 0.61→0.43,
+   0.46→0.28), sub at about 0.7× the Sub 37 level, amp decay ≥ 0.15 when the Sub 37 release is 0.
+3. **Measure-driven steps:**
+   - Mean brightness → cutoff; brightness decay rate → filter decay; how far it closes → contour.
+   - Level at note end → release; sub band → sub level.
+4. **Short ± polish** on cutoff, contour, release and sub only. Stop when a full cycle gains < 1 %.
+   Judge LFO and mod depth only on long notes or loops.
+5. **Speed:** all songs per pass, optionally 2–3 candidate copies per track, every LOM call batched.
+
+Gain by knob in the 2026-11-15 run:
+- Cutoff 65 %, inflated by leftovers from stopped runs.
+- Contour 10 %, amp release 6 %, Decapitator drive 5 %, sub 5 %, osc2 3 %.
+- Everything else about 1 % each.
