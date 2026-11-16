@@ -18,34 +18,51 @@
 #              named for the artist, or for their last name, is reused: "Marc
 #              Holstege - Mangata" lands in an existing Holstege/Mangata/. A name
 #              with no " - " gets DIR/<Title>/.
-#   -s         also split into stems (needs demucs), then split the drums stem
-#              into kick/snare/toms/hh/ride/crash (needs audio-separator).
-#              The drum pass is on by default and SLOW — see below.
+#   -s         also split into stems (BS-Roformer-SW through audio-separator),
+#              then split the drums stem into kick/snare/toms/hh/ride/crash
+#              (MDX23C-DrumSep, also audio-separator). The drum pass is on by
+#              default and SLOW — see below.
 #   -D         --no-drums: stop at the four stems, skip the drum pass.
 #   -d         the drum pass, implying -s. Kept for scripts that pass it.
-#   -m MODEL   demucs model. Default htdemucs_6s — see the note below.
+#   -m MODEL   stem model. Default bs-roformer-sw — see the note below.
 #   -f         force: redo every stage even if its output is already there.
 #
-#   Models: htdemucs_6s (default, 6 stems) | htdemucs_ft | mdx_extra | htdemucs
+#   Models: bs-roformer-sw (default, 6 stems, audio-separator)
+#           | htdemucs_6s | htdemucs_ft | mdx_extra | htdemucs (demucs)
+#
+#   ROADIE_MODEL_DIR   where audio-separator keeps its models. Default
+#              ~/.cache/audio-separator-models (its own default is /tmp, which
+#              a reboot empties and which would re-download 2.9 GB). A model
+#              not in it is downloaded first: BS-Roformer-SW is ~700 MB.
 #
 # Re-running is cheap: each of the three stages (download, separate, drumsep) is
 # skipped when its output already exists, so re-running -s on an earlier -D grab
 # only runs the drum pass. The title is resolved from metadata BEFORE downloading so
 # we know what to look for on disk — one cheap API call.
-# Granularity is per STAGE, not per stem: demucs emits all its stems in a single
+# Granularity is per STAGE, not per stem: a model emits all its stems in a single
 # forward pass, so one missing stem re-runs that whole separation.
 #
-# Why htdemucs_6s, for deep/melodic house. NOTE: an earlier version of this
-# comment claimed stock htdemucs emits a SILENT bass stem (-72.4 dB) and that the
-# SDR leaderboard is inverted here. That came from ONE 60s window and does not
-# survive sampling: across 5 windows of the same set all four models have medians
-# within 0.5 dB (3.7-4.2 dB bass deficit), and window choice alone swings results
-# by up to 26 dB. What replicates is narrower — in bass-SPARSE passages htdemucs
-# lands 19-29 dB down while htdemucs_6s is 9-12 dB; where the low end is strong
-# they are identical. So 6s is kept for being never-worse and better when bass
-# thins out. Re-measure with benchmark.py --samples 5, never on one excerpt.
+# Why BS-Roformer-SW. Scored against the true stems of one remix pack (Rodriguez
+# Jr. "Synthwave #1": 30 stems summed to a mix; studies/06-separation-benchmark),
+# SI-SDR in dB, BS-Roformer-SW against htdemucs_6s:
+#   kick 19.3 vs 17.0   snare 7.1 vs 6.4   bass 5.7 vs 3.7   synths -0.4 vs -1.7
+#   drums 18.8 vs 16.4  hats 1.6 vs 1.8 (even)
+# and it wins 86-99% of the active bars on kick, snare, bass and synths. The
+# synths stem carries half the bass it did (15.0% against 29.9% of its energy).
+# That is ONE track, a remix pack with no master bus, so easier than a rip: read
+# the margins as a direction, not a constant. Cost: on an M3 Pro the separation
+# runs on the GPU (MPS) at roughly 2.2x realtime, and the drum pass is the same
+# as before; see ~/.omc/reports/studies-separation-benchmark/default-switch-*.md
+# for the end-to-end times against htdemucs_6s.
 #
-# htdemucs_6s also emits `piano`/`guitar`, but on synth-based house those
+# History of the old default, kept because -m still selects it: htdemucs_6s was
+# chosen for deep/melodic house on a bass-deficit measure. Across 5 windows of one
+# set all four demucs models had medians within 0.5 dB (3.7-4.2 dB); only in
+# bass-SPARSE passages did htdemucs lose (19-29 dB down against 9-12 for 6s).
+# Window choice alone swings results by up to 26 dB, so re-measure with
+# benchmark.py --samples 5 (or --truth), never on one excerpt.
+#
+# Both 6-stem models emit `piano`/`guitar`, but on synth-based house those
 # measured as the SAME spectral contour as `other` at lower level —
 # fragmentation, not separation. So they are merged back with `other` into a
 # single `synths.wav` (float32, see the note at the merge) and deleted. Net
@@ -53,8 +70,9 @@
 #
 # Stems are FLAC (lossless, ~57% smaller, Live imports them fine); synths.wav is
 # the one exception and must stay float32 WAV, since the three merged inputs sum
-# 0.016 dB past full scale and FLAC has no float format. The mixed extensions are
-# deliberate. --overlap is left at demucs's 0.25 default.
+# past full scale and FLAC has no float format. The mixed extensions are
+# deliberate. BS-Roformer-SW stems come out at the working copy's 24 bits;
+# demucs's are 16-bit. --overlap is left at demucs's 0.25 default.
 #
 # -d runs at ~1.3x realtime (vs ~14.5x for demucs), so a 9-minute set costs ~7
 # minutes for the drum pass alone. It is on by default anyway (-D skips it):
@@ -70,10 +88,11 @@
 #
 #   yt2stems.sh URL -s -o "<your set> Project/Samples/Imported"
 #
-# Install:  uv tool install demucs --with numpy
-#           uv tool install "audio-separator[cpu]"      # only needed for -d
-#   ^ neither declares its deps fully: demucs 4.1.0 omits numpy, and
-#     audio-separator needs the [cpu] extra for onnxruntime. Both install
+# Install:  uv tool install "audio-separator[cpu]"      # always needed
+#           uv tool install demucs --with numpy         # only for -m htdemucs*, mdx_extra
+#   ^ neither declares its deps fully: audio-separator needs the [cpu] extra
+#     for onnxruntime (the extra still uses the Mac's GPU: its log says "setting
+#     Torch device to MPS"), and demucs 4.1.0 omits numpy. Both install
 #     "successfully" and then die on import without these.
 
 set -euo pipefail
@@ -139,8 +158,10 @@ detect_bpm () {
 }
 
 DRUMSEP_MODEL="MDX23C-DrumSep-aufr33-jarredou.ckpt"
+BSR_CKPT="BS-Roformer-SW.ckpt"
+MODEL_DIR="${ROADIE_MODEL_DIR:-$HOME/.cache/audio-separator-models}"
 DRUM_PARTS=(kick snare toms hh ride crash)
-URL="" SRCFILE="" OUTDIR="" BY_ARTIST=0 STEMS=0 DRUMS=1 FORCE=0 MODEL="htdemucs_6s"
+URL="" SRCFILE="" OUTDIR="" BY_ARTIST=0 STEMS=0 DRUMS=1 FORCE=0 MODEL="bs-roformer-sw"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -168,9 +189,14 @@ command -v ffmpeg >/dev/null || { echo "missing: ffmpeg" >&2; exit 1; }
 if [[ -z "$SRCFILE" ]]; then
   command -v yt-dlp >/dev/null || { echo "missing: yt-dlp" >&2; exit 1; }
 fi
-# Check up front, not after a 9-minute download.
-if [[ $STEMS -eq 1 ]] && ! command -v demucs >/dev/null; then
-  echo "missing: demucs — uv tool install demucs --with numpy" >&2; exit 1
+# Check up front, not after a 9-minute download. demucs only when a demucs
+# model is chosen; audio-separator for the default model and for the drum pass.
+USE_DEMUCS=0; [[ "$MODEL" == "bs-roformer-sw" ]] || USE_DEMUCS=1
+if [[ $STEMS -eq 1 && $USE_DEMUCS -eq 1 ]] && ! command -v demucs >/dev/null; then
+  echo "missing: demucs — uv tool install demucs --with numpy, or drop -m for the default model" >&2; exit 1
+fi
+if [[ $STEMS -eq 1 && $USE_DEMUCS -eq 0 ]] && ! command -v audio-separator >/dev/null; then
+  echo "missing: audio-separator — uv tool install \"audio-separator[cpu]\"" >&2; exit 1
 fi
 if [[ $DRUMS -eq 1 ]] && ! command -v audio-separator >/dev/null; then
   echo "missing: audio-separator — uv tool install \"audio-separator[cpu]\", or -D to skip the drum pass" >&2; exit 1
@@ -265,9 +291,9 @@ fi
 
 # ---- stage 2: stem separation -------------------------------------------
 if [[ $STEMS -eq 1 ]]; then
-  # What ends up on disk AFTER the 6s merge below — not what demucs emits.
+  # What ends up on disk AFTER the 6-stem merge below — not what the model emits.
   case "$MODEL" in
-    htdemucs_6s) WANT=(bass drums synths vocals) ;;
+    bs-roformer-sw|htdemucs_6s) WANT=(bass drums synths vocals) ;;
     *)           WANT=(bass drums other vocals) ;;
   esac
   # Stems are FLAC except the merged synths, which must stay float32 WAV — so
@@ -279,7 +305,7 @@ if [[ $STEMS -eq 1 ]]; then
   if [[ $FORCE -eq 0 && $need -eq 0 ]]; then
     echo "--- have ${#WANT[@]} $MODEL stems, skipping separation"
   else
-    # --flac without --int24, so the stems are 16-bit FLAC (PCM_16), NOT the
+    # demucs: --flac without --int24, so the stems are 16-bit FLAC (PCM_16), NOT the
     # same samples as a 24-bit WAV run: they are rounded to 16 bits. That loses
     # nothing measurable on a ~133kbps opus source off YouTube, whose noise floor
     # sits far above 16-bit's ~96 dB. ~57% smaller than WAV (a 9-min bass stem:
@@ -293,23 +319,48 @@ if [[ $STEMS -eq 1 ]]; then
     # demucs insists on writing <out>/<model>/<trackname>/*.<ext>. Send it to a
     # temp tree and lift the stems up, so they land directly in <name>_stems/ —
     # two fewer levels to dig through when dragging into Live.
-    echo "==> separating with $MODEL"
-    demucs -n "$MODEL" --flac -o "$TMP/stems" "$WAV"
+    mkdir -p "$TMP/stems"
+    if [[ $USE_DEMUCS -eq 1 ]]; then
+      echo "==> separating with $MODEL"
+      demucs -n "$MODEL" --flac -o "$TMP/stems" "$WAV"
+    else
+      # audio-separator downloads a model that is not in --model_file_dir; say
+      # so before a 700 MB fetch looks like a hang.
+      [[ -s "$MODEL_DIR/$BSR_CKPT" ]] ||
+        echo "--- $BSR_CKPT is not in $MODEL_DIR: audio-separator downloads it first (~700 MB)"
+      echo "==> separating with BS-Roformer-SW (~2x realtime on an Apple GPU)"
+      # It exits 0 even when it dies on an import, so the stems are checked
+      # below rather than its status. Its log goes to stdout; errors stay on
+      # stderr.
+      audio-separator "$WAV" -m "$BSR_CKPT" --model_file_dir "$MODEL_DIR" \
+        --output_dir="$TMP/stems" --output_format=FLAC >/dev/null
+      # It names files <input>_(bass)_BS-Roformer-SW.flac. Pull the stem out of
+      # the parens, as the drum pass does, and land it as bass.flac etc.
+      for f in "$TMP/stems"/*.flac; do
+        [[ -e "$f" ]] || continue
+        stem=$(basename "$f" | sed -n 's/.*(\([a-z]*\)).*/\1/p')
+        [[ -n "$stem" ]] && mv "$f" "$TMP/stems/$stem.flac"
+      done
+      for stem in bass drums other vocals piano guitar; do
+        [[ -s "$TMP/stems/$stem.flac" ]] ||
+          { echo "audio-separator wrote no $stem stem (see its output above)" >&2; exit 1; }
+      done
+    fi
     mkdir -p "$DEST"
     find "$TMP/stems" -type f \( -name '*.flac' -o -name '*.wav' \) -exec mv {} "$DEST/" \;
 
-    # htdemucs_6s emits piano/guitar, but on synth-based house they measured as
+    # The 6-stem models emit piano/guitar, but on synth-based house they measured as
     # the SAME spectral contour as `other` at lower level — fragmentation, not
-    # separation. Fold all three into one honest `synths` stem. Their sum lands
-    # at -19.6 dB, i.e. what the plain 4-stem model's `other` already was
-    # (-19.4 dB), so nothing is lost — we keep 6s only for its bass.
+    # separation. Fold all three into one honest `synths` stem. For htdemucs_6s
+    # their sum lands at -19.6 dB, i.e. what the plain 4-stem model's `other`
+    # already was (-19.4 dB), so nothing is lost.
     #
     # synths.wav is float32 WAV while everything else is FLAC. That mix is
-    # DELIBERATE, not an oversight: the three inputs sum to a true peak of 1.0018
-    # (0.016 dB over full scale), and FLAC has no float format — so FLAC or int
+    # DELIBERATE, not an oversight: the three inputs can sum past full scale
+    # (htdemucs_6s: true peak 1.0018, 0.016 dB over), and FLAC has no float format — so FLAC or int
     # would clip it. float32 keeps the sum exact, so synths+bass+drums+vocals
     # still reconstructs the mix.
-    if [[ "$MODEL" == "htdemucs_6s" && -s "$DEST/other.flac" ]]; then
+    if [[ ( "$MODEL" == "htdemucs_6s" || "$MODEL" == "bs-roformer-sw" ) && -s "$DEST/other.flac" ]]; then
       echo "==> merging other+piano+guitar -> synths.wav (float32)"
       ffmpeg -nostdin -loglevel error -y \
         -i "$DEST/other.flac" -i "$DEST/piano.flac" -i "$DEST/guitar.flac" \
@@ -336,7 +387,7 @@ if [[ $DRUMS -eq 1 ]]; then
     echo "==> splitting drums (slow: ~1.3x realtime)"
     # FLAC, matching the demucs stems: six WAV drum parts were 568MB of the
     # 830MB output — two thirds of the total for the least-used stems.
-    audio-separator "$DRUMSRC" -m "$DRUMSEP_MODEL" \
+    audio-separator "$DRUMSRC" -m "$DRUMSEP_MODEL" --model_file_dir "$MODEL_DIR" \
       --output_dir="$TMP/drumsep" --output_format=FLAC >/dev/null
     # audio-separator names files drums_(kick)_MDX23C-....wav — pull the part
     # out of the parens and land it as drums_kick.<ext> beside the other stems.
