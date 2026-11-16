@@ -3,7 +3,7 @@
 A drum stem from a separator holds several sounds (every hat of a track lands in `drums_hh`, a clap in
 `drums_snare`). Electronic drums are a few samples repeated on a grid, so hits that fall at the same 16ths and sound
 alike are one sound. `hit_groups` finds the hits (oneshot's hit detection), places each on the grid, groups them with
-`spectral_distance` and reports each group's pattern, level and one clean hit. Local only; needs the `listen` extra.
+`spectral_distance` and reports each group's pattern, level and one clean hit. Local only; needs numpy and soundfile (requirements.txt).
 
 Choices that are not obvious from the code:
 
@@ -88,7 +88,7 @@ Choices that are not obvious from the code:
   (the same ids in every section; the count, pattern, level, spread and clean hit are the section's own, `stability`
   is the stem's).
 - Role names are rules over a group's stem, pattern and clean-hit measurements, never recognition (`name_roles`; the
-  rules and where each number comes from are in README.md, "Drum roles"). A group is named only when it
+  rules and where each number comes from are in docs/DRUMROLES.md). A group is named only when it
   passes the eligibility rule (NAME_MIN_HITS measured hits, a measured stability of at least NAME_STABILITY, a
   separation over the grouping threshold); a group no rule fits keeps `<stem> N`, with the reason. Bleed (`mark_bleed`)
   needs three things at once: hits that coincide with a group of another stem far more often than the two patterns
@@ -133,7 +133,7 @@ CLEAN_START_DB = -40.0   # a tentative group takes assigned hits only when its m
 SEP_MEMBERS = 16         # `separation`: members of a group read...
 SEP_OTHERS = 12          # ...against this many of the nearest other group's
 
-# Role names (name_roles). The reasons for each number are in README.md, "Drum roles".
+# Role names (name_roles). The reasons for each number are in docs/DRUMROLES.md.
 NAME_MIN_HITS = TENTATIVE_N   # a group is named from at least this many measured hits (the reviewer's rule, round 2)
 NAME_STABILITY = 0.75    # ...a measured stability of at least this (Flare hh: 0.79-0.91 named, 0.13-0.69 not)
 STEP_MIN = 0.25          # a 16th is "in use" when the group plays there in this share of the own bars it was observable in (chosen: one in four)
@@ -163,7 +163,7 @@ AGREE_SHARE = 2 / 3      # ...and name only when at least this share of them rea
 NEAR_SEPARATION = 1.15   # two groups whose separation is at most this times the threshold may be one sound...
 SAME_PATTERN = 0.8       # ...when the cosine of the sets of 16ths they play at (one hit is enough) is at least this
 
-# Bleed (mark_bleed). Reasons in README.md, "Drum roles".
+# Bleed (mark_bleed). Reasons in docs/DRUMROLES.md.
 COINCIDE_S = 0.025       # two hits of different stems are one event when their onsets are this close (the reviews' reading)
 BLEED_RATE = 0.7         # a group is bleed only when at least this share of its hits coincide with the other group's...
 BLEED_MARGIN = 0.25      # ...by this much more than the two patterns give by chance...
@@ -1035,7 +1035,7 @@ def _close_alike(a: dict, b: dict, ua: dict, ub: dict, threshold: float) -> bool
 
 def name_roles(result: dict, stem_kind: str | None, bleed: dict | None = None) -> dict:
     """A role name for each group of one stem's `hit_groups` result, by rule (never recognition; the rules and the source
-    of each number are in README.md, "Drum roles"). `stem_kind` is "hh", "snare", "toms", "kick" or anything
+    of each number are in docs/DRUMROLES.md). `stem_kind` is "hh", "snare", "toms", "kick" or anything
     else (every group then stays neutral). `bleed` is that stem's entry of `mark_bleed`'s answer: a group marked bleed has
     no role. `result` is not changed; sections are not named (they carry the stem's group ids).
 

@@ -142,8 +142,8 @@ clean hit before trusting it.
 
 | Stem | Name | Rule |
 |---|---|---|
-| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14; at least 3 of those 4 known and in use; at least 2 hits a bar on them |
-| hh | `hh 16th` | at least 6 of the 8 odd 16ths known and in use; at least 4 hits a bar on them |
+| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14; at least 3 of those 4 known, at most 1 of the known ones unused; at least 2 hits a bar on them |
+| hh | `hh 16th` | at least 6 of the 8 odd 16ths known, at most 2 of the known ones unused; at least 4 hits a bar on them |
 | hh | `hh open` | neither pattern, and the members fall 20 dB in 140 ms or more |
 | snare | `rim` | the members fall 20 dB in under 30 ms |
 | snare | `snare` | not a rim; the body's noise share over -12.0 dB and at most -1.0 dB |
@@ -167,9 +167,10 @@ pairs and clean hits within 1.5. A group that fails against every single group
 of a stem is also tested against the union of that stem's unmarked groups, never
 on coincidence alone.
 
-The numbers come from 108 role-sorted one-shots and the Flare replica; the
-derivation of each is in Sideman's `docs/CONVENTIONS.md`, "Drum roles", on the
-unmerged branch `feat/sideman-drum-roles` (`f877340`).
+The numbers come from 108 role-sorted one-shots and the Flare replica. Where each
+comes from, and the known misnames (a rim rule that also names some hats, "tom" meaning
+"pitched, in the toms stem", what bleed cannot catch), are in
+[`docs/DRUMROLES.md`](docs/DRUMROLES.md).
 
 ## Configuration
 

@@ -1,6 +1,6 @@
 """roadie_analysis.drumroles.hit_groups on synthetic drum stems at 124 BPM whose answers follow from how they are built.
 
-Copied from Sideman's tests/test_drumroles.py (branch feat/sideman-drum-roles, f877340); only the imports differ.
+Copied from Sideman's tests/test_drumroles.py (branch feat/sideman-drum-roles, f877340); only the imports and this docstring differ.
 Tests that take over 6 s are marked `slow`: `-m "not slow"` leaves them out, a plain run includes them.
 
 Conventions used below: bar 0 starts at T0; a 16th is 60 / 124 / 4 s; step 0 is the downbeat, 4 / 8 / 12 are the other
