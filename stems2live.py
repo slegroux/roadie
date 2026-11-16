@@ -18,6 +18,8 @@ client, rather than going through the MCP server, so it works from a plain shell
 The bridge is generic: instead of one command per feature it exposes the Live
 Object Model itself, so every call here is a `get`/`set`/`call`/`count` against
 a space-separated LOM path such as `live_set tracks 3 arrangement_clips 0`.
+They go out grouped, many to a `get_batch` or `transaction` request, because a
+request costs Live the same 400 ms whatever it carries (see live_batch).
 
 One constraint comes from Live itself, not from this script: its Object Model
 exposes no track reordering, so "order" here means which stem is assigned to
@@ -54,6 +56,8 @@ except ModuleNotFoundError as _e:
     if (_e.name or "").split(".")[0] != "sideman":
         raise
     sys.exit("sideman is not installed in .venv: run ./install.sh")
+
+import live_batch
 
 PORT = 9878
 LOM_TIMEOUT = 120.0
@@ -146,6 +150,88 @@ def lom_count(path, child):
     return r["result"]["count"]
 
 
+# Many operations in few requests: see live_batch for what may share a request and why. Each
+# helper hands back the envelope `lom` would have returned for every op sent alone, so the
+# callers branch and print exactly as they did. A read request that fails as a whole fails
+# every read it carried, with its envelope; a write request that goes unanswered ends the run.
+
+def _envelope(entry):
+    """One op's entry in a transaction's results, as the envelope of that op sent alone."""
+    if entry.get("ok"):
+        return {"ok": True, "result": entry.get("result")}
+    t, m = live_batch.split_error(entry.get("error"))
+    return {"ok": False, "error": {"type": t, "message": m}}
+
+
+def lom_reads(specs):
+    """Read every {path, property} in `specs`: one envelope each, in order, as `lom("get")` gives.
+
+    `get_batch` never fails as a whole, so an unreadable property costs only its own entry.
+    """
+    out = []
+    for chunk in live_batch.pack([dict(s, op="get") for s in specs]):
+        r = lom("get_batch", specs=[{"path": s["path"], "property": s["property"]}
+                                    for s in chunk])
+        if not r.get("ok"):
+            out.extend([r] * len(chunk))
+            continue
+        for e in r["result"]["results"]:
+            if e.get("ok"):
+                out.append({"ok": True, "result": {k: v for k, v in e.items() if k != "ok"}})
+            else:
+                out.append(_envelope(e))
+    return out
+
+
+def _write_batch(ops, stop_on_error):
+    """One `transaction`. A reply that never came, a closed connection, or Live's own Timeout
+    reply ends the run (live_batch.StillRunning): Live keeps running a task it gave up waiting
+    on, so these changes may still land, and none of them can be reported as not made."""
+    try:
+        r = lom("transaction", ops=ops, stop_on_error=stop_on_error, rollback_on_error=False)
+    except (RuntimeError, TimeoutError, ConnectionResetError, BrokenPipeError) as e:
+        raise live_batch.StillRunning(str(e))
+    if not r.get("ok") and r["error"].get("type") == "Timeout":
+        raise live_batch.StillRunning(lom_err(r))
+    return r
+
+
+def lom_ops(ops):
+    """Run sets and calls in order, none stopping another: one envelope each.
+
+    Every request is one `transaction`, so ONE undo step. `live_batch.seq` nests ops that stop at
+    their first failure; `seq_results` unpacks its envelope.
+    """
+    out = []
+    for chunk in live_batch.pack(ops):
+        r = _write_batch(chunk, False)
+        if not r.get("ok"):
+            out.extend([r] * len(chunk))
+            continue
+        out.extend(_envelope(e) for e in r["result"]["results"])
+    return out
+
+
+def lom_steps(ops):
+    """Run ops in order and stop at the first that fails. Envelopes of the ops that ran; when one
+    failed it is the last."""
+    out = []
+    for chunk in live_batch.pack(ops):
+        r = _write_batch(chunk, True)
+        out.extend([r] if not r.get("ok")
+                   else [_envelope(e) for e in r["result"]["results"]])
+        if not out[-1].get("ok"):
+            break
+    return out
+
+
+def seq_results(env):
+    """The envelopes of the ops of a `live_batch.seq` that ran, in order."""
+    if not env.get("ok"):
+        return [env]
+    return [_envelope(e) for e in env["result"]["results"]]
+
+
 def probe_bridge():
     """Confirm the bridge answers and knows `warp_markers_set`. Returns whether
     the warp op is available.
@@ -175,22 +261,62 @@ def probe_bridge():
     return True
 
 
-def arrangement_clips(track_index):
-    """[(index, start_time, end_time)] for a track's arrangement clips.
+# Clips a track is read for before its count is known. A fresh track has one, a re-run at
+# another --start-bar two; reads past the end fail on their own and change nothing.
+CLIPS_READ_AHEAD = 4
+
+
+def arrangement_clips(track_indices):
+    """{track index: [(index, start_time, end_time)]} for each track's arrangement clips, or
+    the RuntimeError that stopped reading that track.
 
     ARRANGEMENT CLIPS ARE INDEXED BY TIME, NOT BY CREATION ORDER. `end_time` is
     read best-effort and comes back None if Live will not give it — it is only
     used to describe leftovers in a message, never to decide anything.
+
+    One request for every track: the clip list (its length is the count) and the times of the
+    first CLIPS_READ_AHEAD clips; a second only for a track with more clips than that.
     """
-    out = []
-    for i in range(lom_count("live_set tracks %d" % track_index,
-                             "arrangement_clips")):
-        p = "live_set tracks %d arrangement_clips %d" % (track_index, i)
-        try:
-            end = float(lom_get(p, "end_time"))
-        except RuntimeError:
-            end = None
-        out.append((i, float(lom_get(p, "start_time")), end))
+    def times(ti, i):
+        p = "live_set tracks %d arrangement_clips %d" % (ti, i)
+        return [{"path": p, "property": "end_time"}, {"path": p, "property": "start_time"}]
+
+    specs = []
+    for ti in track_indices:
+        specs.append({"path": "live_set tracks %d" % ti, "property": "arrangement_clips"})
+        for i in range(CLIPS_READ_AHEAD):
+            specs += times(ti, i)
+    envs = iter(lom_reads(specs))
+    counts, got = {}, {}
+    for ti in track_indices:
+        vec = next(envs)
+        got[ti] = [(next(envs), next(envs)) for _ in range(CLIPS_READ_AHEAD)]
+        if not vec.get("ok"):
+            counts[ti] = RuntimeError("count live_set tracks %d.arrangement_clips: %s"
+                                      % (ti, lom_err(vec)))
+        else:
+            counts[ti] = live_batch.vector_len(vec["result"]["value"])
+    more = [(ti, i) for ti in track_indices if not isinstance(counts[ti], Exception)
+            for i in range(CLIPS_READ_AHEAD, counts[ti])]
+    envs = iter(lom_reads([s for ti, i in more for s in times(ti, i)]))
+    for ti, _i in more:
+        got[ti].append((next(envs), next(envs)))
+
+    out = {}
+    for ti in track_indices:
+        if isinstance(counts[ti], Exception):
+            out[ti] = counts[ti]
+            continue
+        clips = []
+        for i in range(counts[ti]):
+            p = "live_set tracks %d arrangement_clips %d" % (ti, i)
+            end_r, start_r = got[ti][i]
+            end = float(end_r["result"]["value"]) if end_r.get("ok") else None
+            if not start_r.get("ok"):
+                clips = RuntimeError("get %s.start_time: %s" % (p, lom_err(start_r)))
+                break
+            clips.append((i, float(start_r["result"]["value"]), end))
+        out[ti] = clips
     return out
 
 
@@ -238,23 +364,17 @@ def headroom_arg(text):
     return db
 
 
-def set_track_headroom(track_index, db):
-    """Pull one track's fader down by `db`. Returns (ok, detail).
+def track_headroom_op(track_index, db):
+    """The set that pulls one track's fader down by `db`. Raises ValueError past the
+    measured range (see db_to_fader).
 
     Applied per stem track rather than to the master on purpose: the point is to
     leave YOUR faders reading near unity while the SUM has room, so subsequent
     mix moves are relative to a sane starting point. Pulling the master down
     instead would leave every stem fader at unity and hide the headroom.
     """
-    try:
-        value = db_to_fader(db)
-    except ValueError as e:
-        return False, str(e)
-    path = "live_set tracks %d mixer_device volume" % track_index
-    r = lom("set", path=path, property="value", value=value)
-    if not r.get("ok"):
-        return False, lom_err(r)
-    return True, "%.1f dB" % db
+    return {"op": "set", "path": "live_set tracks %d mixer_device volume" % track_index,
+            "property": "value", "value": db_to_fader(db)}
 
 
 def write_energy_map(notes, rows, sections, start_beat, name="ENERGY MAP",
@@ -281,33 +401,47 @@ def write_energy_map(notes, rows, sections, start_beat, name="ENERGY MAP",
     if shift_beats:
         notes = [dict(n, start_time=max(0.0, float(n["start_time"]) + shift_beats))
                  for n in notes]
-    # Highest index first, so deleting one does not shift the ones still to check.
-    for i in reversed(range(lom_count("live_set", "tracks"))):
-        r = lom("get", path="live_set tracks %d" % i, property="name")
-        if r.get("ok") and r["result"]["value"] == name:
-            d = lom("call", path="live_set", function="delete_track", args=[i])
-            if not d.get("ok"):
-                print("energy map: could not replace the existing track %d: %s"
-                      % (i, lom_err(d)))
-                return
+    # Every name in one read; the deletes highest index first, so deleting one does not shift
+    # the ones still to delete. A track's name does not change when a track above it goes, so
+    # reading them all before any delete finds the same tracks the one-at-a-time loop did.
+    n = lom_count("live_set", "tracks")
+    names = lom_reads([{"path": "live_set tracks %d" % i, "property": "name"}
+                       for i in range(n)])
+    doomed = [i for i in reversed(range(n))
+              if names[i].get("ok") and names[i]["result"]["value"] == name]
+    deleted = lom_steps([{"op": "call", "path": "live_set", "function": "delete_track",
+                          "args": [i]} for i in doomed])
+    if deleted and not deleted[-1].get("ok"):
+        print("energy map: could not replace the existing track %d: %s"
+              % (doomed[len(deleted) - 1], lom_err(deleted[-1])))
+        return
     r = lom("call", path="live_set", function="create_midi_track", args=[0])
     if not r.get("ok"):
         print("energy map: could not create the track: %s" % lom_err(r))
         return
-    lom("set", path="live_set tracks 0", property="name", value=name)
 
+    named = {"op": "set", "path": "live_set tracks 0", "property": "name", "value": name}
     # Span the whole arrangement so every section has somewhere to live.
-    last = sections[-1]
-    length = float(last["beat"]) + 64.0
-    r = lom("call", path="live_set tracks 0", function="create_midi_clip",
-            args=[float(start_beat), length])
+    try:
+        last = sections[-1]
+        length = float(last["beat"]) + 64.0
+    except Exception:
+        lom_ops([named])         # a bad section list raises after the naming, as it always did
+        raise
+    # The new track is named and given its clip in the request AFTER the one that made it, and
+    # the clip is named and filled in the one after that: neither is addressed by index in the
+    # request that created it.
+    _named, r = lom_ops([
+        named,
+        {"op": "call", "path": "live_set tracks 0", "function": "create_midi_clip",
+         "args": [float(start_beat), length]}])
     if not r.get("ok"):
         print("energy map: could not create the clip: %s" % lom_err(r))
         return
     clip = "live_set tracks 0 arrangement_clips 0"
-    lom("set", path=clip, property="name", value="arrangement energy")
-
-    r = lom("notes_add", path=clip, notes=notes)
+    _named, r = lom_ops([
+        {"op": "set", "path": clip, "property": "name", "value": "arrangement energy"},
+        {"op": "notes_add", "path": clip, "notes": notes}])
     if not r.get("ok"):
         print("energy map: notes rejected: %s" % lom_err(r))
         return
@@ -350,16 +484,19 @@ def arrange_stems(stems, cent):
     return kick + bass + kit + rest
 
 
-def is_audio_track(track_index):
-    """Can this track hold an audio clip?
+def is_audio_track(reply):
+    """Can this track hold an audio clip? `reply` is its `has_audio_input` read.
 
     `has_audio_input` is the property Live exposes for it; a MIDI track answers
     False and raises nothing, so a missing/failed read is treated as "not safe
     to use" rather than assumed audio.
     """
-    r = lom("get", path="live_set tracks %d" % track_index,
-            property="has_audio_input")
-    return bool(r.get("ok")) and bool(r["result"]["value"])
+    return bool(reply.get("ok")) and bool(reply["result"]["value"])
+
+
+# Tracks read for their type before the count is known, past the ones a load needs: a few MIDI
+# tracks in the way cost no second request.
+TRACKS_READ_AHEAD = 8
 
 
 def audio_track_targets(first_track, count):
@@ -373,13 +510,28 @@ def audio_track_targets(first_track, count):
     a different question and gives the wrong answer whenever a Set mixes types:
     a Set with plenty of tracks, four of them MIDI, satisfied the count and then
     failed on every MIDI one — after renaming it.
+
+    One request reads the track list (its length is the count) and the type of
+    the first `count + TRACKS_READ_AHEAD` candidates; a second reads the rest
+    only if those were not enough. Reading past the point where enough are found,
+    or past the last track, changes nothing.
     """
-    total = lom_count("live_set", "tracks")
+    ahead = first_track + count + TRACKS_READ_AHEAD
+    envs = lom_reads([{"path": "live_set", "property": "tracks"}]
+                     + [{"path": "live_set tracks %d" % i, "property": "has_audio_input"}
+                        for i in range(first_track, ahead)])
+    if not envs[0].get("ok"):
+        raise RuntimeError("count live_set.tracks: %s" % lom_err(envs[0]))
+    total = live_batch.vector_len(envs[0]["result"]["value"])
+    kinds = envs[1:1 + max(0, min(total, ahead) - first_track)]
+    if total > ahead and sum(map(is_audio_track, kinds)) < count:
+        kinds += lom_reads([{"path": "live_set tracks %d" % i, "property": "has_audio_input"}
+                            for i in range(ahead, total)])
     targets, skipped = [], []
-    for i in range(first_track, total):
+    for i, kind in zip(range(first_track, total), kinds):
         if len(targets) == count:
             break
-        (targets if is_audio_track(i) else skipped).append(i)
+        (targets if is_audio_track(kind) else skipped).append(i)
 
     if skipped:
         print("skipping %d non-audio track%s at %s — they cannot hold audio "
@@ -391,12 +543,14 @@ def audio_track_targets(first_track, count):
     if missing > 0:
         print("creating %d audio track%s (set has %d)"
               % (missing, "" if missing == 1 else "s", total))
-        for _ in range(missing):
-            r = lom("call", path="live_set", function="create_audio_track",
-                    args=[-1])
-            if not r.get("ok"):
-                sys.exit("create_audio_track failed: %s" % lom_err(r))
-            targets.append(lom_count("live_set", "tracks") - 1)
+        # All of them in one request, stopping at the first failure as the one-at-a-time loop
+        # did. Index -1 appends, so they land at `total` onwards: the indices the loop's
+        # count-minus-one after each create gave.
+        made = lom_steps([{"op": "call", "path": "live_set",
+                           "function": "create_audio_track", "args": [-1]}] * missing)
+        if not made[-1].get("ok"):
+            sys.exit("create_audio_track failed: %s" % lom_err(made[-1]))
+        targets.extend(range(total, total + missing))
     return targets
 
 
@@ -424,8 +578,15 @@ def find_placed_clip(clips, position, tol=1e-4):
     return None
 
 
-def apply_warp_map(track_index, clip_index, markers):
-    """Write a warp map to a clip. Returns (state, detail) for the caller to print.
+def warp_map_op(track_index, clip_index, markers):
+    """The op that writes a warp map to a clip; warp_outcome reads its reply."""
+    return {"op": "warp_markers_set",
+            "path": "live_set tracks %d arrangement_clips %d" % (track_index, clip_index),
+            "markers": markers}
+
+
+def warp_outcome(r):
+    """A warp map write's reply as (state, detail) for the caller to print.
 
     `state` is "ok", "unsupported", or "failed", and the distinction matters
     because only one of the three is worth aborting the warp step over:
@@ -444,10 +605,6 @@ def apply_warp_map(track_index, clip_index, markers):
     audio clip carries a shadow marker encoding its detected tempo, and Live
     refuses to remove it; the bridge counts that refusal instead of aborting.
     """
-    r = lom("warp_markers_set",
-            path="live_set tracks %d arrangement_clips %d" % (track_index,
-                                                              clip_index),
-            markers=markers)
     if r.get("ok"):
         res = r.get("result") or {}
         return "ok", ("warp %d markers (+%d -%d, %d refused)"
@@ -550,8 +707,9 @@ def sample_time_to_beats(sec, warp_map, period):
     return lo[0] + (sec - lo[1]) * (hi[0] - lo[0]) / span
 
 
-def trim_clip_start(track_index, clip_index, trim_sec, period, warp_map):
-    """Drop `trim_sec` of lead-in off the front of a clip. (ok, detail).
+def trim_clip_starts(clips, trim_sec, period, warp_map, units=None):
+    """Drop `trim_sec` of lead-in off the front of each (track, clip index). One
+    (ok, detail) per clip, in order.
 
     `start_marker` IS SILENTLY IGNORED UNLESS THE LOOP IS SET FIRST. Setting it
     on its own answers ok=True and reads back 0.0. The sequence that sticks is
@@ -563,32 +721,131 @@ def trim_clip_start(track_index, clip_index, trim_sec, period, warp_map):
     BEATS, and the same trim reads 0.237 or 0.4938 accordingly. `warping` is read
     off the clip rather than assumed — Live's own auto-warp-on-import can have
     turned it on behind us, and guessing wrong here is silent.
+
+    Each step below is one request for every clip, and the steps are separate
+    requests, as they were when every set was a request of its own: Live has
+    applied `looping` before any marker is written, the markers before
+    `looping` goes off, and all of it before the read-back. A clip stops at its
+    first failed step and is left out of the steps after it.
+
+    `units`, if given, gets {(track, clip): warping} for every clip trimmed, for
+    check_trim_units at the end of the run.
     """
-    cpath = "live_set tracks %d arrangement_clips %d" % (track_index, clip_index)
-    try:
-        warping = bool(lom_get(cpath, "warping"))
-    except RuntimeError as e:
-        return False, str(e)
-    value = (sample_time_to_beats(trim_sec, warp_map, period) if warping
-             else trim_sec)
-    unit = "beats" if warping else "s"
+    paths = ["live_set tracks %d arrangement_clips %d" % c for c in clips]
+    out = [None] * len(paths)
+    value, unwritten = {}, {}
 
-    for prop, val in (("looping", True), ("loop_start", value),
-                      ("start_marker", value), ("looping", False)):
-        r = lom("set", path=cpath, property=prop, value=val)
+    def in_unit(k, warping):
+        value[k] = (sample_time_to_beats(trim_sec, warp_map, period) if warping
+                    else trim_sec, "beats" if warping else "s", warping)
+
+    for k, r in enumerate(lom_reads([{"path": p, "property": "warping"} for p in paths])):
         if not r.get("ok"):
-            return False, "%s: %s" % (prop, lom_err(r))
+            out[k] = (False, "get %s.warping: %s" % (paths[k], lom_err(r)))
+            continue
+        in_unit(k, bool(r["result"]["value"]))
 
-    # Read back, because the failure this guards against is SILENT: without the
-    # loop dance above the write is accepted and the marker stays at 0.0.
+    # LIVE CAN TURN `warping` ON BEHIND US after it was read: with no warp map, a fresh clip
+    # reads unwarped, and Live's auto-warp lands once it has analysed the file, without
+    # converting the markers. Measured 2026-11-15 on a 92 s stem: the trim went in as
+    # 0.5662 s and the clip ended warped with start_marker 0.5662 beats, 0.3 s of lead-in
+    # left (the code before batching did the same and reported success). So the read-back
+    # re-reads `warping`, and a clip whose warping changed is trimmed again in the new unit;
+    # it fails only if warping changes a second time.
+    pending = sorted(value)
+    for attempt in (1, 2):
+        # (property, value) per step; None is the clip's own trim value. A set answers with
+        # the property as it reads after the write, in the same task: one that reads other
+        # than asked fails the trim at the end, but does not stop the steps, so the clip
+        # ends up as the one-set-a-request code left it.
+        for step in ((("looping", True),), (("loop_start", None), ("start_marker", None)),
+                     (("looping", False),)):
+            live = [k for k in pending if out[k] is None]
+            ops = [live_batch.seq([{"op": "set", "path": paths[k], "property": prop,
+                                    "value": value[k][0] if val is None else val}
+                                   for prop, val in step]) for k in live]
+            for k, env in zip(live, lom_ops(ops)):
+                for (prop, val), r in zip(step, seq_results(env)):
+                    if not r.get("ok"):
+                        out[k] = (False, "%s: %s" % (prop, lom_err(r)))
+                        break
+                    asked, got = value[k][0] if val is None else val, r["result"].get("value")
+                    if k not in unwritten and not _took(asked, got):
+                        unwritten[k] = ("%s did not take — asked %s, reads %s"
+                                        % (prop, _shown(asked, value[k][1]),
+                                           _shown(got, value[k][1])))
+
+        # Read back, because the failure this guards against is SILENT: without the
+        # loop dance above the write is accepted and the marker stays at 0.0.
+        live = [k for k in pending if out[k] is None]
+        backs = iter(lom_reads([{"path": paths[k], "property": prop} for k in live
+                                for prop in ("start_marker", "warping")]))
+        pending = []
+        for k in live:
+            r, w = next(backs), next(backs)
+            if not r.get("ok"):
+                out[k] = (False, "get %s.start_marker: %s" % (paths[k], lom_err(r)))
+                continue
+            got = float(r["result"]["value"])
+            v, unit, warping = value[k]
+            if not w.get("ok"):
+                # Without it the trim's unit is unknown: a clip Live warped since the first
+                # read would pass the marker check below in the wrong unit.
+                out[k] = (False, "cannot tell the trim's unit: get %s.warping: %s"
+                          % (paths[k], lom_err(w)))
+            elif bool(w["result"]["value"]) != warping:
+                if attempt == 1:
+                    in_unit(k, not warping)
+                    unwritten.pop(k, None)
+                    pending.append(k)
+                else:
+                    out[k] = (False, "warping changed again, to %s, after the trim was "
+                                     "redone in %s" % (not warping,
+                                                       "beats" if warping else "seconds"))
+            elif abs(got - v) > 1e-3:
+                out[k] = (False, "start_marker did not take — asked %.4f %s, reads %.4f"
+                          % (v, unit, got))
+            elif k in unwritten:
+                out[k] = (False, unwritten[k])
+            else:
+                out[k] = (True, "trim %.4f %s" % (v, unit))
+                if units is not None:
+                    units[clips[k]] = warping
+        if not pending:
+            break
+    return out
+
+
+def check_trim_units(units):
+    """Auto-warp can land after the trim's read-back too, on a long stem. Re-read `warping`
+    on every trimmed clip, once, at the end of the run (one request), and list the clips
+    whose trim now sits in the wrong unit. Returns the warning lines; [] when none."""
+    if not units:
+        return []
+    clips = sorted(units)
+    lines = []
+    for (ti, ci), r in zip(clips, lom_reads([{"path": "live_set tracks %d arrangement_clips %d"
+                                               % c, "property": "warping"} for c in clips])):
+        if r.get("ok") and bool(r["result"]["value"]) != units[(ti, ci)]:
+            lines.append("  track %-3d warping turned %s after the trim — its start marker is "
+                         "in %s; re-run the load"
+                         % (ti, "on" if not units[(ti, ci)] else "off",
+                            "beats" if units[(ti, ci)] else "seconds"))
+    return lines
+
+
+def _took(asked, got):
+    """Does a property read `got` after `asked` was written to it?"""
+    if isinstance(asked, bool) or not isinstance(asked, (int, float)):
+        return got == asked
     try:
-        got = float(lom_get(cpath, "start_marker"))
-    except RuntimeError as e:
-        return False, str(e)
-    if abs(got - value) > 1e-3:
-        return False, ("start_marker did not take — asked %.4f %s, reads %.4f"
-                       % (value, unit, got))
-    return True, "trim %.4f %s" % (value, unit)
+        return abs(float(got) - asked) <= 1e-3
+    except (TypeError, ValueError):
+        return False
+
+
+def _shown(v, unit):
+    return "%.4f %s" % (v, unit) if isinstance(v, float) else str(v)
 
 
 def settle(time):
@@ -629,21 +886,38 @@ def stop_transport():
     return True
 
 
-def cue_point_list():
-    """Current locators, in Live's own order, as {index, time, name} dicts."""
-    try:
-        n = lom_count("live_set", "cue_points")
-    except RuntimeError:
-        return []
-    out = []
-    for i in range(n):
+# Locators read before their count is known: a Set with a locator per section has about ten.
+CUES_READ_AHEAD = 16
+
+
+def cue_point_list(*specs):
+    """Current locators, in Live's own order, as {index, time, name} dicts.
+
+    One request, the list and the first CUES_READ_AHEAD locators' time and name
+    together (a second only past that). It is only ever sent in a request of its
+    own after a play-head move or a toggle, as every read of it always was.
+    With `specs` those reads go in the same request, ahead of the list, and
+    (their envelopes, the locators) comes back.
+    """
+    def fields(i):
         p = "live_set cue_points %d" % i
-        try:
-            out.append({"index": i, "time": float(lom_get(p, "time")),
-                        "name": lom_get(p, "name")})
-        except RuntimeError:
-            continue
-    return out
+        return [{"path": p, "property": "time"}, {"path": p, "property": "name"}]
+
+    head = list(specs) + [{"path": "live_set", "property": "cue_points"}]
+    for i in range(CUES_READ_AHEAD):
+        head += fields(i)
+    envs = lom_reads(head)
+    extra, vec, got = envs[:len(specs)], envs[len(specs)], envs[len(specs) + 1:]
+    out = []
+    if vec.get("ok"):
+        n = live_batch.vector_len(vec["result"]["value"])
+        got += lom_reads([s for i in range(CUES_READ_AHEAD, n) for s in fields(i)])
+        for i in range(n):
+            t, nm = got[2 * i], got[2 * i + 1]
+            if t.get("ok") and nm.get("ok"):
+                out.append({"index": i, "time": float(t["result"]["value"]),
+                            "name": nm["result"]["value"]})
+    return (extra, out) if specs else out
 
 
 def toggle_cue(time):
@@ -696,14 +970,19 @@ def create_cue_point(time, name):
     if not moved.get("ok"):
         return False, lom_err(moved)
     # Its own round trip, so Live has finished moving before anything reads the
-    # position or toggles at it.
-    actual = round(float(lom_get("live_set", "current_song_time")), 6)
+    # position or toggles at it. The locator list is read in that same request:
+    # both are reads, and nothing is sent between them.
+    (now,), cues = cue_point_list({"path": "live_set", "property": "current_song_time"})
+    if not now.get("ok"):
+        raise RuntimeError("get live_set.current_song_time: %s" % lom_err(now))
+    actual = round(float(now["result"]["value"]), 6)
 
-    here = [c for c in cue_point_list() if round(c["time"], 6) == actual]
+    here = [c for c in cues if round(c["time"], 6) == actual]
     if here:
         idx = here[0]["index"]                 # rename; do NOT toggle it away
     else:
-        before = {round(c["time"], 6) for c in cue_point_list()}
+        # The same list: it was read once, and nothing has changed it since.
+        before = {round(c["time"], 6) for c in cues}
         r = lom("call", path="live_set", function="set_or_delete_cue")
         if not r.get("ok"):
             return False, lom_err(r)
@@ -1013,99 +1292,155 @@ def main():
     warp_map = grid_info.get("warp_map") or []
     warp_state = None if warp_ok else "unsupported"
     stale = []           # tracks left carrying clips from an earlier run
+    trim_units = {}      # (track, clip) -> warping the trim was written under
 
     print("%3s  %-14s %9s   colour" % ("trk", "stem", "centroid"))
+    # THE TABLE IS BUILT IN STEPS, EACH ONE REQUEST (OR A FEW) FOR EVERY TRACK,
+    # and printed once a row has them all. A step runs for the tracks the one
+    # before it left standing, in table order, so a track that fails is reported
+    # and skipped at the same step as when each track ran start to finish. No
+    # track's ops touch another track's objects, so step N on every track before
+    # step N+1 on any leaves the Set as the track-by-track loop did.
+    rows = []
     for i, name in enumerate(order):
-        ti = targets[i]
         t = (math.log(cent[name]) - lo) / span
         r, g, b = colorsys.hsv_to_rgb(t * (240 / 360), 0.85, 1.0)
-        rgb = (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
+        rows.append({"ti": targets[i], "name": name, "lines": [],
+                     "rgb": (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)})
 
-        # NO delete step. Track.delete_clip() takes a Clip OBJECT, which no JSON
-        # argument can express, so the bridge cannot reach it. Creating a clip at
-        # the same position REPLACES the one there, but only across the span the
-        # new clip covers — place at a DIFFERENT position and the old clip's head
-        # survives in front of the new one. Hence find_placed_clip below.
-        clip = lom("call", path="live_set tracks %d" % ti,
-                   function="create_audio_clip", args=[paths[name], START])
-
-        # RENAME ONLY ONCE THE CLIP IS ON THE TRACK. The rename used to come
-        # first, so a track that could not take the audio was relabelled anyway
-        # — four of a user's MIDI tracks lost their names to stems that then
-        # failed to land. A failed placement must leave the Set as it found it.
-        if not clip.get("ok"):
-            print("%3d  %-14s  ERROR: %s — track left untouched"
-                  % (ti, name, lom_err(clip)))
-            continue
-        lom("set", path="live_set tracks %d" % ti, property="name", value=name)
-        if args.headroom:
-            ok_hr, hr_detail = set_track_headroom(ti, -abs(args.headroom))
-            if not ok_hr:
-                print("%3d  %-14s  headroom not applied: %s" % (ti, name, hr_detail))
+    # NO delete step. Track.delete_clip() takes a Clip OBJECT, which no JSON
+    # argument can express, so the bridge cannot reach it. Creating a clip at
+    # the same position REPLACES the one there, but only across the span the
+    # new clip covers — place at a DIFFERENT position and the old clip's head
+    # survives in front of the new one. Hence find_placed_clip below.
+    #
+    # RENAME ONLY ONCE THE CLIP IS ON THE TRACK. The rename used to come
+    # first, so a track that could not take the audio was relabelled anyway
+    # — four of a user's MIDI tracks lost their names to stems that then
+    # failed to land. A failed placement must leave the Set as it found it.
+    # So the name and the fader are nested after the create, and Live runs them
+    # only once it has succeeded.
+    # Rows of the table print from a finally, so whatever the steps so far found still prints
+    # when the run ends early (a refused write batch, a lost connection).
+    try:
+        ops = []
+        for row in rows:
+            ti = row["ti"]
+            after = [{"op": "set", "path": "live_set tracks %d" % ti, "property": "name",
+                      "value": row["name"]}]
+            if args.headroom:
+                try:
+                    after.append(track_headroom_op(ti, -abs(args.headroom)))
+                except ValueError as e:
+                    row["headroom_error"] = str(e)
+            ops.append(live_batch.seq([
+                {"op": "call", "path": "live_set tracks %d" % ti,
+                 "function": "create_audio_clip", "args": [paths[row["name"]], START]},
+                live_batch.seq(after, stop=False)]))
+        for row, env in zip(rows, lom_ops(ops)):
+            placed = seq_results(env)
+            row["clip"] = placed[0]
+            if not placed[0].get("ok"):
+                row["lines"].append("%3d  %-14s  ERROR: %s — track left untouched"
+                                    % (row["ti"], row["name"], lom_err(placed[0])))
+                continue
+            row["placed"] = True
+            if args.headroom:
+                hr = seq_results(placed[1])[1:]
+                detail = row.get("headroom_error") or (
+                    lom_err(hr[0]) if hr and not hr[0].get("ok") else None)
+                if detail:
+                    row["lines"].append("%3d  %-14s  headroom not applied: %s"
+                                        % (row["ti"], row["name"], detail))
 
         # Resolve the clip we just made BY ITS START TIME. Never index 0 — see
-        # find_placed_clip. Everything after this point addresses `ci`.
-        try:
-            clips = arrangement_clips(ti)
-        except RuntimeError as e:
-            print("%3d  %-14s  ERROR: could not list arrangement clips (%s) — "
-                  "colour, mute, warp and trim SKIPPED for this track"
-                  % (ti, name, e))
-            continue
-        ci = find_placed_clip(clips, START)
-        if ci is None:
-            # Not a silent fallback to 0: acting on the wrong clip is what this
-            # whole path exists to prevent.
-            print("%3d  %-14s  ERROR: no clip starts at beat %.4f (found %s) — "
-                  "colour, mute, warp and trim SKIPPED for this track"
-                  % (ti, name, START,
-                     ", ".join("%.4f" % s for _i, s, _e in clips) or "none"))
-            continue
+        # find_placed_clip. Everything after this point addresses `ci`. Read in a
+        # request after the one that placed the clips.
+        placed = [row for row in rows if row.get("placed")]
+        lists = arrangement_clips([row["ti"] for row in placed])
+        for row in placed:
+            ti, name, clips = row["ti"], row["name"], lists[row["ti"]]
+            if isinstance(clips, RuntimeError):
+                row["lines"].append("%3d  %-14s  ERROR: could not list arrangement clips (%s) — "
+                                    "colour, mute, warp and trim SKIPPED for this track"
+                                    % (ti, name, clips))
+                continue
+            ci = find_placed_clip(clips, START)
+            if ci is None:
+                # Not a silent fallback to 0: acting on the wrong clip is what this
+                # whole path exists to prevent.
+                row["lines"].append("%3d  %-14s  ERROR: no clip starts at beat %.4f (found %s) — "
+                                    "colour, mute, warp and trim SKIPPED for this track"
+                                    % (ti, name, START,
+                                       ", ".join("%.4f" % s for _i, s, _e in clips) or "none"))
+                continue
+            row["ci"], row["clips"] = ci, clips
 
-        cpath = "live_set tracks %d arrangement_clips %d" % (ti, ci)
-        col = lom("set", path=cpath, property="color", value=rgb)
-        # Colour the TRACK to match its clip. The module docstring used to say
-        # only clip colour was settable — true of the AbletonMCP bridge, which
-        # had no handler for it, and false here: LOM reaches Track.color
-        # directly (verified: 11958214 -> 16725558). Without it the track
-        # headers stay Live's default palette while the clips carry the ramp,
-        # so the frequency ordering is invisible until you look at the clips.
-        lom("set", path="live_set tracks %d" % ti, property="color", value=rgb)
-        if name in muted:
-            lom("set", path=cpath, property="muted", value=True)
-
-        # Leftovers are AUDIBLE DUPLICATE AUDIO, not a cosmetic wart: the stale
-        # clip still plays. Collected and reported loudly after the table.
-        leftovers = [(s, e) for j, s, e in clips if j != ci]
-        if leftovers:
-            stale.append((ti, name, leftovers))
-
-        # Warp only a drifting set, and stop trying after the bridge says it has
-        # never heard of the command — that answer will not change mid-run.
-        warp_note = ""
-        if warp_map and warp_state != "unsupported":
-            warp_state, detail = apply_warp_map(ti, ci, warp_map)
-            if warp_state == "ok":
-                warp_note = "  " + detail
-            elif warp_state == "unsupported":
-                warp_note = "  [no warp]"
-            else:
-                warp_note = "  [warp failed: %s]" % detail
+        found = [row for row in placed if "ci" in row]
+        ops = []
+        for row in found:
+            ti, cpath = row["ti"], "live_set tracks %d arrangement_clips %d" % (row["ti"], row["ci"])
+            # Colour the TRACK to match its clip. The module docstring used to say
+            # only clip colour was settable — true of the AbletonMCP bridge, which
+            # had no handler for it, and false here: LOM reaches Track.color
+            # directly (verified: 11958214 -> 16725558). Without it the track
+            # headers stay Live's default palette while the clips carry the ramp,
+            # so the frequency ordering is invisible until you look at the clips.
+            mine = [{"op": "set", "path": cpath, "property": "color", "value": row["rgb"]},
+                    {"op": "set", "path": "live_set tracks %d" % ti, "property": "color",
+                     "value": row["rgb"]}]
+            if row["name"] in muted:
+                mine.append({"op": "set", "path": cpath, "property": "muted", "value": True})
+            # Warp only a drifting set, and stop trying after the bridge says it has
+            # never heard of the command — that answer will not change mid-run.
+            if warp_map and warp_state != "unsupported":
+                mine.append(warp_map_op(ti, row["ci"], warp_map))
+            ops.append(live_batch.seq(mine, stop=False))
+        for row, env in zip(found, lom_ops(ops)):
+            done = seq_results(env)
+            row["col"] = done[0]
+            # Leftovers are AUDIBLE DUPLICATE AUDIO, not a cosmetic wart: the stale
+            # clip still plays. Collected and reported loudly after the table.
+            row["leftovers"] = [(s, e) for j, s, e in row["clips"] if j != row["ci"]]
+            if row["leftovers"]:
+                stale.append((row["ti"], row["name"], row["leftovers"]))
+            # A track after the one that said "unknown op" was sent the map too, and
+            # Live changed nothing for it; it reads as if it was never sent.
+            row["warp_note"] = ""
+            if warp_map and warp_state != "unsupported":
+                warp_state, detail = warp_outcome(done[-1])
+                if warp_state == "ok":
+                    row["warp_note"] = "  " + detail
+                elif warp_state == "unsupported":
+                    row["warp_note"] = "  [no warp]"
+                else:
+                    row["warp_note"] = "  [warp failed: %s]" % detail
 
         # AFTER the warp map, never before: the trim's unit is seconds on an
-        # unwarped clip and beats on a warped one, so `warping` has to have
-        # settled before trim_clip_start reads it.
-        trim_note = ""
+        # unwarped clip and beats on a warped one, so the warp op's `warping` has to
+        # be in place before trim_clip_starts reads it. Live's own auto-warp is not:
+        # it can land later (trim_clip_starts redoes the trim; check_trim_units
+        # looks once more at the end of the run).
+        for row in found:
+            row["trim_note"] = ""
         if TRIM > 0:
-            ok, detail = trim_clip_start(ti, ci, TRIM, period, warp_map)
-            trim_note = "  " + detail if ok else "  [trim failed: %s]" % detail
-
-        print("%3d  %-14s %8.0fHz   #%06X  clip=%s col=%s%s%s%s%s"
-              % (ti, name, cent[name], rgb,
-                 status(clip), status(col),
-                 "  [muted: parts present]" if name in muted else "",
-                 warp_note, trim_note,
-                 "  [+%d STALE]" % len(leftovers) if leftovers else ""))
+            trims = trim_clip_starts([(row["ti"], row["ci"]) for row in found],
+                                     TRIM, period, warp_map, trim_units)
+            for row, (ok, detail) in zip(found, trims):
+                row["trim_note"] = "  " + detail if ok else "  [trim failed: %s]" % detail
+        for row in found:
+            row["finished"] = True
+    finally:
+        for row in rows:
+            for line in row["lines"]:
+                print(line)
+            if row.get("finished"):
+                print("%3d  %-14s %8.0fHz   #%06X  clip=%s col=%s%s%s%s%s"
+                      % (row["ti"], row["name"], cent[row["name"]], row["rgb"],
+                         status(row["clip"]), status(row["col"]),
+                         "  [muted: parts present]" if row["name"] in muted else "",
+                         row["warp_note"], row["trim_note"],
+                         "  [+%d STALE]" % len(row["leftovers"]) if row["leftovers"] else ""))
 
     # STALE CLIPS ARE AUDIBLE, so this is a hard warning rather than a note. It
     # happens when a Set is re-run at a different --start-bar: the new clip
@@ -1272,6 +1607,11 @@ def main():
             # missing extra, not a reason to look like the whole run failed.
             print("session view failed (%s: %s) — the arrangement is unaffected"
                   % (type(e).__name__, e))
+
+    late = check_trim_units(trim_units)
+    if late:
+        print("\nWARNING: Live auto-warped %d clip(s) after their trim was checked:" % len(late))
+        print("\n".join(late))
 
     # After the table, so it is the last thing on screen rather than buried in
     # it. The clips are placed and usable — only the drift correction is missing.
