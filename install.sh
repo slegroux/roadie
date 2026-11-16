@@ -46,8 +46,8 @@ done
 declare -a REQ=(
   "ffmpeg|everything — conversion and all measurement"
   "yt-dlp|fetching from a URL (--file mode works without it)"
-  "demucs|stem separation (-s)"
-  "audio-separator|drum split (-d)"
+  "audio-separator|stem separation (-s: BS-Roformer-SW, the default) and the drum split"
+  "demucs|optional: only for -m htdemucs_6s, htdemucs_ft, mdx_extra or htdemucs"
   "aubiotrack|BPM detection (filenames just go untagged without it)"
   "deno|yt-dlp's JS runtime; without it YouTube extraction is deprecated and some formats vanish"
 )
@@ -55,8 +55,8 @@ declare -a REQ=(
 declare -a FIX=(
   "ffmpeg|brew install ffmpeg"
   "yt-dlp|uv tool install yt-dlp"
+  "audio-separator|uv tool install \"audio-separator[cpu]\"   # base package lacks onnxruntime and exits 0 on failure; the extra still runs on the Mac's GPU (MPS)"
   "demucs|uv tool install demucs --with numpy   # metadata omits numpy; a plain install dies on import"
-  "audio-separator|uv tool install \"audio-separator[cpu]\"   # base package lacks onnxruntime and exits 0 on failure"
   "aubiotrack|brew install aubio"
   "deno|brew install deno"
 )
@@ -67,6 +67,12 @@ for entry in "${REQ[@]}"; do
   cmd="${entry%%|*}"; why="${entry#*|}"
   if command -v "$cmd" >/dev/null 2>&1; then
     printf "  \033[32mok\033[0m    %-17s\n" "$cmd"
+  elif [[ "$why" == optional:* ]]; then
+    # Not counted as missing: the default stem model does not need it.
+    printf "  \033[33m--\033[0m    %-17s %s\n" "$cmd" "$why"
+    for f in "${FIX[@]}"; do
+      [[ "${f%%|*}" == "$cmd" ]] && printf "        %s\n" "${f#*|}"
+    done
   else
     printf "  \033[31mMISS\033[0m  %-17s needed for: %s\n" "$cmd" "$why"
     for f in "${FIX[@]}"; do
