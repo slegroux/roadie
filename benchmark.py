@@ -44,6 +44,9 @@ bench_truth.py wrote for it. Per separated stem: SI-SDR over the whole track and
 median per-bar SI-SDR over the bars where the true role plays, the level gap, the
 per-bar energy correlation, and a bleed matrix. See the functions below for the
 exact definitions. numpy and scipy are imported inside the truth functions only.
+The drum roles are scored per true drum source by bench_roles.py, and the mitigations of the
+separation (residual track, re-mask, gating, other models) by bench_mitigations.py; both read the
+manifest and the files bench_truth.py wrote.
 """
 
 import argparse, csv, json, os, re, shutil, subprocess, sys, tempfile
