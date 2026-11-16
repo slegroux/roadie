@@ -223,3 +223,18 @@ def test_corpus_mode_functions_run_without_numpy():
                         "import sys; sys.modules['numpy'] = None\nimport benchmark\nprint(benchmark.sample_offsets(100, 3, 10))"],
                        capture_output=True, text=True, cwd=__import__("os").path.dirname(__file__) or ".")
     assert r.returncode == 0, r.stderr
+
+
+def test_resolve_truth_takes_a_role_or_a_source_and_refuses_a_name_that_is_both():
+    roles, sources = {"drums_kick": "k.flac", "bass": "b.flac"}, {"kick": "ks.flac", "bass": "bs.flac"}
+    assert B.resolve_truth("drums_kick", roles, sources) == "k.flac"
+    assert B.resolve_truth("kick", roles, sources) == "ks.flac"
+    assert B.resolve_truth("nothing", roles, sources) is None
+    with pytest.raises(ValueError, match="bass"):
+        B.resolve_truth("bass", roles, sources)                                  # the role would have won without a word
+
+
+def test_scored_readings_lists_each_stem_against_its_role_then_the_readings():
+    m = {"stems": ["bass", "vocals"], "readings": {"mix": {"stem": ["bass", "vocals"], "truth": ["bass"]}, "one": {"stem": "bass", "truth": ["bass"]}}}
+    assert B.scored_readings(m, {"bass": "b.flac"}) == [("bass", ["bass"], ["bass"]), ("vocals", ["vocals"], []),
+                                                         ("mix", ["bass", "vocals"], ["bass"]), ("one", ["bass"], ["bass"])]

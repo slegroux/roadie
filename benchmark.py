@@ -486,7 +486,10 @@ def pick_stems_dir(out_dir, given):
 
 
 def resolve_truth(name, role_paths, source_paths):
-    """One name of a reading's truth: a role stem, else a drum source file."""
+    """One name of a reading's truth: a role stem, else a drum source file. A name that is both is an error: the role
+    would win without a word and the reading would score the wrong file."""
+    if name in role_paths and name in source_paths:
+        raise ValueError("%r is both a role and a drum source in the manifest: rename one" % name)
     return role_paths.get(name) or source_paths.get(name)
 
 
@@ -513,6 +516,16 @@ def true_role_paths(manifest, out_dir):
     return out
 
 
+def scored_readings(manifest, true_paths):
+    """[(label, stems, truth names)] the truth mode scores: each of the manifest's stems against its role, then its readings."""
+    scored = []
+    for stem in manifest["stems"]:
+        scored.append((stem, [stem], [stem] if stem in true_paths else []))
+    for label, rd in manifest.get("readings", {}).items():
+        scored.append((label, rd["stem"] if isinstance(rd["stem"], list) else [rd["stem"]], rd["truth"]))
+    return scored
+
+
 def truth_main(args):
     import soundfile as sf
     manifest = json.load(open(args.truth))
@@ -530,11 +543,7 @@ def truth_main(args):
     source_paths = {k: v for k, v in source_paths.items() if v}
     print("truth: %s\nstems: %s" % (truth_dir, stems_dir))
 
-    scored = []   # (label, stems, truth names)
-    for stem in manifest["stems"]:
-        scored.append((stem, [stem], [stem] if stem in true_paths else []))
-    for label, rd in manifest.get("readings", {}).items():
-        scored.append((label, rd["stem"] if isinstance(rd["stem"], list) else [rd["stem"]], rd["truth"]))
+    scored = scored_readings(manifest, true_paths)
 
     rows = {}
     for label, stems, names in scored:
