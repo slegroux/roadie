@@ -115,6 +115,62 @@ treat them as approximate. Samples are referenced by a path relative to the
 `.als` (the way Live 12 does for files outside a project), so keep the `.als`
 next to its `_stems` folder.
 
+## Drum roles
+
+`roadie_analysis/drumroles.py` lists the sounds inside one drum stem (no tool or
+command yet). `hit_groups` finds the hits (oneshot's hit detection), puts each on
+the 16th grid and groups the ones that sound alike (average linkage on
+`oneshot.spectral_distance`, threshold 1.5). `name_roles` names the groups and
+`mark_bleed` marks the ones that are another stem's sound leaking in.
+
+**A name is a rule over a group's stem, pattern and clean-hit readings, not
+recognition.** A group no rule fits keeps a neutral name (`hh 2`: stem and group
+number) with the reason. A name says "this group passed this rule"; listen to the
+clean hit before trusting it.
+
+- **Eligible to be named:** at least 4 measured hits, `stability` at least 0.75
+  (or stable by construction: no more measured hits than the 32-hit sample), and
+  `separation` over 1.5 from the nearest group of at least 4 hits.
+- **Pattern:** a 16th is *in use* when the group plays there in at least 25 % of
+  its own bars in which it could be seen. A cell is not seen when it held an
+  unmeasured on-grid hit, or lay under another hit's tail within 15 dB
+  (`RISE_DB`; 6 dB with `grid_onsets`) of the group's level. A 16th seen in
+  fewer than 4 bars is unknown and counts neither way.
+- **Members, not one hit:** the measurement rules (`hh open`, `rim`, `snare`,
+  `tom`, `kick`) read up to 8 complete members nearest the medoid and name only
+  when at least two thirds agree, from at least 3.
+
+| Stem | Name | Rule |
+|---|---|---|
+| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14; at least 3 of those 4 known and in use; at least 2 hits a bar on them |
+| hh | `hh 16th` | at least 6 of the 8 odd 16ths known and in use; at least 4 hits a bar on them |
+| hh | `hh open` | neither pattern, and the members fall 20 dB in 140 ms or more |
+| snare | `rim` | the members fall 20 dB in under 30 ms |
+| snare | `snare` | not a rim; the body's noise share over -12.0 dB and at most -1.0 dB |
+| toms | `tom` | the members are pitched; several toms are ranked `tom low` / `mid` / `high` by body pitch within the stem |
+| kick | `kick` | pitched, body at most 70 Hz |
+
+There is no `hh closed`, `clap` or `conga`: nothing measured separates them
+(closed and open hats overlap in decay; a clap's readings match a noise snare's;
+a conga reads like a high tom). Two groups with one name that play at the same
+16ths (cosine at least 0.8) and are within 1.73 (1.15 times the threshold) of
+each other are one role with variants.
+
+**Bleed** needs all three: (1) at least 70 % of the group's hits within 25 ms of
+the other group's, at least 25 points over what the patterns give by chance, at
+p at most 1 %; (2) the other group louder by at least 6 dB in at least 75 % of
+those pairs; (3) the two clean hits at most 2.0 apart. When the chance rate is
+90 % or more, the patterns cannot tell a leak from a shared part: the group is
+judged *co-located* (at least 90 % of its hits coincide) and, like a group whose
+chance over its own bars is 90 % or more, held to 12 dB louder in 90 % of the
+pairs and clean hits within 1.5. A group that fails against every single group
+of a stem is also tested against the union of that stem's unmarked groups, never
+on coincidence alone.
+
+The numbers come from 108 role-sorted one-shots and the Flare replica; the
+derivation of each is in Sideman's `docs/CONVENTIONS.md`, "Drum roles", on the
+unmerged branch `feat/sideman-drum-roles` (`f877340`).
+
 ## Configuration
 
 Roadie reads one optional file, `~/.config/roadie/config` (`$XDG_CONFIG_HOME` is
