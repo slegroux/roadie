@@ -24,6 +24,8 @@ pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ff
 
 # Writes <input>_(<stem>)_<model>.flac into --output_dir, the way audio-separator
 # does: six stems for BS-Roformer-SW, the drum parts for the DrumSep model.
+# STUB_STEMS (when set, even empty) replaces the BS-Roformer-SW stem list, to play
+# the real tool leaving out a silent stem, or writing nothing.
 AUDIO_SEPARATOR = r"""#!/bin/bash
 echo "audio-separator $*" >> "$STUB_LOG"
 in="$1"; shift
@@ -37,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 base=$(basename "${in%.*}")
 case "$model" in
-  BS-Roformer-SW.ckpt) stems="bass drums other vocals piano guitar"; tag=BS-Roformer-SW ;;
+  BS-Roformer-SW.ckpt) stems="${STUB_STEMS-bass drums other vocals piano guitar}"; tag=BS-Roformer-SW ;;
   *DrumSep*) stems="kick snare toms hh ride crash"; tag=MDX23C-DrumSep ;;
   *) echo "stub: unknown model $model" >&2; exit 1 ;;
 esac
@@ -118,8 +120,9 @@ def test_default_is_bs_roformer_sw_with_the_four_stems_and_synths(rig):
     assert r.returncode == 0, r.stdout + r.stderr
     d = stems_dir(rig)
     assert sorted(p.name for p in d.iterdir() if not p.name.endswith(".json")) == sorted(
-        ["bass.flac", "drums.flac", "vocals.flac", "synths.wav"]
+        ["bass.flac", "drums.flac", "vocals.flac", "synths.wav", ".stem-model"]
         + ["drums_%s.flac" % p for p in DRUM_PARTS])
+    assert (d / ".stem-model").read_text().strip() == "bs-roformer-sw"
     # other + piano + guitar are folded into synths.wav, float32, and deleted
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name",
                             "-of", "csv=p=0", str(d / "synths.wav")],
@@ -156,7 +159,7 @@ def test_a_missing_checkpoint_is_announced_once_before_the_download(rig, tmp_pat
     (models / "BS-Roformer-SW.ckpt").write_bytes(b"x")
     rig[0]["ROADIE_MODEL_DIR"] = str(models)
     r = split(rig, "-s", "-f")
-    assert "is not in" not in r.stdout, r.stdout
+    assert "BS-Roformer-SW.ckpt is not in" not in r.stdout, r.stdout
 
 
 def test_a_rerun_skips_both_stages(rig):
@@ -208,3 +211,137 @@ def test_demucs_is_only_required_when_a_demucs_model_is_chosen(rig):
     assert split(rig, "-s").returncode == 0
     r = split(rig, "-s", "-f", "-m", "htdemucs_6s")
     assert r.returncode != 0 and "missing: demucs" in r.stderr, r.stderr
+
+
+# --- the stem model's flags ---------------------------------------------------
+
+def test_the_stems_are_written_24_bit_and_unscaled(rig):
+    """Without --use_soundfile audio-separator rounds to int16 inside a 24-bit
+    container; at its default --normalization 0.9 the stems stop adding up to
+    the mix. Measured on a real excerpt (README), asserted here as flags."""
+    split(rig, "-s", "-D")
+    c = calls(rig)[0]
+    assert "--use_soundfile" in c and "--normalization 1.0" in c, c
+
+
+def test_a_model_name_is_case_insensitive_and_an_unknown_one_is_refused(rig):
+    r = split(rig, "-s", "-D", "-m", "BS-Roformer-SW")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(c.startswith("demucs") for c in calls(rig))
+    r = split(rig, "-s", "-D", "-m", "htdemucs_7s")
+    assert r.returncode == 2 and "unknown model" in r.stderr, r.stderr
+
+
+# --- re-running over stems another model wrote -------------------------------
+
+def test_a_model_switch_over_an_old_folder_reseparates_and_redoes_the_drum_parts(rig):
+    """A folder without .stem-model predates it, so it is Demucs. Both models
+    leave the same file names, so the file check alone would skip."""
+    assert split(rig, "-s", "-m", "htdemucs_6s").returncode == 0
+    (stems_dir(rig) / ".stem-model").unlink()
+    before = len(calls(rig))
+    r = split(rig, "-s")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "are from demucs; re-separating with bs-roformer-sw" in r.stdout, r.stdout
+    assert "skipping separation" not in r.stdout
+    new = calls(rig)[before:]
+    assert [c.split()[0] for c in new] == ["audio-separator", "audio-separator"], new
+    assert "BS-Roformer-SW.ckpt" in new[0] and "DrumSep" in new[1], new
+    assert (stems_dir(rig) / ".stem-model").read_text().strip() == "bs-roformer-sw"
+
+
+def test_a_marker_naming_another_model_reseparates_and_drops_the_old_synths(rig):
+    assert split(rig, "-s", "-D").returncode == 0
+    assert (stems_dir(rig) / "synths.wav").is_file()
+    r = split(rig, "-s", "-D", "-m", "htdemucs_ft")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipping separation" not in r.stdout, r.stdout
+    d = stems_dir(rig)
+    assert (d / "other.flac").is_file() and not (d / "synths.wav").exists()
+    assert (d / ".stem-model").read_text().strip() == "htdemucs_ft"
+
+
+def test_the_same_model_still_skips(rig):
+    split(rig, "-s", "-D")
+    r = split(rig, "-s", "-D")
+    assert "re-separating" not in r.stdout and "skipping separation" in r.stdout, r.stdout
+    assert len(calls(rig)) == 1
+
+
+def test_the_drum_parts_are_redone_when_the_stems_were(rig):
+    split(rig, "-s")
+    assert len(calls(rig)) == 2
+    r = split(rig, "-s", "-m", "htdemucs_6s")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipping drumsep" not in r.stdout, r.stdout
+    log = calls(rig)
+    assert [c.split()[0] for c in log[2:]] == ["demucs", "audio-separator"], log
+    assert "DrumSep" in log[3], log
+
+
+# --- what audio-separator leaves out -----------------------------------------
+
+def test_a_silent_vocals_stem_is_filled_with_silence_and_the_merge_runs(rig):
+    """audio-separator writes no file for a stem whose peak is under 1e-6; on
+    Synthwave BS-Roformer's vocals sit at -116 dB."""
+    rig[0]["STUB_STEMS"] = "bass drums other"
+    r = split(rig, "-s", "-D")
+    assert r.returncode == 0, r.stdout + r.stderr
+    for stem in ("vocals", "piano", "guitar"):
+        assert "no %s stem (silent)" % stem in r.stderr, r.stderr
+    d = stems_dir(rig)
+    assert (d / "synths.wav").is_file()
+    assert not (d / "piano.flac").exists()
+    dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", str(d / "vocals.flac")],
+                         capture_output=True, text=True, check=True, env=rig[0])
+    assert abs(float(dur.stdout) - 0.5) < 0.01, dur.stdout
+    assert (d / ".stem-model").is_file()
+
+
+def test_a_missing_bass_stem_fails_and_lists_what_was_written(rig):
+    rig[0]["STUB_STEMS"] = "drums other vocals"
+    r = split(rig, "-s", "-D")
+    assert r.returncode != 0
+    assert "wrote no bass stem" in r.stderr and "drums.flac" in r.stderr, r.stderr
+    assert not (stems_dir(rig) / ".stem-model").exists()
+
+
+def test_a_stub_that_writes_nothing_fails_cleanly(rig):
+    rig[0]["STUB_STEMS"] = ""
+    r = split(rig, "-s", "-D")
+    assert r.returncode != 0 and "wrote no bass stem" in r.stderr, r.stderr
+    assert not stems_dir(rig).exists()
+
+
+# --- tools and model dir ------------------------------------------------------
+
+def test_no_audio_separator_is_refused_up_front_and_points_at_demucs(rig):
+    os.remove(os.path.join(rig[0]["PATH"].split(os.pathsep)[0], "audio-separator"))
+    r = split(rig, "-s", "-D")
+    assert r.returncode != 0
+    assert "missing: audio-separator" in r.stderr and "-m htdemucs_6s -D" in r.stderr, r.stderr
+    assert calls(rig) == []
+    # and the pointer is true: demucs without the drum pass needs no audio-separator
+    assert split(rig, "-s", "-D", "-m", "htdemucs_6s").returncode == 0
+
+
+def test_model_dir_falls_back_to_audio_separators_own_env_var(rig, tmp_path):
+    rig[0]["AUDIO_SEPARATOR_MODEL_DIR"] = str(tmp_path / "theirs")
+    split(rig, "-s")
+    for c in calls(rig):
+        assert "--model_file_dir %s" % (tmp_path / "theirs") in c, c
+    rig[0]["ROADIE_MODEL_DIR"] = str(tmp_path / "ours")
+    split(rig, "-s", "-f")
+    for c in calls(rig)[2:]:
+        assert "--model_file_dir %s" % (tmp_path / "ours") in c, c
+
+
+def test_a_missing_drumsep_model_is_announced_too(rig, tmp_path):
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "BS-Roformer-SW.ckpt").write_bytes(b"x")
+    rig[0]["ROADIE_MODEL_DIR"] = str(models)
+    r = split(rig, "-s")
+    assert "MDX23C-DrumSep-aufr33-jarredou.ckpt is not in" in r.stdout, r.stdout
+    assert "BS-Roformer-SW.ckpt is not in" not in r.stdout

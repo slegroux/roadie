@@ -303,7 +303,7 @@ def test_config_tilde_expands_to_home(tmp_path):
 def test_the_drum_pass_is_on_with_stems_unless_D(tmp_path, flags, wants_drumsep):
     """audio-separator is checked up front for the drum pass; the demucs models
     need it only there (the default model needs it for the stems too, which
-    test_yt2stems covers), so -m htdemucs_6s isolates the drum-pass check and
+    test_yt2stems.test_no_audio_separator_is_refused_up_front covers), so -m htdemucs_6s isolates the drum-pass check and
     hiding it from PATH shows whether it would have."""
     bin_ = tmp_path / "fakebin"
     bin_.mkdir()

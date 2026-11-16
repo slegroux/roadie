@@ -55,7 +55,7 @@ declare -a REQ=(
 declare -a FIX=(
   "ffmpeg|brew install ffmpeg"
   "yt-dlp|uv tool install yt-dlp"
-  "audio-separator|uv tool install \"audio-separator[cpu]\"   # base package lacks onnxruntime and exits 0 on failure; the extra still runs on the Mac's GPU (MPS)"
+  "audio-separator|uv tool install \"audio-separator[cpu]==0.44.5\"   # tested at 0.44.5 (its flags and file names); base package lacks onnxruntime and exits 0 on failure; the extra still runs on the Mac's GPU (MPS)"
   "demucs|uv tool install demucs --with numpy   # metadata omits numpy; a plain install dies on import"
   "aubiotrack|brew install aubio"
   "deno|brew install deno"
