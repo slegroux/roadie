@@ -34,7 +34,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 
 | command | what it does | script |
 |---|---|---|
-| `roadie split <file\|url>` | audio → 44.1 kHz WAV → stems with `-s` → drum parts (skip with `-D`) | `yt2stems.sh` |
+| `roadie split <file\|url>` | audio → 44.1 kHz WAV → stems with `-s` (BS-Roformer-SW; `-m htdemucs_6s` for Demucs) → drum parts (skip with `-D`) | `yt2stems.sh` |
 | `roadie load <stems_dir>` | stems → the Live set that is open now | `stems2live.py` |
 | `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
@@ -247,7 +247,7 @@ roadie batch verify-sources manifest.tsv                    # exit 1 if any sour
   `alignment.json`).
   A `new` row: skip if the destination holds `.roadie-batch-ok`, the marker written only after a passing
   check; stop if free disk is under `--floor-gb` (4, exit 4); `split --file <src> -d` into
-  `<work>/<id>` (demucs temp files inside it too); `sections`; `als`; delete the 24-bit working wav;
+  `<work>/<id>` (the separator's temp files inside it too); `sections`; `als`; delete the 24-bit working wav;
   `rclone copy`, then `rclone check --one-way`, then the marker; only then delete the work dir. A step that
   fails or times out (3x duration + 10 min for the split, 15 min for the rest) marks the row `failed`
   and the run moves on. A failed upload or check keeps the work dir and stops the run (exit 3), so
@@ -316,23 +316,37 @@ See *Section locators*, *Downbeat detectors* and *Gain staging* below.
 ```bash
 brew install ffmpeg deno aubio uv
 uv tool install yt-dlp
-uv tool install demucs --with numpy
-uv tool install "audio-separator[cpu]"
+uv tool install "audio-separator[cpu]==0.44.5"
 ./install.sh
 ```
+
+`demucs` is optional now: only `-m htdemucs_6s` (and the other Demucs models)
+needs it, with `uv tool install demucs --with numpy`.
 
 `./install.sh` checks the tools above, builds `.venv` from `requirements.txt`
 (Python 3.13, via `uv`) if it does not exist yet, and symlinks `roadie` plus the
 per-script names into `~/.local/bin` (`--bin DIR` to change). `./install.sh
 --check` reports without changing anything.
 
-Three of those install flags are load-bearing and easy to get wrong:
+Four of those install details are load-bearing and easy to get wrong:
 
-- **`demucs --with numpy`** — demucs 4.1.0 omits numpy from its metadata. A plain
-  install "succeeds", then dies on `import numpy` at runtime.
-- **`audio-separator[cpu]`** — the base package doesn't pull `onnxruntime`.
+- **`audio-separator[cpu]==0.44.5`** — the pin is the version everything here was
+  tested at (its flags, its output file names, how it writes stems); a newer one may
+  work, untested. The base package doesn't pull `onnxruntime`.
   Worse, `audio-separator --list_models` **exits 0** while printing a
   `ModuleNotFoundError` traceback, so a naive exit-code check reports success.
+  Despite the name, the extra only picks the ONNX runtime: on an Apple-silicon Mac
+  the PyTorch models (BS-Roformer-SW, DrumSep) still run on the GPU, and its log
+  says `setting Torch device to MPS`.
+- **`demucs --with numpy`** (optional) — demucs 4.1.0 omits numpy from its
+  metadata. A plain install "succeeds", then dies on `import numpy` at runtime.
+- **Models** — `audio-separator` keeps them in `/tmp/audio-separator-models` by
+  default, which a reboot empties. `roadie split` points it at
+  `ROADIE_MODEL_DIR`, else `AUDIO_SEPARATOR_MODEL_DIR`, else
+  `~/.cache/audio-separator-models`. The first run downloads BS-Roformer-SW
+  (~700 MB) and the DrumSep model (~440 MB), about 1.1 GB. A DrumSep model left
+  in `/tmp` by an earlier version is not found there: it downloads once more, and a
+  line says so before it does.
 - **`deno`** — yt-dlp needs a JS runtime or YouTube extraction runs in a
   deprecated mode where some formats silently go missing. Only needed for URLs.
 
@@ -555,7 +569,78 @@ crashes.
 
 ## Why these settings
 
-### Model: `htdemucs_6s` — a safe default, for narrower reasons than first claimed
+### Model: BS-Roformer-SW, scored against true stems
+
+`roadie split -s` separates with **BS-Roformer-SW** (a six-stem BS-RoFormer, through
+`audio-separator`) and merges its `other`, `piano` and `guitar` into `synths.wav`
+exactly as `htdemucs_6s` was merged. It replaced `htdemucs_6s` on a measurement with
+ground truth: Rodriguez Jr.'s "Synthwave #1" remix pack (30 stems, summed to a mix,
+124 BPM) separated by both, each stem scored against its true role. SI-SDR in dB,
+higher is better:
+
+| stem | BS-Roformer-SW | htdemucs_6s | change |
+|---|---|---|---|
+| kick | 19.3 | 17.0 | +2.3 |
+| snare | 7.1 | 6.4 | +0.7 |
+| hats | 1.6 | 1.8 | −0.2 (even) |
+| bass | 5.7 | 3.7 | +2.0 |
+| synths | −0.4 | −1.7 | +1.3 |
+| drums | 18.8 | 16.4 | +2.4 |
+
+BS-Roformer-SW wins 86–99 % of the bars where a stem is active on kick, snare, bass
+and synths, and the bass energy left in the synths stem falls from 29.9 % to 15.0 %.
+**That is one track**, a remix pack with no master bus, so easier than a rip: read the
+margins as a direction. The scores come from `benchmark.py --truth` with
+`bench/synthwave1.json`; re-run it, with a truth file of your own, on your own
+material before trusting the size of them. Its other candidates (Mel-Band RoFormer, a
+soft-mask re-mask, a residual track, cross-stem gating) did not help. (`benchmark.py`'s
+corpus mode, without `--truth`, still separates with Demucs only, so it needs
+`demucs` installed.)
+
+**Cost, on an Apple M3 Pro (both models' timings back to back, Live open in the
+background)**: a 5:43 mix separates in 2:25 against 0:34 for `htdemucs_6s`; the drum
+pass (3:00) is unchanged, so the whole `roadie split -s` takes 5:26 against 3:35
+(+51 %). It runs on the GPU (the log says `setting Torch device to MPS`), peaks at
+about 2.3 GB resident (demucs: 2.7 GB), and scales linearly: an 11:25 mix took 10:32
+(separation 4:31, drum pass 5:47, 3.3 GB resident, no CPU fallback, no swap growth).
+
+The stems are real **24-bit** FLAC, where demucs's were 16-bit. That needs
+`--use_soundfile`: audio-separator's default writer converts every stem to 16 bits and
+only then labels the file 24-bit (checked: the low 8 bits of every sample were zero).
+Measured on a 60 s excerpt of the benchmark mix, the whole `-s` run is 52 MB against
+43 MB with the default writer: bass, drums and vocals go from 6.5 to 15.2 MB, the
+float32 `synths.wav` is 21.2 MB either way, and the drum parts (still written by the
+default writer) are 15.8 MB. That is 1.2× the disk overall and 2.3× for the three FLAC
+stems, about 470 MB for a 9-minute set. `-m htdemucs_6s` (or `htdemucs_ft`,
+`mdx_extra`, `htdemucs`) selects Demucs again.
+
+`--normalization 1.0` keeps the stems adding up to the mix. audio-separator's default
+(0.9) scales the input down to a 0.9 peak when it is louder, and then each stem on its
+own by the same rule, so the stems no longer sum to the file you gave it. On the same
+excerpt, made 1.9 dB hotter (peak 0.963), the stem sum was 0.61 dB under the input at
+the default and 0.02 dB under at 1.0; SI-SDR of the sum against the input is 32.2 dB
+either way (it ignores scale), so only the level moves. At 1.0 nothing is amplified
+and a stem is scaled only if its own peak passes full scale, so a stem that clips is
+still brought down by itself. The input is a WAV we wrote, so its peak is at most 1.0
+and it is never scaled. The drum pass keeps audio-separator's default writer and
+normalization, as it was measured.
+
+**Re-running with another model.** The stems folder holds a `.stem-model` file naming
+the model that wrote it. `-m` with a different model re-separates, redoes the drum
+parts, and prints `stems in <dir> are from <X>; re-separating with <Y>`; a folder from
+before the marker counts as Demucs. The same model skips.
+
+**A silent stem.** audio-separator writes no file for a stem whose peak is under 1e-6
+(BS-Roformer-SW's vocals on this mix sit at −116 dB). `bass`, `drums` and `other` are
+required; a missing `vocals`, `piano` or `guitar` is replaced by silence of the input's
+length, with a warning, so the merge still runs.
+
+**Not tested.** Sets of an hour or more: the longest run was 11:25 at 3.3 GB resident,
+and audio-separator suggests `--chunk_duration 600` past an hour but joins the chunks
+without a crossfade. The detected tempo of the Synthwave pack is tagged 62 bpm (half
+tempo) in both pipelines; that is a `beat_aligner` matter, left alone here.
+
+### Model: `htdemucs_6s` — the previous default, for narrower reasons than first claimed
 
 **Corrected finding.** An earlier version of this README claimed stock `htdemucs`
 emits a silent bass stem (−72.4 dB) and that the SDR leaderboard is therefore
@@ -580,16 +665,16 @@ What *does* replicate, across both overlap settings: in **bass-sparse** passages
 diverge and the ordering is stable. `htdemucs` lands 19–29 dB down; `htdemucs_6s`
 and `mdx_extra` 9–13 dB. Where the low end is strong, all four are identical.
 
-So `htdemucs_6s` is kept as the default because it is **never worse and clearly
+So `htdemucs_6s` was kept as the default because it is **never worse and clearly
 better when the bass thins out** — not because published SDR is wrong. `-m`
-picks another model.
+still picks it.
 
 **The real lesson: never benchmark an audio model on one excerpt.** Use
 `benchmark.py --samples 5`.
 
 ### The synths merge
 
-`htdemucs_6s` also emits `piano` and `guitar`. On synth-based music these measure
+`htdemucs_6s` and BS-Roformer-SW also emit `piano` and `guitar`. On synth-based music these measure
 as the *same spectral contour* as `other` at lower level — fragmentation, not
 separation:
 
@@ -598,13 +683,13 @@ other   −28.2  −23.0  −29.2  −42.5  −51.5
 piano   −33.2  −31.4  −41.8  −61.2  −78.5   <- same shape, just quieter
 ```
 
-So all three are summed back into one `synths.wav`. The merged result lands at
-−19.6 dB versus the plain 4-stem model's `other` at −19.4 dB — i.e. recombining
-recovers exactly what the simpler model gave you. `htdemucs_6s` is kept purely for
-its bass.
+So all three are summed back into one `synths.wav`. For `htdemucs_6s` the merged
+result lands at −19.6 dB versus the plain 4-stem model's `other` at −19.4 dB — i.e.
+recombining recovers exactly what the simpler model gave you (the 6-stem model was
+kept purely for its bass).
 
 Written **float32 WAV**, deliberately: the three inputs sum past full scale
-(measured true peak 1.0018, 0.016 dB over) and FLAC has no float format, so any
+(`htdemucs_6s`: measured true peak 1.0018, 0.016 dB over) and FLAC has no float format, so any
 integer format would clip. float32 keeps the sum exact, so
 `synths + bass + drums + vocals` still reconstructs the mix. It is the one WAV
 among the FLAC stems, on purpose.
@@ -630,11 +715,14 @@ the setting that table was measured against.)
 *worse* than shifts=2) was also single-window, so it demonstrates measurement noise
 rather than a property of the setting.
 
-### Output format: 16-bit FLAC stems
+### Output format: FLAC stems
 
-The source is converted to a 44.1 kHz / **24-bit** WAV working copy. demucs is
-then run with `--flac` and without `--int24`, so the stems are **16-bit** FLAC
-(`soundfile` reports `PCM_16`); `synths.wav` is the float32 exception above.
+The source is converted to a 44.1 kHz / **24-bit** WAV working copy. With the
+default model, `audio-separator --use_soundfile` writes 24-bit FLAC (it follows the
+input's depth; without the flag it rounds to 16 bits first).
+With demucs, run with `--flac` and without `--int24`, the stems are **16-bit** FLAC
+(`soundfile` reports `PCM_16`), which is what the rest of this section is about.
+`synths.wav` is the float32 exception above.
 
 That is a choice, not an accident. On the path this was built on, the source is a
 lossy stream — a ~133 kbps Opus transcode off YouTube — whose noise floor sits far
@@ -827,8 +915,8 @@ To bring it back: install torch plus
 disagree on material you care about.
 
 **torch is deliberately not in the venv.** Removing it took the venv from 986 MB
-to 372 MB. madmom needs none of it, and the demucs CLI `roadie split` uses is a
-separate `uv tool` install this does not touch.
+to 372 MB. madmom needs none of it, and the separation CLIs `roadie split` uses are
+separate `uv tool` installs this does not touch.
 
 The heuristic reads barely above chance on this material and says so in its output.
 That is not a bug in the heuristic: kick energy is symmetric between beats 1 and 3,
@@ -883,7 +971,7 @@ track, with the `drums` composite muted as the Set has it:
 | the source YouTube master | **exactly 0.00 dBFS** |
 
 The clipping itself is trivial — ten samples, inaudible, and it is separation
-residue rather than a mistake, since demucs stems do not sum bit-exactly back to
+residue rather than a mistake, since separated stems (demucs's, here) do not sum bit-exactly back to
 their source. **The real problem is that the source has no headroom at all.**
 A mastered track is brickwalled at 0 dBFS, the stems sum back to roughly that, so
 at unity the first EQ boost or compressor you add clips and you spend the session
@@ -939,8 +1027,9 @@ shuffling them.
 **`ride`/`crash` come out near-silent** on electronic material (−61 / −59 dB).
 That is correct — there are no acoustic cymbals — not a failure.
 
-**The drum pass is slow**: ~1.3× realtime versus ~14.5× for demucs, so a 9-minute
-set costs ~7 minutes for the drum pass alone. It is on by default anyway: a study
+**The drum pass is slow**: ~1.9× realtime on an Apple GPU (MPS; the stems
+themselves run at ~2× on BS-Roformer-SW, ~10× on demucs), so a 9-minute set costs
+~4.7 minutes for the drum pass alone. It is on by default anyway: a study
 wants the parts, and the beat grid is fitted to `drums_kick` first, so a split
 without it gets a looser tempo. `-D` (`--no-drums`) stops at the four stems; a
 later `-s` run on the same source adds only the drum pass.
@@ -987,8 +1076,8 @@ of your own (or put one at `./reference/`); without it those tests skip.
 Not yet a distributable package. What is and isn't there:
 
 - `./install.sh` builds `.venv` from pinned `requirements.txt` and links the
-  commands; the separation tools (`demucs`, `audio-separator`, `yt-dlp`) stay
-  separate `uv tool` installs.
+  commands; the separation tools (`audio-separator`, `yt-dlp`, and `demucs` if you
+  want the old models) stay separate `uv tool` installs.
 - The Live side is Sideman, installed on its own; nothing here patches Live.
   Only its first install needs a Live restart.
 - `stems2live.py` needs only the stdlib to talk to Live, but imports

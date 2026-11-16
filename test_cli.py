@@ -301,7 +301,9 @@ def test_config_tilde_expands_to_home(tmp_path):
     ([], False),               # no stems, so no drums stem to split
 ])
 def test_the_drum_pass_is_on_with_stems_unless_D(tmp_path, flags, wants_drumsep):
-    """audio-separator is checked up front only when the drum pass will run, so
+    """audio-separator is checked up front for the drum pass; the demucs models
+    need it only there (the default model needs it for the stems too, which
+    test_yt2stems.test_no_audio_separator_is_refused_up_front covers), so -m htdemucs_6s isolates the drum-pass check and
     hiding it from PATH shows whether it would have."""
     bin_ = tmp_path / "fakebin"
     bin_.mkdir()
@@ -313,7 +315,8 @@ def test_the_drum_pass_is_on_with_stems_unless_D(tmp_path, flags, wants_drumsep)
     env["ROADIE_LOG"] = ""
     src = tmp_path / "Artist - Track.wav"
     src.write_bytes(b"RIFF")
-    r = subprocess.run([ROADIE, "split", str(src), "-o", str(tmp_path / "out"), *flags],
+    r = subprocess.run([ROADIE, "split", str(src), "-o", str(tmp_path / "out"),
+                        "-m", "htdemucs_6s", *flags],
                        capture_output=True, text=True, timeout=60, env=env,
                        cwd=str(tmp_path), check=False)
     asked = "missing: audio-separator" in r.stderr
