@@ -93,3 +93,52 @@ def test_cli_show_prints_the_record_and_json(tmp_path):
     bad = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Nope"],
                          capture_output=True, text=True, env=env)
     assert bad.returncode == 1 and "no study named" in bad.stderr
+
+
+def test_spectral_sections_json_without_stems_or_method_loads(tmp_path):
+    folder = make_study(tmp_path, "A", "Spec", sections=False)
+    (next(folder.glob("*_stems")) / "sections.json").write_text(json.dumps({"bpm": 124.0, "sections": [
+        {"beat": 0, "bar": 1, "duration_beats": 64, "label": "Intro", "level": "A quiet"}]}))
+    s = load_study("Spec", tmp_path)
+    assert s.sections()[0].roles == [] and s.sections()[0].bars == 16
+    assert s.layers["sections"].made_by == "sections (spectral method)"
+    assert s.bar_offset is None and any("no live_bar" in c for c in s.layers["sections"].caveats)
+
+
+def test_offset_and_bpm_are_unknown_not_zero_when_nothing_gives_them(tmp_path):
+    folder = make_study(tmp_path, "Bodzin", "Earth", sections=False, alignment=False)
+    stems = next(folder.glob("*_stems"))
+    (stems / "alignment.json").write_text(json.dumps({"result": {"downbeat_verdict": "ok"}}))
+    s = load_study("Earth", tmp_path)
+    assert s.bar_offset is None and s.bpm is None
+    d = to_json(s)
+    assert d["bar_offset"] is None and d["bpm"] is None
+    env = dict(os.environ, ROADIE_STUDIES=str(tmp_path))
+    out = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Earth"],
+                         capture_output=True, text=True, env=env).stdout
+    assert "unknown bpm, 4/4, Live bar = unknown" in out
+
+
+def test_disagreeing_live_bar_offsets_are_unknown_with_a_caveat(tmp_path):
+    folder = make_study(tmp_path, "A", "Odd")
+    path = next(folder.glob("*_stems")) / "sections.json"
+    d = json.loads(path.read_text())
+    d["sections"][1]["live_bar"] = 40.0
+    path.write_text(json.dumps(d))
+    s = load_study("Odd", tmp_path)
+    assert s.bar_offset is None and any("disagree" in c for c in s.layers["sections"].caveats)
+
+
+def test_unreadable_file_is_shown_with_its_source_never_as_missing(tmp_path):
+    folder = make_study(tmp_path, "A", "Bad")
+    stems = next(folder.glob("*_stems"))
+    (stems / "sections.json").write_text("{not json")
+    (stems / "alignment.json").write_text("[]")
+    s = load_study("Bad", tmp_path)
+    for name in ("sections", "grid"):
+        layer = s.layers[name]
+        assert layer.source and layer.missing is None and "could not be read" in layer.caveats[0]
+    env = dict(os.environ, ROADIE_STUDIES=str(tmp_path))
+    r = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Bad"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "sections.json" in r.stdout and "roadie sections" not in r.stdout

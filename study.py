@@ -69,9 +69,9 @@ class Study:
     artist: str
     title: str
     root: Path
-    bpm: float
+    bpm: float | None                    # None when no layer knows it
     beats_per_bar: int
-    bar_offset: int                      # Live bar = file bar + bar_offset
+    bar_offset: int | None               # Live bar = file bar + bar_offset; None when unknown
     stems: dict[str, list[Path]]         # role -> files
     layers: dict[str, Layer]
     extras: list[Path] = field(default_factory=list)
@@ -81,7 +81,7 @@ class Study:
         if not data:
             return []
         return [Section(s["label"], s["bar"], s["duration_beats"] // self.beats_per_bar,
-                        s.get("live_bar"), s["stems"]) for s in data["sections"]]
+                        s.get("live_bar"), s.get("stems", [])) for s in data["sections"]]
 
     def activity(self) -> dict[str, list[bool]] | None:
         return self.layers["activity"].data
@@ -89,6 +89,10 @@ class Study:
     def mix(self) -> list[dict] | None:
         data = self.layers["mix"].data
         return data["sections"] if data else None
+
+
+def _number(x):
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
 def _read_json(path: Path) -> dict | None:
@@ -134,30 +138,46 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
     stems = {role: fs for role, fs in stems.items() if fs}
 
     layers = {n: Layer(n, missing=MISSING[n]) for n in LAYER_NAMES}
-    bpm, bar_offset = 0.0, 0
+    bpm, bar_offset = None, None
 
-    align = _read_json(stems_dir / "alignment.json")
-    if align and "result" in align:
-        res = align["result"]
-        bpm = float(res["bpm"])
-        caveats = []
-        if res.get("downbeat_verdict") == "chance-level":
-            caveats.append("downbeat confidence is chance-level (%s)" % res.get("downbeat_confidence"))
-        layers["grid"] = Layer("grid", stems_dir / "alignment.json",
-                               "beat_aligner (%s)" % res.get("detector", "?"), res, None, caveats)
+    def unreadable(name, path):
+        # The file is there: never offer the command that would overwrite it.
+        return Layer(name, path, None, None, None, ["file exists but could not be read"])
 
-    secs = _read_json(stems_dir / "sections.json")
-    if secs and secs.get("sections"):
-        bpm = bpm or float(secs["bpm"])
-        first = secs["sections"][0]
-        if first.get("live_bar") is not None:
-            bar_offset = int(round(first["live_bar"] - first["bar"]))
-        caveats = ["labels by rule, not checked by ear"]
-        if first.get("live_bar") is None:
-            caveats.append("no live_bar: no downbeat was known when it was made")
-        layers["sections"] = Layer("sections", stems_dir / "sections.json",
-                                   "sections (%s method)" % secs.get("method", "?"), secs,
-                                   None, caveats)
+    path = stems_dir / "alignment.json"
+    if path.exists():
+        align = _read_json(path)
+        res = align.get("result") if isinstance(align, dict) else None
+        if isinstance(res, dict):
+            bpm = _number(res.get("bpm"))
+            caveats = []
+            if res.get("downbeat_verdict") == "chance-level":
+                caveats.append("downbeat confidence is chance-level (%s)" % res.get("downbeat_confidence"))
+            layers["grid"] = Layer("grid", path, "beat_aligner (%s)" % res.get("detector", "?"),
+                                   res, None, caveats)
+        else:
+            layers["grid"] = unreadable("grid", path)
+
+    path = stems_dir / "sections.json"
+    if path.exists():
+        secs = _read_json(path)
+        if isinstance(secs, dict) and isinstance(secs.get("sections"), list):
+            if bpm is None:
+                bpm = _number(secs.get("bpm"))
+            caveats = ["labels by rule, not checked by ear"]
+            offsets = {int(round(x["live_bar"] - x["bar"])) for x in secs["sections"]
+                       if isinstance(x.get("live_bar"), (int, float)) and isinstance(x.get("bar"), (int, float))}
+            if len(offsets) == 1:
+                bar_offset = offsets.pop()
+            elif offsets:
+                caveats.append("live_bar offsets disagree between sections: Live bar unknown")
+            else:
+                caveats.append("no live_bar: no downbeat was known when it was made")
+            layers["sections"] = Layer("sections", path,
+                                       "sections (%s method)" % secs.get("method", "spectral"),
+                                       secs, None, caveats)
+        else:
+            layers["sections"] = unreadable("sections", path)
 
     return Study(folder.parent.name, folder.name, folder, bpm, BEATS_PER_BAR, bar_offset,
                  stems, layers)
@@ -181,13 +201,15 @@ def to_json(study: Study) -> dict:
 
 def _show(study: Study) -> None:
     print("%s - %s" % (study.artist, study.title))
-    print("  %g bpm, %d/4, Live bar = file bar + %d" % (study.bpm, study.beats_per_bar, study.bar_offset))
+    print("  %s bpm, %d/4, Live bar = %s" % (
+        "%g" % study.bpm if study.bpm is not None else "unknown", study.beats_per_bar,
+        "file bar + %d" % study.bar_offset if study.bar_offset is not None else "unknown"))
     print("  stems: %s" % ", ".join(study.stems))
     for name, layer in study.layers.items():
-        if layer.data is None:
+        if layer.source is None:
             print("  %-9s missing: %s" % (name, layer.missing))
             continue
-        print("  %-9s %s  [%s]" % (name, layer.source.relative_to(study.root), layer.made_by))
+        print("  %-9s %s  [%s]" % (name, layer.source.relative_to(study.root), layer.made_by or "unreadable"))
         for c in layer.caveats:
             print("            caveat: %s" % c)
         if name == "sections":
@@ -206,13 +228,14 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         study = load_study(args.name)
-    except ValueError as e:
-        print("study: %s" % e, file=sys.stderr)
+        if args.json:
+            print(json.dumps(to_json(study), indent=2))
+        else:
+            _show(study)
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        print("study: %s: %s" % ("could not read" if not isinstance(e, ValueError) else "error", e),
+              file=sys.stderr)
         return 1
-    if args.json:
-        print(json.dumps(to_json(study), indent=2))
-    else:
-        _show(study)
     return 0
 
 
