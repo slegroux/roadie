@@ -61,6 +61,7 @@ import argparse
 import json
 import numpy as np
 
+from study import STEM_ROLES
 from beat_aligner import (ANALYSIS_SR, HOP_LENGTH, N_FFT, build_analysis_mix,
                           cached_grid, estimate_aubio_beats, fit_beat_grid)
 
@@ -379,13 +380,7 @@ class SectionsTooShort(ValueError):
     """The track has too few bars for the method to segment."""
 
 
-# Stem files that make up each role, in preference order within a role.
-STEM_ROLES = {
-    "kick": ("drums_kick",),
-    "bass": ("bass",),
-    "hats": ("drums_hh", "drums_ride"),
-    "synths": ("synths",),
-}
+# The stem file -> role table (STEM_ROLES) lives in study.py, shared with the study reader.
 # Presence of these drives the boundaries; vocals are reported, not cut on —
 # they chop in and out too often to mark a section.
 STEM_CUT_ROLES = ("kick", "bass", "hats", "synths")
