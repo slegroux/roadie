@@ -136,7 +136,13 @@ def test_start_marker_and_loop_markers_decide_what_plays_when(monkeypatch):
     two steps differ, so the second is "changed"."""
     m = live(["LEAD"], scenes=1)
     put(m, 0, 0, [note(60, 0, 1), note(62, 40, 1)], loop=(0, 64), start=32)
-    r = table(m, monkeypatch)
+    m.install(monkeypatch)
+    with A.Live() as lv:
+        c = A.read_set(lv, 1, 1)["clips"][(0, 0)]
+    # by hand: pass 1 is clip 32..64, so the note at 40 sounds at beat 8; the loop wraps at 32 and
+    # the note at 0 sounds at beat 32; the note at 40 of pass 2 falls past the 64-beat horizon.
+    assert A.sounding(c, c["notes"], 64.0) == [(8.0, 9.0, 62, 100.0), (32.0, 33.0, 60, 100.0)]
+    r = A.read_arrangement(1, 1)
     w = cell(r, 1, "lead")["windows"]
     assert [x["state"] for x in w] == ["playing", "changed"]
     assert w[1]["change"] == "vary"
@@ -234,6 +240,24 @@ def test_explicit_role_map_beats_keywords_and_unmapped_tracks_are_listed(monkeyp
     r = table(m, monkeypatch, roles={"27-Diva": "lead", "bass": "ignore", "KIT/Rim Shot": "clap"})
     assert r["unmapped"] == [] and r["ignored"] == ["BASS"]
     assert set(r["roles"]) == {"lead", "clap"}
+
+
+def test_muted_solo_muted_and_grouped_tracks_are_silent_and_listed(monkeypatch):
+    """A muted track, a track another track's solo mutes, and a track in a muted group make no
+    sound whatever their clips hold; each is named in the warnings. A free track still plays."""
+    m = live(["BASS", "LEAD", "PAD", "S-BD", "GROUP"], scenes=1)
+    for t in range(4):
+        put(m, t, 0, [note(40 + t, 0, 1)])
+    tr = m.song.tracks
+    tr[0].mute = True
+    tr[1].muted_via_solo = True
+    tr[4].mute, tr[2].group_track = True, tr[4]
+    r = table(m, monkeypatch)
+    assert [states(r, 1, x) for x in ("bass", "lead", "pad", "kick")] == [
+        ["silent"], ["silent"], ["silent"], ["playing"]]
+    warned = " | ".join(r["warnings"])
+    assert "'BASS' (muted)" in warned and "'LEAD' (muted by another track's solo)" in warned
+    assert "'PAD' (in group 'GROUP', which is muted)" in warned and "S-BD" not in warned
 
 
 # --------------------------------------------------------------------------

@@ -189,7 +189,8 @@ class ClipSlot(_Obj):
 
 class Track(_Obj):
     PROPS = ("name", "color", "has_audio_input", "mixer_device", "arrangement_clips",
-             "clip_slots", "devices", "is_foldable", "has_midi_input")
+             "clip_slots", "devices", "is_foldable", "has_midi_input", "is_grouped",
+             "group_track", "mute", "muted_via_solo")
     WRITABLE = ("name", "color")
     CALLS = ("create_audio_clip", "create_midi_clip")
 
@@ -201,8 +202,11 @@ class Track(_Obj):
         self.clip_slots = [ClipSlot(model, self) for _ in range(scenes)]
         self.devices = []
         self.is_foldable = False
+        self.group_track = None
+        self.mute = self.muted_via_solo = False
 
     has_midi_input = property(lambda self: not self.audio)
+    is_grouped = property(lambda self: self.group_track is not None)
 
     name = property(lambda self: self._name,
                     lambda self, v: (self._m._wrote(self, "name"),

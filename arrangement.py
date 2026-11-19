@@ -253,10 +253,27 @@ def read_set(live, first, last):
     scene_ids = list(range(first - 1, last))
 
     names = _reads(live, [{"path": "live_set scenes %d" % s, "property": "name"} for s in scene_ids])
+    tp = ("name", "is_foldable", "has_midi_input", "mute", "muted_via_solo", "is_grouped")
     tr = _reads(live, [{"path": "live_set tracks %d" % t, "property": p}
-                       for t in range(n_tracks) for p in ("name", "is_foldable", "has_midi_input")])
-    tracks = [{"index": t, "name": tr[t * 3], "foldable": bool(tr[t * 3 + 1]),
-               "midi": bool(tr[t * 3 + 2])} for t in range(n_tracks)]
+                       for t in range(n_tracks) for p in tp])
+    tracks = []
+    for t in range(n_tracks):
+        v = dict(zip(tp, tr[t * len(tp):(t + 1) * len(tp)]))
+        tracks.append({"index": t, "name": v["name"], "foldable": bool(v["is_foldable"]),
+                       "midi": bool(v["has_midi_input"]), "grouped": bool(v["is_grouped"]),
+                       "muted": bool(v["mute"] or v["muted_via_solo"]),
+                       "muted_why": "muted" if v["mute"] else
+                       "muted by another track's solo" if v["muted_via_solo"] else ""})
+    # A track in a muted (or solo-muted) group is silent too: read up to three group levels.
+    gp = [(t["index"], d) for t in tracks if t["grouped"] for d in (1, 2, 3)]
+    gv = _reads(live, [{"path": "live_set tracks %d %s" % (t, " ".join(["group_track"] * d)),
+                        "property": p} for t, d in gp for p in ("name", "mute", "muted_via_solo")])
+    for k, (t, _d) in enumerate(gp):
+        gname, gmute, gsolo = gv[k * 3:(k + 1) * 3]
+        if (gmute or gsolo) and not tracks[t]["muted"]:
+            tracks[t]["muted"] = True
+            tracks[t]["muted_why"] = "in group %r, which is %s" % (
+                gname, "muted" if gmute else "muted by another track's solo")
 
     # Group tracks hold no clips of their own.
     slots = [(t["index"], s) for t in tracks if not t["foldable"] for s in scene_ids]
@@ -377,7 +394,8 @@ def read_arrangement(first, last, role_map=None):
 
     rows, prev, started = [], {}, False
     for s, scene_name in zip(data["scene_ids"], data["scene_names"]):
-        here = {t: c for (t, sc), c in data["clips"].items() if sc == s and not c["muted"]}
+        here = {t: c for (t, sc), c in data["clips"].items()
+                if sc == s and not c["muted"] and not data["tracks"][t]["muted"]}
         beats = scene_beats(here.values())
         bars = int(math.ceil(beats / BEATS_PER_BAR - EPS)) if beats > EPS else 0
         horizon = bars * BEATS_PER_BAR
@@ -445,8 +463,12 @@ def read_arrangement(first, last, role_map=None):
 
     unmapped = sorted({v["label"] for v in voices if v["role"] == UNMAPPED})
     warnings = list(data["warnings"])
+    for t in sorted({t for (t, _s) in data["clips"]}):
+        if data["tracks"][t]["muted"]:
+            warnings.append("muted track, counted as silent: %r (%s)"
+                            % (data["tracks"][t]["name"], data["tracks"][t]["muted_why"]))
     for (t, s), c in sorted(data["clips"].items(), key=lambda kv: (kv[0][1], kv[0][0])):
-        if c["muted"]:
+        if c["muted"] and not data["tracks"][t]["muted"]:
             warnings.append("muted clip, counted as silent: track %r scene %d"
                             % (data["tracks"][t]["name"], s + 1))
     return {"set": data["set"], "scenes": [first, last], "window_bars": WINDOW_BARS,
