@@ -229,15 +229,15 @@ def test_drum_rack_pads_become_roles_by_chain_name_and_in_note(monkeypatch):
 
 
 def test_explicit_role_map_beats_keywords_and_unmapped_tracks_are_listed(monkeypatch):
-    """"27-Diva" matches no keyword and is listed; mapping it makes it a lead. "BASS" mapped to
+    """"35-Loopcloud" matches no keyword and is listed; mapping it makes it a lead. "BASS" mapped to
     "ignore" is left out and named as ignored. "Track/Chain" maps one pad of a rack."""
-    m = live(["27-Diva", "BASS", "KIT"], scenes=1)
+    m = live(["35-Loopcloud", "BASS", "KIT"], scenes=1)
     _rack(m, 2, [("Rim Shot", 40)])
     for t, p in ((0, 60), (1, 36), (2, 40)):
         put(m, t, 0, [note(p, 0, 1)])
     r = table(m, monkeypatch)
-    assert r["unmapped"] == ["27-Diva"] and "bass" in r["roles"] and "perc" in r["roles"]
-    r = table(m, monkeypatch, roles={"27-Diva": "lead", "bass": "ignore", "KIT/Rim Shot": "clap"})
+    assert r["unmapped"] == ["35-Loopcloud"] and "bass" in r["roles"] and "perc" in r["roles"]
+    r = table(m, monkeypatch, roles={"35-Loopcloud": "lead", "bass": "ignore", "KIT/Rim Shot": "clap"})
     assert r["unmapped"] == [] and r["ignored"] == ["BASS"]
     assert set(r["roles"]) == {"lead", "clap"}
 
@@ -300,3 +300,245 @@ def test_a_scene_range_outside_the_set_is_refused(monkeypatch):
         A.read_arrangement(1, 5)
     with pytest.raises(ValueError):
         A.parse_scenes("5-2")
+
+
+# --------------------------------------------------------------------------
+# change is compared like with like
+# --------------------------------------------------------------------------
+
+def test_unequal_windows_of_one_pattern_are_not_a_variation(monkeypatch):
+    """A 12-bar scene is a step of 8 bars and a step of 4. A 4-bar lead loop sees 8 repetitions in
+    the first and 4 in the second; a non-looping arp with the 2-note pattern written out three
+    times sees 2 and then 1. Compared over the shorter step, both are the same."""
+    m = live(["LEAD", "ARP", "PAD"], scenes=1)
+    put(m, 0, 0, [note(60, 0, 1), note(62, 2, 1)], loop=(0, 16))
+    put(m, 1, 0, [note(p, o + t, 1) for o in (0, 16, 32) for p, t in ((60, 0), (62, 2))],
+        loop=(0, 48), looping=False)
+    put(m, 2, 0, [note(48, 0, 48)], loop=(0, 48))
+    r = table(m, monkeypatch)
+    assert r["rows"][0]["bars"] == 12 and r["rows"][0]["windows"] == 2
+    assert [w["change"] for w in cell(r, 1, "lead")["windows"]] == [None, "same"]
+    assert [w["change"] for w in cell(r, 1, "arp")["windows"]] == [None, "same"]
+
+
+def test_a_loop_that_does_not_divide_the_step_is_not_a_variation(monkeypatch):
+    """A 3-bar (12 beat) loop: the second 8-bar step starts 8 beats into the loop, not at its top.
+    Same loop, so same. A different 3-bar loop in the next scene does vary."""
+    m = live(["LEAD", "PAD"], scenes=2)
+    put(m, 0, 0, [note(60, 0, 1), note(62, 6, 1)], loop=(0, 12))
+    put(m, 1, 0, [note(48, 0, 64)], loop=(0, 64))
+    put(m, 0, 1, [note(60, 0, 1), note(64, 6, 1)], loop=(0, 12))
+    put(m, 1, 1, [note(48, 0, 32)], loop=(0, 32))
+    r = table(m, monkeypatch)
+    assert [w["change"] for w in cell(r, 1, "lead")["windows"]] == [None, "same"]
+    assert cell(r, 2, "lead")["windows"][0]["change"] == "vary"
+
+
+def test_a_note_or_audio_held_across_a_boundary_is_not_a_variation(monkeypatch):
+    """A MIDI note held 12 bars and a non-looping 12-bar audio clip both cross the 8-bar boundary
+    and start nothing in the second step: they continue, they are not new."""
+    m = FakeLive(tracks=("midi", "audio", "midi"), scenes=1)
+    for t, n in zip(m.song.tracks, ("PAD", "RISER", "BASS")):
+        t.name = n
+    put(m, 0, 0, [note(60, 0, 48)], loop=(0, 48), looping=False)
+    put(m, 1, 0, name="rise", loop=(0, 48), looping=False, audio=True)
+    put(m, 2, 0, [note(40, 0, 2), note(40, 16, 2), note(40, 32, 2)], loop=(0, 48))
+    r = table(m, monkeypatch)
+    assert [w["change"] for w in cell(r, 1, "pad")["windows"]] == [None, "same"]
+    assert [w["change"] for w in cell(r, 1, "fx")["windows"]] == [None, "same"]
+
+
+def test_a_one_shot_running_out_beside_a_loop_is_not_a_change(monkeypatch):
+    """Two fx in a 16-bar scene: a 2-bar impact (non-looping) and a 16-bar downer loop. The impact
+    is over in the second step and the downer plays on: that step is the same, not varied. When the
+    downer goes too the role leaves."""
+    m = FakeLive(tracks=("audio", "audio", "midi"), scenes=2)
+    for t, n in zip(m.song.tracks, ("IMPACT", "DOWN", "PAD")):
+        t.name = n
+    put(m, 0, 0, name="impact", loop=(0, 8), looping=False, audio=True)
+    put(m, 1, 0, name="downer", loop=(0, 64), audio=True)
+    put(m, 2, 0, [note(48, 0, 64)], loop=(0, 64))
+    put(m, 2, 1, [note(48, 0, 32)], loop=(0, 32))
+    r = table(m, monkeypatch)
+    assert [w["change"] for w in cell(r, 1, "fx")["windows"]] == [None, "same"]
+    assert cell(r, 2, "fx")["windows"][0]["change"] == "leave"
+
+
+def test_a_silent_carrier_clip_counts_as_silent(monkeypatch):
+    """The S-BD audio clip that only holds a filter open says so in its name: scenes 1 and 2 have
+    no kick, scene 3 has a real one. The carriers are named once in the warnings."""
+    m = FakeLive(tracks=("audio", "midi"), scenes=3)
+    m.song.tracks[0].name, m.song.tracks[1].name = "S-BD", "PAD"
+    for sc in (0, 1):
+        put(m, 0, sc, name="E20 kick HP held open (silent carrier)", loop=(0, 32), audio=True)
+    put(m, 0, 2, name="kick 4x4", loop=(0, 32), audio=True)
+    for sc in range(3):
+        put(m, 1, sc, [note(48, 0, 32)], loop=(0, 32))
+    r = table(m, monkeypatch)
+    assert [states(r, sc, "kick") for sc in (1, 2, 3)] == [["silent"], ["silent"], ["changed"]]
+    assert "silent-carrier clips counted as silent: 'S-BD' (2 clips)" in r["warnings"]
+
+
+# --------------------------------------------------------------------------
+# structure metrics, on hand-built tables
+# --------------------------------------------------------------------------
+
+STATE = {"o": ("playing", None), "=": ("playing", "same"), "+": ("changed", "enter"),
+         "~": ("changed", "vary"), "-": ("silent", "leave"), ".": ("silent", None)}
+ROLES = ["kick", "snare", "hats", "bass", "lead", "pad"]
+
+
+def build(*rows):
+    """A table as read_arrangement returns it, from (scene name, bars, {role: one character per
+    8-bar step}): o playing with nothing before it, = same, + enters, ~ varies, - leaves, . silent."""
+    out = []
+    for i, (name, bars, chars) in enumerate(rows, 1):
+        cells = {}
+        for role in ROLES:
+            seq, v, ws = chars.get(role, "." * ((bars + 7) // 8)), 0, []
+            for k, ch in enumerate(seq):
+                state, change = STATE[ch]
+                v += ch in "+~"
+                ws.append({"bars": "%d-%d" % (k * 8 + 1, min(k * 8 + 8, bars)), "state": state,
+                           "change": change, "sig": "v%d" % v if state != "silent" else None})
+            cells[role] = {"windows": ws, "loop_bars": [], "one_shot": False, "clips": []}
+        out.append({"scene": i, "name": name, "bars": bars, "windows": (bars + 7) // 8,
+                    "cells": cells})
+    return {"set": "x", "scenes": [1, len(out)], "window_bars": 8, "roles": list(ROLES),
+            "rows": out, "unmapped": [], "ignored": [], "warnings": [], "notes": []}
+
+
+def _all(ch):
+    return {r: ch for r in ROLES}
+
+
+SET = build(
+    ("Intro · drone", 8, dict(pad="o")),
+    ("Main 1 · + kick", 8, dict(kick="+", hats="+", pad="=")),
+    ("Drop 1A · full", 16, dict(kick="==", snare="+=", hats="==", bass="+=", lead="+~", pad="==")),
+    ("Drop 1B · same", 8, _all("=")),
+    ("Breakdown · pads", 16, dict(kick="-.", snare="-.", hats="==", bass="==", lead="==", pad="==")),
+    ("Drop 2A · full", 16, dict(kick="+=", snare="+=", hats="==", bass="==", lead="==", pad="==")),
+    ("Drop 2B · rolling", 16, dict(kick="==", snare="==", hats="==", bass="==", lead="~=", pad="==")),
+    ("Outro A", 8, dict(kick="=", snare="-", hats="=", bass="-", lead="-", pad="=")),
+    ("Mystery", 8, dict(kick="=", hats="=", pad="=")))
+
+
+def test_section_labels_come_from_the_scene_name():
+    assert A.section_of("Drop 1A · impact") == ("Drop 1", "A")
+    assert A.section_of("Main 1 · + kick") == ("Main 1", "")
+    assert A.section_of("Outro B · drone + vox") == ("Outro", "B")
+    assert A.section_of("Breakdown · lead 2-bar") == ("Breakdown", "")
+    assert A.section_of("Build 2") == ("Build 2", "")
+    assert A.section_of("Main 1 and bass") == ("Main 1", "")
+    assert A.section_of("Dropout") is None and A.section_of("Verse 1") is None
+    assert A.section_of("") is None
+
+
+def test_the_section_map_and_the_drop_ratio():
+    """Hand-counted: 13 steps, 104 bars. Drop 1 is scenes 3-4 (16 + 8 bars), Drop 2 scenes 6-7
+    (16 + 16), so the ratio is 32 / 24. "Mystery" matches no label and is listed."""
+    m = A.structure_metrics(SET)
+    assert (m["bars"], m["steps"]) == (104, 13)
+    assert [(s["label"], s["bar"], s["bars"], s["scenes"]) for s in m["sections"]] == [
+        ("Intro", 1, 8, [1, 1]), ("Main 1", 9, 8, [2, 2]), ("Drop 1", 17, 24, [3, 4]),
+        ("Breakdown", 41, 16, [5, 5]), ("Drop 2", 57, 32, [6, 7]), ("Outro", 89, 8, [8, 8]),
+        (None, 97, 8, [9, 9])]
+    assert m["unlabelled_scenes"] == [{"scene": 9, "name": "Mystery"}]
+    assert m["drop_ratio"] == {"drop1_bars": 24, "drop2_bars": 32, "ratio": 1.333}
+
+
+def test_steps_that_add_nothing_or_only_remove():
+    """By hand, from the third step on: bar 33 (Drop 1B, all the same), 49 and 65 and 81 (a second
+    step of a section that changes nothing) and 97 add nothing; bars 41 (kick and snare leave) and
+    89 (snare, bass and lead leave) only remove. Steps that enter or vary are not flagged."""
+    m = A.structure_metrics(SET)
+    assert [(f["bar"], f["flag"]) for f in m["flags"]] == [
+        (33, "nothing new"), (41, "only a removal"), (49, "nothing new"), (65, "nothing new"),
+        (81, "nothing new"), (89, "only a removal"), (97, "nothing new")]
+    step = next(c for c in m["changes"] if c["bar"] == 17)
+    assert (step["enter"], step["vary"], step["flag"]) == (["bass", "lead", "snare"], [], None)
+    assert next(c for c in m["changes"] if c["bar"] == 25)["vary"] == ["lead"]
+
+
+def test_pitched_parts_per_section():
+    """Pitched = bass, lead, arp, pad, drone, pluck, synth. Here only bass, lead and pad exist: the
+    pad alone in the intro, main and outro, all three from the first Drop 1 step on."""
+    got = {s["label"]: s["pitched_parts"] for s in A.structure_metrics(SET)["sections"]}
+    assert got["Intro"] == {"max": 1, "per_step": [1]}
+    assert got["Drop 1"] == {"max": 3, "per_step": [3, 3, 3]}
+    assert got["Breakdown"]["max"] == 3 and got["Outro"]["max"] == 1
+
+
+def test_hook_run_length_and_variation():
+    """The lead plays steps 3-11 (bars 17-88, 9 steps of 8). It varies at bars 25 and 73; its
+    signature takes 3 values (enter, the bar 25 variant, the bar 73 variant)."""
+    h = A.structure_metrics(SET)["hook"]
+    assert (h["first_bar"], h["steps_playing"], h["bars_playing"]) == (17, 9, 72)
+    assert (h["longest_run"]["bar"], h["longest_run"]["bars"]) == (17, 72)
+    assert (h["varies"], h["distinct_variants"]) == (2, 3)
+
+
+def test_bass_entry_bar_and_whether_it_is_before_the_first_drop():
+    """The bass enters in the first Drop 1 step, bar 17, which is the drop itself. Moved a scene
+    earlier, into a Build, it arrives before the drop."""
+    b = A.structure_metrics(SET)["bass"]
+    assert (b["entry_bar"], b["first_drop_bar"], b["before_first_drop"]) == (17, 17, False)
+    early = build(("Intro", 8, dict(pad="o")), ("Build 1", 8, dict(bass="+", pad="=")),
+                  ("Drop 1", 8, dict(bass="=", kick="+", pad="=")))
+    b = A.structure_metrics(early)["bass"]
+    assert (b["entry_bar"], b["first_drop_bar"], b["before_first_drop"]) == (9, 17, True)
+
+
+def test_kick_out_length_counts_only_between_two_stretches_of_kick():
+    """The kick is in from bar 9; it is out for the two steps of the Breakdown, 16 bars from bar
+    41, and plays again. The silent intro before bar 9 is not "kick out"."""
+    k = A.structure_metrics(SET)["kick"]
+    assert k["first_bar"] == 9 and k["longest_out_bars"] == 16
+    assert [(g["bar"], g["bars"], g["section"]) for g in k["out"]] == [(41, 16, "Breakdown")]
+
+
+def test_hats_constancy():
+    """The hats enter at bar 9 and play every step after: 12 of 13 steps, constant. A table where
+    they drop out for a step is not."""
+    h = A.structure_metrics(SET)["hats"]
+    assert (h["first_bar"], h["steps_playing"], h["of_steps"], h["constant"]) == (9, 12, 13, True)
+    gap = build(("Main 1", 8, dict(hats="o")), ("Drop 1", 8, dict(hats="=")),
+                ("Breakdown", 8, dict(hats="-")), ("Drop 2", 8, dict(hats="+")))
+    h = A.structure_metrics(gap)["hats"]
+    assert not h["constant"] and [(g["bar"], g["bars"]) for g in h["gaps"]] == [(17, 8)]
+
+
+def test_a_role_the_set_lacks_is_none_in_its_metrics():
+    bare = build(("Intro", 8, dict(pad="o")))
+    bare["roles"] = ["pad"]
+    bare["rows"][0]["cells"] = {"pad": bare["rows"][0]["cells"]["pad"]}
+    m = A.structure_metrics(bare)
+    assert (m["bass"], m["kick"], m["hats"], m["hook"], m["drop_ratio"]) == (None,) * 5
+
+
+def test_diva_is_the_lead_and_the_hook_counts_it(monkeypatch):
+    """27-Diva maps to lead by default, alone in two 8-bar scenes: the hook runs 16 bars from bar 1."""
+    m = live(["27-Diva"], scenes=2)
+    for sc in (0, 1):
+        put(m, 0, sc, [note(60, 0, 1)], loop=(0, 32))
+    r = table(m, monkeypatch)
+    assert r["roles"] == ["lead"] and r["unmapped"] == []
+    h = A.structure_metrics(r)["hook"]
+    assert (h["first_bar"], h["bars_playing"], h["longest_run"]["bars"]) == (1, 16, 16)
+
+
+def test_metrics_on_the_command_line(monkeypatch, capsys):
+    """--metrics adds a "Structure" block to the text and a "metrics" key to the JSON."""
+    m = live(["S-BD", "BASS"], scenes=2)
+    m.song.scenes[0].name, m.song.scenes[1].name = "Intro", "Drop 1A"
+    for sc in range(2):
+        put(m, 0, sc, [note(36, 0, 1)])
+    put(m, 1, 1, [note(40, 0, 2)])
+    m.install(monkeypatch)
+    A.main(["read", "--scenes", "1-2", "--metrics"])
+    assert "Structure: 16 bars in 2 steps" in capsys.readouterr().out
+    A.main(["read", "--scenes", "1-2", "--metrics", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["metrics"]["bass"]["entry_bar"] == 9
+    assert [s["label"] for s in data["metrics"]["sections"]] == ["Intro", "Drop 1"]

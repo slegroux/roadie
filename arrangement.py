@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read a range of Session View scenes from Live as an arrangement: which element plays when.
 
-    arrangement.py read --scenes A-B [--roles MAP.json] [--json]
+    arrangement.py read --scenes A-B [--roles MAP.json] [--json] [--metrics]
 
 The Set's scenes, played top to bottom, ARE the arrangement. This reads scenes A..B (1-based, as
 Live's scene numbers) and builds, per 8-bar step, one cell per scene x role: playing, silent, or
@@ -24,6 +24,18 @@ case-insensitive; the role "ignore" leaves a track out) wins; otherwise name key
 (KEYWORDS below). A Drum Rack with no explicit entry of its own is split into pads: a note belongs
 to the chain whose `in_note` is its pitch, and the chain's name picks the role. A track, or a pad,
 no rule maps goes to the role "unmapped" and is listed by name in the output: never dropped.
+
+CHANGE is compared like with like: a loop that fits an 8-bar step is its cycle, so a 3-bar loop does
+not "vary" because the next step starts mid-loop; steps of unequal length are compared over the
+shorter; a note or audio clip held in from the step before, starting nothing new, is the same; a
+voice that runs out while others of its role play on (a one-shot) is not a change of the role.
+
+--metrics adds the structure of the range (structure_metrics): sections by the base labels in the
+scene names (Intro, Main N, Build N, Drop N, Breakdown, Outro) and their lengths, the 8-bar steps
+that add nothing ("nothing new") or only remove, pitched parts per section, the hook (the lead,
+any track mapped to it: LD, LEAD, 27-Diva), the bass entry bar, how long the kick is out between
+two stretches of kick, Drop 2 / Drop 1, and whether the hats stay on. A clip named "silent
+carrier" counts as silent.
 
 NOT READ: clip automation (envelopes). A filter ramp on a lead counts as "no change"; the output
 says so in its notes.
@@ -76,7 +88,7 @@ KEYWORDS = (
     ("hats", r"hat|(?<![a-z])hh"),
     ("perc", r"perc|conga|(?<![a-z])rim(?![a-z])|bongo|tambourine|cowbell"),
     ("bass", r"bass|(?<![a-z])sub(?![a-z])"),
-    ("lead", r"(?<![a-z])lead(?![a-z])|(?<![a-z])ld(?![a-z])"),
+    ("lead", r"(?<![a-z])lead(?![a-z])|(?<![a-z])ld(?![a-z])|diva"),
     ("arp", r"(?<![a-z])arp"),
     ("pad", r"(?<![a-z])pad(?![a-z])"),
     ("drone", r"drone"),
@@ -86,6 +98,9 @@ KEYWORDS = (
     ("synth", r"synth"),
 )
 ROLE_ORDER = [r for r, _ in KEYWORDS]
+# A clip named like this holds a device open (a filter, a sidechain) and makes no sound of its own:
+# counted as silent, whatever the track maps to. Audio content is not read, so a name is the only way.
+SILENT_CLIP = re.compile(r"silent carrier", re.I)
 UNMAPPED = "unmapped"
 IGNORE = "ignore"
 
@@ -93,7 +108,8 @@ NOTES = [
     "Clip automation (envelopes) is not read: a filter ramp or a volume ride on a clip counts as "
     "no change. Silence here is silence of notes and clips, not of the sound.",
     "Audio clips count as playing wherever they are placed: their content is not read, so a clip "
-    "that only carries a filter or a sidechain shows as playing.",
+    "that only carries a filter or a sidechain shows as playing, unless its name says "
+    "\"silent carrier\" (then it counts as silent).",
     "Bars are 4 beats; the Set's time signature is not read.",
 ]
 
@@ -185,33 +201,62 @@ def _digest(obj):
     return hashlib.md5(repr(obj).encode()).hexdigest()[:6]
 
 
-def midi_window(intervals, w0, w1):
-    """(playing, signature) for scene beats [w0, w1): a note sounding at all in the window counts,
-    one that started in an earlier window and is still held included. The signature is the
-    window's events relative to its start, so a held chord is the same in both steps it spans."""
-    ev = sorted((p, round(float(max(s, w0) - w0), 3), round(float(min(e, w1) - w0), 3),
-                 int(v // 8))
-                for s, e, p, v in intervals if s < w1 - EPS and e > w0 + EPS)
-    return (True, _digest(ev)) if ev else (False, None)
+def steady_from(clip):
+    """Scene beat from which a looping clip is in its steady cycle: 0 when it starts at its loop
+    start, else when the first, partial pass (from the start marker) ends."""
+    m, ls, le = clip["start_marker"], clip["loop_start"], clip["loop_end"]
+    return 0.0 if abs(m - ls) < EPS or m >= le - EPS else le - m
 
 
-def audio_window(clip, horizon, w0, w1):
-    """(playing, signature) for an audio clip: it plays wherever it is placed. The signature is
-    the clip and where in it the window starts, so a loop that divides the step repeats."""
-    cover, pos = 0.0, None
+def midi_record(clip, notes, intervals, w0, w1):
+    """What a MIDI voice plays in scene beats [w0, w1), or None if it is silent. A note sounding
+    at all in the window counts, one held in from an earlier step included.
+
+    A clip in its steady loop, with a cycle no longer than an 8-bar step, is its cycle ("loop"):
+    the same loop is the same wherever the step starts in it, so a 3-bar loop does not "vary"
+    from one step to the next. Anything else is its events ("ev"): those that start in the window,
+    relative to its start, the pitches held in from before it, and those still sounding at its end.
+    """
+    ivs = [i for i in intervals if i[0] < w1 - EPS and i[1] > w0 + EPS]
+    if not ivs:
+        return None
+    ls, le = clip["loop_start"], clip["loop_end"]
+    if (clip["looping"] and MIN_LOOP_BEATS <= le - ls <= WINDOW_BEATS + EPS
+            and w0 >= steady_from(clip) - EPS):
+        cycle = sorted((n["pitch"], round(float(n["start_time"] - ls), 3),
+                        round(float(min(n["start_time"] + n["duration"], le) - n["start_time"]), 3),
+                        int(n.get("velocity", 100.0) // 8))
+                       for n in notes if ls - EPS <= n["start_time"] < le - EPS)
+        return ("loop", round(float(le - ls), 3), _digest(cycle))
+    return ("ev", round(float(w1 - w0), 3),
+            tuple(sorted((p, round(float(s - w0), 3), round(float(e - s), 3), int(v // 8))
+                         for s, e, p, v in ivs if s >= w0 - EPS)),
+            tuple(sorted({p for s, e, p, v in ivs if s < w0 - EPS})),
+            tuple(sorted({p for s, e, p, v in ivs if e >= w1 - EPS})))
+
+
+def audio_record(clip, horizon, w0, w1):
+    """What an audio clip plays in [w0, w1): it plays wherever it is placed, and is the same clip
+    from one step to the next however far into it the step starts."""
     for t0, a, b in passes(clip, horizon):
-        lo, hi = max(w0, t0), min(w1, t0 + (b - a))
-        if hi > lo + EPS:
-            cover += hi - lo
-            if pos is None:
-                pos = a + (lo - t0)
-    if pos is None:
-        return False, None
-    if clip["looping"]:
-        length = clip["loop_end"] - clip["loop_start"]
-        if length >= MIN_LOOP_BEATS:
-            pos = (pos - clip["loop_start"]) % length
-    return True, _digest((clip["name"], round(float(pos), 2), round(float(cover), 2)))
+        if min(w1, t0 + (b - a)) > max(w0, t0) + EPS:
+            length = clip["loop_end"] - clip["loop_start"]
+            return ("aud", clip["name"], round(float(length), 3) if clip["looping"] else None)
+    return None
+
+
+def same_content(a, b):
+    """Is record `b` (a step) what record `a` (the step before) was, compared like with like?
+    Events are compared over the length of the shorter step; a step with nothing new starting in
+    it, only notes held in from the step before, is the same as that step."""
+    if a[0] != b[0]:
+        return False
+    if a[0] != "ev":
+        return a == b
+    n = min(a[1], b[1])
+    sa = [e for e in a[2] if e[1] < n - EPS]
+    sb = [e for e in b[2] if e[1] < n - EPS]
+    return sa == sb or (not sb and bool(b[3]) and set(b[3]) <= set(a[4]))
 
 
 # --------------------------------------------------------------------------
@@ -295,6 +340,7 @@ def read_set(live, first, last):
             for p in ("loop_start", "loop_end", "start_marker", "end_marker"):
                 c[p] = c[p] * tempo / 60.0          # an unwarped clip's markers are seconds
         c["notes"] = []
+        c["silent"] = bool(SILENT_CLIP.search(c["name"] or ""))
         clips[(t, s)] = c
 
     for (t, s), c in clips.items():
@@ -392,10 +438,11 @@ def read_arrangement(first, last, role_map=None):
     voices, ignored = build_voices(data, role_map)
     roles = role_order({v["role"] for v in voices})
 
-    rows, prev, started = [], {}, False
+    rows, prev, started = [], {}, False   # prev: role -> {voice label: record} of the step before
     for s, scene_name in zip(data["scene_ids"], data["scene_names"]):
         here = {t: c for (t, sc), c in data["clips"].items()
-                if sc == s and not c["muted"] and not data["tracks"][t]["muted"]}
+                if sc == s and not c["muted"] and not c["silent"]
+                and not data["tracks"][t]["muted"]}
         beats = scene_beats(here.values())
         bars = int(math.ceil(beats / BEATS_PER_BAR - EPS)) if beats > EPS else 0
         horizon = bars * BEATS_PER_BAR
@@ -410,7 +457,7 @@ def read_arrangement(first, last, role_map=None):
                 continue
             if c["is_midi_clip"]:
                 notes = [n for n in c["notes"] if v["pitch"] is None or n["pitch"] == v["pitch"]]
-                played[v["key"]] = sounding(c, notes, horizon)
+                played[v["key"]] = (notes, sounding(c, notes, horizon))
             else:
                 played[v["key"]] = None
         for role in roles:
@@ -419,29 +466,36 @@ def read_arrangement(first, last, role_map=None):
             clip_info, cells, voice_plays = [], [], set()
             for w in range(n_windows):
                 w0, w1 = w * WINDOW_BEATS, min((w + 1) * WINDOW_BEATS, horizon)
-                sigs = []
+                recs = {}
                 for v in mine:
                     c = here[v["track"]]
-                    ok, sig = (midi_window(played[v["key"]], w0, w1) if c["is_midi_clip"]
-                               else audio_window(c, horizon, w0, w1))
-                    if ok:
-                        sigs.append((v["label"], sig))
+                    rec = (midi_record(c, played[v["key"]][0], played[v["key"]][1], w0, w1)
+                           if c["is_midi_clip"] else audio_record(c, horizon, w0, w1))
+                    if rec is not None:
+                        recs[v["label"]] = rec
                         voice_plays.add(v["track"])
-                playing = bool(sigs)
-                sig = _digest(sorted(sigs)) if playing else None
-                p_play, p_sig = prev.get(role, (False, None))
+                playing = bool(recs)
+                sig = _digest(sorted((k, repr(r)) for k, r in recs.items())) if playing else None
+                p_recs = prev.get(role, {})
                 if not started and w == 0:
                     change = None
                 elif playing:
-                    change = "enter" if not p_play else ("vary" if sig != p_sig else "same")
+                    if not p_recs:
+                        change = "enter"
+                    else:
+                        # Only what is playing now can be new. A voice that stopped while
+                        # others play on (a one-shot that ran out) is not a change of the role.
+                        moved = any(k not in p_recs or not same_content(p_recs[k], recs[k])
+                                    for k in recs)
+                        change = "vary" if moved else "same"
                 else:
-                    change = "leave" if p_play else None
+                    change = "leave" if p_recs else None
                 state = ("silent" if not playing
                          else "changed" if change in ("enter", "vary") else "playing")
                 cells.append({"bars": "%d-%d" % (w * WINDOW_BARS + 1,
                                                  min((w + 1) * WINDOW_BARS, bars)),
                               "state": state, "change": change, "sig": sig})
-                prev[role] = (playing, sig)
+                prev[role] = recs
             seen = set()
             for v in mine:
                 if v["track"] in seen:
@@ -467,6 +521,12 @@ def read_arrangement(first, last, role_map=None):
         if data["tracks"][t]["muted"]:
             warnings.append("muted track, counted as silent: %r (%s)"
                             % (data["tracks"][t]["name"], data["tracks"][t]["muted_why"]))
+    carriers = {}
+    for (t, _s), c in data["clips"].items():
+        if c["silent"]:
+            carriers[data["tracks"][t]["name"]] = carriers.get(data["tracks"][t]["name"], 0) + 1
+    for name, n in sorted(carriers.items()):
+        warnings.append("silent-carrier clips counted as silent: %r (%d clips)" % (name, n))
     for (t, s), c in sorted(data["clips"].items(), key=lambda kv: (kv[0][1], kv[0][0])):
         if c["muted"] and not data["tracks"][t]["muted"]:
             warnings.append("muted clip, counted as silent: track %r scene %d"
@@ -474,6 +534,188 @@ def read_arrangement(first, last, role_map=None):
     return {"set": data["set"], "scenes": [first, last], "window_bars": WINDOW_BARS,
             "roles": roles, "rows": rows, "unmapped": unmapped, "ignored": sorted(set(ignored)),
             "warnings": warnings, "notes": NOTES}
+
+
+# --------------------------------------------------------------------------
+# structure metrics: from the table, no Live
+# --------------------------------------------------------------------------
+
+PITCHED = ("bass", "lead", "arp", "pad", "drone", "pluck", "synth")   # "pitched parts"
+HOOK_ROLE = "lead"            # the hook is the lead line, whatever track plays it (LD, LEAD, 27-Diva)
+
+# The base section labels, from the start of a scene name: "Drop 1A · impact" is Drop 1, part A;
+# "Outro B" is Outro, part B.
+SECTION = re.compile(r"\s*(Intro|Main|Build|Drop|Breakdown|Outro)\b\s*(\d+)?\s*((?-i:[A-Z])\b)?", re.I)
+
+
+def section_of(scene_name):
+    """(label, part) from a scene name by the base labels, or None: "Drop 1A" -> ("Drop 1", "A")."""
+    m = SECTION.match(scene_name or "")
+    if not m:
+        return None
+    kind = m.group(1).capitalize()
+    return ("%s %s" % (kind, m.group(2)) if m.group(2) else kind), (m.group(3) or "")
+
+
+def _steps(result):
+    """The 8-bar steps of the range, in order, with the section each is in."""
+    steps, bar = [], 1
+    for row in result["rows"]:
+        sec = section_of(row["name"])
+        for w in range(row["windows"]):
+            n = min(WINDOW_BARS, row["bars"] - w * WINDOW_BARS)
+            cells = {role: c["windows"][w] for role, c in row["cells"].items()}
+            steps.append({"scene": row["scene"], "name": row["name"], "bar": bar, "bars": n,
+                          "in_scene": "%d-%d" % (w * WINDOW_BARS + 1, w * WINDOW_BARS + n),
+                          "section": sec[0] if sec else None, "part": sec[1] if sec else "",
+                          "cells": cells})
+            bar += n
+    return steps
+
+
+def _playing(step, role):
+    c = step["cells"].get(role)
+    return bool(c) and c["state"] != "silent"
+
+
+def _runs(steps, flags):
+    """[(first step index, count)] of consecutive steps where flags[i] is true."""
+    out, i = [], 0
+    while i < len(steps):
+        if flags[i]:
+            j = i
+            while j < len(steps) and flags[j]:
+                j += 1
+            out.append((i, j - i))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _span(steps, i, n):
+    return {"bar": steps[i]["bar"], "bars": sum(x["bars"] for x in steps[i:i + n]),
+            "section": steps[i]["section"], "scene": steps[i]["scene"]}
+
+
+def structure_metrics(result):
+    """Structure of the range, from its table: sections and lengths, what each 8-bar step adds,
+    and the numbers the reference studies are measured in. Bars count from the range's first
+    scene (bar 1). A role the Set does not have is None in every metric about it."""
+    steps = _steps(result)
+    n = len(steps)
+    roles = set(result["roles"])
+    out = {"bars": sum(x["bars"] for x in steps), "steps": n}
+
+    # sections: consecutive scenes under one label; an unlabelled scene is a section of its own
+    sections, unlabelled = [], []
+    for row in result["rows"]:
+        sec = section_of(row["name"])
+        if sec is None:
+            unlabelled.append({"scene": row["scene"], "name": row["name"]})
+        label = sec[0] if sec else None
+        if sections and label is not None and sections[-1]["label"] == label:
+            sections[-1]["scenes"][1] = row["scene"]
+            sections[-1]["bars"] += row["bars"]
+        else:
+            sections.append({"label": label, "scenes": [row["scene"], row["scene"]],
+                             "bars": row["bars"]})
+    bar = 1
+    for sec in sections:
+        sec["bar"] = bar
+        bar += sec["bars"]
+        mine = [x for x in steps if sec["scenes"][0] <= x["scene"] <= sec["scenes"][1]]
+        counts = [sum(1 for r in PITCHED if _playing(x, r)) for x in mine]
+        sec["pitched_parts"] = {"max": max(counts or [0]), "per_step": counts}
+    out["sections"], out["unlabelled_scenes"] = sections, unlabelled
+
+    # what each step adds, against the step before; the first step of the range has no before
+    changes, flags = [], []
+    for i, x in enumerate(steps):
+        if i == 0:
+            continue
+        kinds = {k: sorted(r for r, c in x["cells"].items() if c["change"] == k)
+                 for k in ("enter", "vary", "leave")}
+        flag = (None if kinds["enter"] or kinds["vary"]
+                else "only a removal" if kinds["leave"] else "nothing new")
+        rec = {"scene": x["scene"], "name": x["name"], "bar": x["bar"], "bars": x["bars"],
+               "in_scene": x["in_scene"], "enter": kinds["enter"], "vary": kinds["vary"],
+               "leave": kinds["leave"], "flag": flag}
+        changes.append(rec)
+        if flag:
+            flags.append(rec)
+    out["changes"], out["flags"] = changes, flags
+
+    def role_runs(role):
+        play = [_playing(x, role) for x in steps]
+        return play, _runs(steps, play)
+
+    # hook: how long the lead runs, and whether it varies while it does
+    if HOOK_ROLE in roles and n:
+        play, runs = role_runs(HOOK_ROLE)
+        sigs = [x["cells"][HOOK_ROLE]["sig"] for x, p in zip(steps, play) if p]
+        out["hook"] = {
+            "role": HOOK_ROLE, "steps_playing": sum(play), "bars_playing": sum(
+                x["bars"] for x, p in zip(steps, play) if p),
+            "first_bar": next((x["bar"] for x, p in zip(steps, play) if p), None),
+            "longest_run": max([_span(steps, i, k) for i, k in runs],
+                               key=lambda r: r["bars"], default=None),
+            "runs": [_span(steps, i, k) for i, k in runs],
+            "varies": sum(1 for x, p in zip(steps[1:], play[1:])
+                          if p and x["cells"][HOOK_ROLE]["change"] == "vary"),
+            "distinct_variants": len(set(sigs))}
+    else:
+        out["hook"] = None
+
+    # bass: the bar it enters, and whether that is before the first drop
+    if "bass" in roles and n:
+        play, _ = role_runs("bass")
+        i = play.index(True) if True in play else None
+        drop = next((s["bar"] for s in sections if (s["label"] or "").startswith("Drop")), None)
+        out["bass"] = {"entry_bar": steps[i]["bar"] if i is not None else None,
+                       "entry_scene": steps[i]["scene"] if i is not None else None,
+                       "first_drop_bar": drop,
+                       "before_first_drop": (None if i is None or drop is None
+                                             else steps[i]["bar"] < drop)}
+    else:
+        out["bass"] = None
+
+    # kick: first bar, and every stretch it is out between two stretches it plays
+    if "kick" in roles and n:
+        play, _ = role_runs("kick")
+        if True in play:
+            first, last = play.index(True), n - 1 - play[::-1].index(True)
+            gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
+                    if first < i and i + k - 1 < last]
+            out["kick"] = {"first_bar": steps[first]["bar"], "out": gaps,
+                           "longest_out_bars": max([g["bars"] for g in gaps], default=0),
+                           "last_bar": steps[last]["bar"] + steps[last]["bars"] - 1}
+        else:
+            out["kick"] = {"first_bar": None, "out": [], "longest_out_bars": 0, "last_bar": None}
+    else:
+        out["kick"] = None
+
+    # Drop 2 against Drop 1
+    d = {s["label"]: s["bars"] for s in sections if s["label"] in ("Drop 1", "Drop 2")}
+    out["drop_ratio"] = ({"drop1_bars": d["Drop 1"], "drop2_bars": d["Drop 2"],
+                          "ratio": round(d["Drop 2"] / d["Drop 1"], 3)}
+                         if d.get("Drop 1") and "Drop 2" in d else None)
+
+    # hats: do they stay on from the step they enter
+    if "hats" in roles and n:
+        play, _ = role_runs("hats")
+        if True in play:
+            first = play.index(True)
+            gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
+                    if i > first]
+            out["hats"] = {"first_bar": steps[first]["bar"], "steps_playing": sum(play),
+                           "of_steps": n, "constant": not gaps, "gaps": gaps}
+        else:
+            out["hats"] = {"first_bar": None, "steps_playing": 0, "of_steps": n,
+                           "constant": False, "gaps": []}
+    else:
+        out["hats"] = None
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -521,6 +763,70 @@ def format_table(result):
     return "\n".join(lines)
 
 
+def format_metrics(m):
+    def where(r):
+        return "bar %d, %d bars, scene %d" % (r["bar"], r["bars"], r["scene"])
+    lines = ["Structure: %d bars in %d steps of 8 (bars count from the first scene of the range)"
+             % (m["bars"], m["steps"]), "", "sections"]
+    for s in m["sections"]:
+        sc = ("scene %d" % s["scenes"][0] if s["scenes"][0] == s["scenes"][1]
+              else "scenes %d-%d" % tuple(s["scenes"]))
+        lines.append("  %-10s %-14s bar %-3d %3d bars   pitched parts, most at once: %d"
+                     % (s["label"] or "(no label)", sc, s["bar"], s["bars"],
+                        s["pitched_parts"]["max"]))
+    if m["unlabelled_scenes"]:
+        lines.append("  scenes whose name matches no section label: " + ", ".join(
+            "%d (%r)" % (u["scene"], u["name"]) for u in m["unlabelled_scenes"]))
+    lines += ["", "8-bar steps that add nothing"]
+    if m["flags"]:
+        for f in m["flags"]:
+            lines.append("  %s, bars %s of the scene (bar %d): %s"
+                         % ((f["name"] or "scene %d" % f["scene"])[:30], f["in_scene"], f["bar"],
+                            f["flag"]))
+    else:
+        lines.append("  none")
+    h = m["hook"]
+    lines += ["", "hook (%s)" % HOOK_ROLE]
+    if h and h["first_bar"]:
+        lines.append("  in at bar %d, plays %d of %d steps (%d bars); longest run %d bars from bar %d"
+                     % (h["first_bar"], h["steps_playing"], m["steps"], h["bars_playing"],
+                        h["longest_run"]["bars"], h["longest_run"]["bar"]))
+        lines.append("  varies at %d steps, %d distinct variants" % (h["varies"],
+                                                                      h["distinct_variants"]))
+    else:
+        lines.append("  never plays" if h else "  no %s role in this range" % HOOK_ROLE)
+    b = m["bass"]
+    lines += ["", "bass: " + ("no bass role in this range" if b is None else
+                              "never plays" if b["entry_bar"] is None else
+                              "in at bar %d (scene %d)%s" % (
+                                  b["entry_bar"], b["entry_scene"],
+                                  "" if b["before_first_drop"] is None else
+                                  ", %s the first drop (bar %d)" % (
+                                      "BEFORE" if b["before_first_drop"] else "not before",
+                                      b["first_drop_bar"])))]
+    k = m["kick"]
+    if k is None:
+        lines.append("kick: no kick role in this range")
+    elif k["first_bar"] is None:
+        lines.append("kick: never plays")
+    else:
+        lines.append("kick: in at bar %d; out %s" % (k["first_bar"], "; ".join(
+            "%d bars from bar %d (%s)" % (g["bars"], g["bar"], g["section"] or "no label")
+            for g in k["out"]) or "never between two stretches it plays"))
+    dr = m["drop_ratio"]
+    lines.append("drops: " + ("Drop 2 %d bars / Drop 1 %d bars = %g" % (
+        dr["drop2_bars"], dr["drop1_bars"], dr["ratio"]) if dr else "no Drop 1 and Drop 2 in this range"))
+    ht = m["hats"]
+    lines.append("hats: " + ("no hats role in this range" if ht is None else
+                             "never play" if ht["first_bar"] is None else
+                             "in at bar %d, play %d of %d steps, %s" % (
+                                 ht["first_bar"], ht["steps_playing"], ht["of_steps"],
+                                 "constant" if ht["constant"] else "out at " + ", ".join(
+                                     "bar %d (%d bars)" % (g["bar"], g["bars"])
+                                     for g in ht["gaps"]))))
+    return "\n".join(lines)
+
+
 def parse_scenes(text):
     m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", text or "")
     if not m:
@@ -539,6 +845,8 @@ def main(argv=None):
     rd.add_argument("--scenes", required=True, metavar="A-B", help="1-based scene range, e.g. 33-47")
     rd.add_argument("--roles", metavar="MAP.json", help="track name -> role map (JSON)")
     rd.add_argument("--json", action="store_true", help="JSON instead of the text table")
+    rd.add_argument("--metrics", action="store_true",
+                    help="add the structure metrics: sections, steps that add nothing, hook, bass, kick, drops, hats")
     args = ap.parse_args(argv)
     try:
         first, last = parse_scenes(args.scenes)
@@ -548,7 +856,13 @@ def main(argv=None):
         sys.exit("arrangement: %s" % e)
     except LiveError as e:
         sys.exit("arrangement: Live refused: %s" % e)
-    print(json.dumps(result, indent=1, ensure_ascii=False) if args.json else format_table(result))
+    if args.metrics:
+        result["metrics"] = structure_metrics(result)
+    if args.json:
+        print(json.dumps(result, indent=1, ensure_ascii=False))
+    else:
+        print(format_table(result) + ("\n\n" + format_metrics(result["metrics"])
+                                      if args.metrics else ""))
 
 
 if __name__ == "__main__":

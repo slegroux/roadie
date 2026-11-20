@@ -7,7 +7,7 @@
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
-#   roadie arrangement read --scenes A-B [--json]   read Session scenes as an arrangement table (arrangement.py)
+#   roadie arrangement read --scenes A-B [--json] [--metrics]   read Session scenes as an arrangement table (arrangement.py)
 #   roadie batch plan|run|verify-sources ...   unattended overnight batch   (batch.py)
 #   roadie stats                     summarise the local usage log
 #   roadie mcp                       MCP server (stdio) for the analysis tools (roadie_mcp.py)
