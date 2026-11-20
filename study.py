@@ -15,11 +15,17 @@ roots may be a slow FUSE mount.
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from roadie_analysis import key as keymod
 
 DEFAULT_ROOTS = "local=~/Projects/Music/slgMusProd/Studies%spcloud=~/pCloud Drive/Music/Production/Roadie/Studies" % os.pathsep
 
@@ -46,6 +52,11 @@ STUDIES_ROOTS = parse_roots(os.environ.get("ROADIE_STUDIES"))
 def _norm(s: str) -> str:
     """Names compare equal across Unicode forms: pCloud keeps NFD file names, a typed name is NFC."""
     return unicodedata.normalize("NFC", s).casefold()
+
+
+def _strip_suffix(name: str) -> str:
+    """A folder's title: `Flare [124 Am 8A]` is `Flare` (the bpm, key and Camelot suffix is not part of the name)."""
+    return re.sub(r"\s*\[[^\]]*\]\s*$", "", name).strip() or name
 
 
 def _roots(roots) -> list[Root]:
@@ -114,6 +125,11 @@ class Study:
     layers: dict[str, Layer]
     extras: list[Path] = field(default_factory=list)
     source: str = ""                      # label of the root it was found under
+    key: str | None = None                # "A minor", from study.json
+    camelot: str | None = None
+    key_source: str | None = None         # one of KEY_SOURCES
+    key_confidence: float | None = None   # a detected key's margin over the runner-up
+    key_url: str | None = None            # the listing an online key came from
 
     def sections(self) -> list[Section]:
         data = self.layers["sections"].data
@@ -160,6 +176,28 @@ def _marker(folder: Path) -> dict | None:
     return m if isinstance(m, dict) and m.get("kind") == "study_marker" else None
 
 
+# Where a key came from, weakest first: `tag` never replaces a key with one from a weaker source.
+KEY_SOURCES = ("detected", "online", "tagged", "by ear")
+
+
+def _text(x) -> str | None:
+    return x.strip() if isinstance(x, str) and x.strip() else None
+
+
+def _key_fields(marker: dict | None) -> dict:
+    """The key part of a study.json marker, each field checked; absent or malformed ones are None."""
+    m = marker or {}
+    key, cam = _text(m.get("key")), _text(m.get("camelot"))
+    if key and not cam:
+        try:
+            cam = keymod.camelot(*keymod.parse_key(key))
+        except ValueError:
+            pass
+    src = m.get("key_source")
+    return {"key": key, "camelot": cam, "key_source": src if key and src in KEY_SOURCES else None,
+            "key_confidence": _number(m.get("key_confidence")), "key_url": _text(m.get("key_url"))}
+
+
 def _stems_dir(folder: Path) -> Path | None:
     """The folder named by the study.json marker, else the first `*_stems/` folder."""
     named = (_marker(folder) or {}).get("stems")
@@ -199,7 +237,7 @@ def _scan(roots) -> tuple[list[StudyRef], dict[str, list[str]], set[str]]:
                 titles = sorted(p for p in artist.iterdir() if p.is_dir() and not p.name.startswith("."))
                 for title in titles:
                     stems = _stems_dir(title)
-                    refs.append(StudyRef(artist.name, title.name, title, stems is not None, r.label, stems))
+                    refs.append(StudyRef(artist.name, _strip_suffix(title.name), title, stems is not None, r.label, stems))
             except OSError as e:
                 errors[r.label].append("%s: %s" % (artist, e.strerror or type(e).__name__))
     return refs, errors, down
@@ -234,7 +272,7 @@ def _resolve(name_or_path: str, roots: list[Root]) -> tuple[Path, str]:
     if rest.strip() and _norm(label) in {_norm(r.label) for r in roots}:
         roots = [r for r in roots if _norm(r.label) == _norm(label)]
         name = rest.strip()
-    want = _norm(name)
+    want = _norm(_strip_suffix(name))
     if not want:
         raise ValueError("no study name given")
     refs = [r for r in find_studies(roots) if r.analysed]
@@ -357,7 +395,9 @@ def load_study(name_or_path: str, roots=None) -> Study:
     stems = {role: fs for role, fs in stems.items() if fs}
 
     layers = {n: Layer(n, missing=MISSING[n]) for n in LAYER_NAMES}
-    bpm, bar_offset = _number((_marker(folder) or {}).get("bpm")), None
+    marker = _marker(folder)
+    tagged_bpm = _number((marker or {}).get("bpm"))    # the record's own bpm wins over the measured one
+    bpm, bar_offset = tagged_bpm, None
 
     def unreadable(name, path):
         # The file is there: never offer the command that would overwrite it.
@@ -439,8 +479,9 @@ def load_study(name_or_path: str, roots=None) -> Study:
             layers["mix"] = unreadable("mix", bad[0])
             extras.remove(bad[0])
 
-    return Study(folder.parent.name, folder.name, folder, bpm, BEATS_PER_BAR, bar_offset,
-                 stems, layers, sorted(extras), source)
+    return Study(folder.parent.name, _strip_suffix(folder.name), folder,
+                 tagged_bpm if tagged_bpm is not None else bpm, BEATS_PER_BAR, bar_offset,
+                 stems, layers, sorted(extras), source, **_key_fields(marker))
 
 
 def to_json(study: Study, layers: list[str] | None = None) -> dict:
@@ -455,7 +496,8 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
     return {
         "kind": "study", "version": 1,
         "root": study.source, "path": str(study.root.absolute()), "artist": study.artist, "title": study.title,
-        "bpm": study.bpm, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
+        "bpm": study.bpm, "key": study.key, "camelot": study.camelot, "key_source": study.key_source,
+        "key_confidence": study.key_confidence, "key_url": study.key_url, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
                        "missing": l.missing, "caveats": l.caveats, "data": l.data}
@@ -464,11 +506,36 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
     }
 
 
+def _key_cells(f) -> tuple[str, str]:
+    """(short key, Camelot code) for a list column; a detected key is an estimate and prints with `?`."""
+    if not f["key"]:
+        return "-", "-"
+    try:
+        short = keymod.short_name(*keymod.parse_key(f["key"]))
+    except ValueError:
+        short = f["key"]
+    mark = "?" if f["key_source"] == "detected" else ""
+    return short + mark, (f["camelot"] + mark) if f["camelot"] else "-"
+
+
+def _key_line(study: Study) -> str:
+    if not study.key:
+        return "unknown (`roadie key %s` estimates it, `roadie study tag` records it)" % study.title
+    short, cam = _key_cells(vars(study))
+    why = "source %s" % (study.key_source or "not recorded")
+    if study.key_confidence is not None:
+        why += ", confidence %g" % study.key_confidence
+    if study.key_url:
+        why += ", %s" % study.key_url
+    return "%s%s (%s, %s), %s" % (study.key, "?" if study.key_source == "detected" else "", short, cam, why)
+
+
 def _show(study: Study) -> None:
     print("%s - %s  [%s]" % (study.artist, study.title, study.source))
     print("  %s bpm, %d/4, Live bar = %s" % (
         "%g" % study.bpm if study.bpm is not None else "unknown", study.beats_per_bar,
         "file bar + %d" % study.bar_offset if study.bar_offset is not None else "unknown"))
+    print("  key: %s" % _key_line(study))
     print("  stems: %s" % ", ".join(study.stems))
     for name, layer in study.layers.items():
         if layer.source is None:
@@ -490,17 +557,21 @@ def _show(study: Study) -> None:
             print("    %s" % p.relative_to(study.root))
 
 
-def _layer_flags(ref: StudyRef) -> dict[str, bool]:
+def _layer_flags(ref: StudyRef) -> tuple[dict[str, bool], float | None]:
     """Which layers a study has, by file names (listing, no JSON parsed): the files in the stems
     folder, and `*.profile.json` in the study folder, its analysis/ and the stems folder. The one
-    file opened is sections.json (a few KB), searched for the text "bar_activity"."""
+    file opened is sections.json (a few KB), searched for the text "bar_activity" and read for its bpm
+    when it parses (None otherwise)."""
     flags = {n: False for n in LAYER_NAMES}
     flags["grid"] = (ref.stems_dir / "alignment.json").exists()
     flags["sections"] = (ref.stems_dir / "sections.json").exists()
-    if flags["sections"]:      # the one file opened here, only to look for the key
+    bpm = None
+    if flags["sections"]:      # the one file opened here, to look for the key and the bpm
         try:
-            flags["activity"] = '"bar_activity"' in (ref.stems_dir / "sections.json").read_text()
-        except (OSError, ValueError):
+            text = (ref.stems_dir / "sections.json").read_text()
+            flags["activity"] = '"bar_activity"' in text
+            bpm = _number((json.loads(text) or {}).get("bpm"))
+        except (OSError, ValueError, AttributeError):
             pass
     for d in (ref.root, ref.root / "analysis", ref.stems_dir):
         try:
@@ -508,7 +579,7 @@ def _layer_flags(ref: StudyRef) -> dict[str, bool]:
                 flags["mix"] = True
         except OSError:
             pass
-    return flags
+    return flags, bpm
 
 
 LAYERS_NOTE = ("layer flags come from file names only, except that sections.json is opened to look for "
@@ -516,14 +587,24 @@ LAYERS_NOTE = ("layer flags come from file names only, except that sections.json
                "and is the check")
 
 
+def _list_row(r: StudyRef) -> dict:
+    row = {"root": r.source, "path": str(r.root.absolute()), "artist": r.artist, "title": r.title,
+           "analysed": r.analysed, "layers": None, "bpm": None, **_key_fields(None)}
+    if r.analysed:
+        row["layers"], measured = _layer_flags(r)
+        marker = _marker(r.root)
+        row.update(_key_fields(marker), bpm=_number((marker or {}).get("bpm"), measured))
+    return row
+
+
 def list_to_json(roots=None) -> dict:
-    """Every study under the roots: {root, path, artist, title, analysed, layers: {name: has it}}, and
+    """Every study under the roots: {root, path, artist, title, analysed, bpm, key, camelot, key_source,
+    key_confidence, key_url, layers: {name: has it}}, and
     each root with whether it is there and what could not be listed. Shallow: directory listings
     only, so a slow mount is cheap."""
     roots = _roots(roots)
     refs, errors, down = _scan(roots)
-    studies = [{"root": r.source, "path": str(r.root.absolute()), "artist": r.artist, "title": r.title,
-                "analysed": r.analysed, "layers": _layer_flags(r) if r.analysed else None} for r in refs]
+    studies = [_list_row(r) for r in refs]
     return {"kind": "study_list", "version": 1, "note": LAYERS_NOTE,
             "roots": [{"label": r.label, "path": str(r.path),
                        "available": r.path.is_dir() and r.label not in down,
@@ -553,15 +634,65 @@ def _list(as_json: bool) -> int:
         for e in root["errors"]:
             print("  could not list %s" % e)
         print("  analysed (%d)" % root["analysed"])
+        if root["analysed"]:
+            print("    %-40s %7s %-6s %-5s" % ("", "bpm", "key", "camelot"))
         for r in (s for s in rows if s["analysed"]):
             have = [n for n, ok in r["layers"].items() if ok]
-            print("    %-40s has: %-22s missing: %s" % ("%s/%s" % (r["artist"], r["title"]), " ".join(have) or "-",
-                                                      " ".join(n for n in r["layers"] if n not in have) or "-"))
+            short, cam = _key_cells(r)
+            print("    %-40s %7s %-6s %-5s has: %-22s missing: %s" % (
+                "%s/%s" % (r["artist"], r["title"]), "%g" % r["bpm"] if r["bpm"] is not None else "-", short, cam,
+                " ".join(have) or "-", " ".join(n for n in r["layers"] if n not in have) or "-"))
         print("  not analysed (%d)" % root["not_analysed"])
         for r in (s for s in rows if not s["analysed"]):
             print("    %s/%s" % (r["artist"], r["title"]))
     print("note: %s" % data["note"])
     return 0
+
+
+def tag_study(folder: Path, key: str | None = None, bpm: float | None = None, source: str = "tagged",
+              confidence: float | None = None, url: str | None = None) -> dict:
+    """Write a study's own bpm and/or key into its `study.json`, changing only those fields (`stems`, `t0` and
+    anything else stay). A key from a weaker source than the one on record is refused (KEY_SOURCES: by ear
+    beats tagged beats online beats detected). A study on the pCloud mount is written with `rclone copyto` of
+    that one small file, a local one directly. Returns the marker as written."""
+    if key is None and bpm is None:
+        raise ValueError("nothing to tag: give a key and/or a bpm")
+    if source not in KEY_SOURCES:
+        raise ValueError("key source must be one of %s" % ", ".join(KEY_SOURCES))
+    path = folder / "study.json"
+    marker = {"kind": "study_marker"}
+    if path.exists():
+        marker = _read_json(path)
+        if not isinstance(marker, dict) or marker.get("kind") != "study_marker":
+            raise ValueError("%s is not a study marker (kind study_marker): not overwriting it" % path)
+    if bpm is not None:
+        if not isinstance(bpm, (int, float)) or bpm <= 0:
+            raise ValueError("bpm must be a positive number")
+        marker["bpm"] = bpm
+    if key is not None:
+        pc, mode = keymod.parse_key(key)
+        old = _key_fields(marker)
+        if old["key"] and old["key_source"] and KEY_SOURCES.index(source) < KEY_SOURCES.index(old["key_source"]):
+            raise ValueError("%s already has a key from source %r (%s), which outranks %r: not changed"
+                             % (folder.name, old["key_source"], old["key"], source))
+        for stale in ("key_confidence", "key_url"):         # they described the old key
+            marker.pop(stale, None)
+        marker.update(key=keymod.key_name(pc, mode), camelot=keymod.camelot(pc, mode), key_source=source)
+        if confidence is not None:
+            marker["key_confidence"] = confidence
+        if url:
+            marker["key_url"] = url
+    text = json.dumps(marker, indent=2, ensure_ascii=False) + "\n"
+    remote = keymod.pcloud_remote(path)
+    if remote:
+        with tempfile.TemporaryDirectory(prefix="roadie-tag-") as tmp:
+            Path(tmp, "study.json").write_text(text)
+            subprocess.run(["rclone", "copyto", str(Path(tmp, "study.json")), remote], check=True, capture_output=True)
+    else:
+        tmp_path = path.with_name(".study.json.tmp")
+        tmp_path.write_text(text)
+        os.replace(tmp_path, path)
+    return marker
 
 
 def main(argv=None) -> int:
@@ -572,9 +703,32 @@ def main(argv=None) -> int:
     show = sub.add_parser("show", help="print one study")
     show.add_argument("name", help="a title under the studies root, or a path")
     show.add_argument("--json", action="store_true", help="print the record as JSON")
+    tag = sub.add_parser("tag", help="write a study's bpm and/or key into its study.json (the only command that writes)")
+    tag.add_argument("name", help="a title under the studies root, or a path")
+    tag.add_argument("--key", help="the key: Am, A minor, F#Maj, 8A, ...")
+    tag.add_argument("--bpm", type=float, help="the tempo")
+    tag.add_argument("--by-ear", action="store_true", help="the key was settled by ear (beats every other source)")
+    tag.add_argument("--source", choices=KEY_SOURCES[:3], help="where the key came from (default tagged: the user's own)")
+    tag.add_argument("--url", help="the listing an online key came from")
+    tag.add_argument("--confidence", type=float, help="a detected key's margin over the runner-up")
     args = ap.parse_args(argv)
     if args.cmd == "list":
         return _list(args.json)
+    if args.cmd == "tag":
+        try:
+            if args.by_ear and args.source:
+                raise ValueError("--by-ear and --source are two answers to the same question")
+            folder, _ = _resolve(args.name, _roots(None))
+            m = tag_study(folder, args.key, args.bpm, "by ear" if args.by_ear else args.source or "tagged",
+                          args.confidence, args.url)
+        except (ValueError, OSError, subprocess.CalledProcessError) as e:
+            print("study: tag: %s" % (e.stderr.decode(errors="replace").strip() if isinstance(e, subprocess.CalledProcessError)
+                                      and e.stderr else e), file=sys.stderr)
+            return 1
+        print("tagged %s/%s: bpm %s, key %s" % (folder.parent.name, _strip_suffix(folder.name),
+              "%g" % m["bpm"] if "bpm" in m else "-",
+              "%s (%s), %s" % (m["key"], m["camelot"], m["key_source"]) if m.get("key") else "-"))
+        return 0
     try:
         study = load_study(args.name)
         if args.json:

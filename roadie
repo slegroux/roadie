@@ -133,7 +133,7 @@ case "$cmd" in
   open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
   study)
-    # Read-only; not logged.
+    # Read-only except `tag`, which writes one study.json; not logged.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
     exec "$PY" "$REPO/study.py" "$@" ;;
   key)

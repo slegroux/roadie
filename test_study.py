@@ -429,3 +429,112 @@ def test_activity_stays_absent_without_bar_activity_and_unreadable_when_malforme
     assert s.activity() is None and s.layers["activity"].caveats == [
         "bar_activity exists but could not be read"]
     assert s.layers["activity"].missing is None        # the file is there: no command offered over it
+
+
+def test_a_bracket_suffix_is_not_part_of_the_title(tmp_path):
+    folder = make_study(tmp_path, "Einmusik", "Flare [124 Am 8A]")
+    assert [(r.artist, r.title) for r in study.find_studies(tmp_path)] == [("Einmusik", "Flare")]
+    for name in ("Flare", "flar", "Einmusik/Flare", "Flare [124 Am 8A]"):
+        s = load_study(name, tmp_path)
+        assert (s.title, s.root) == ("Flare", folder)
+    assert load_study("local:Flare", [study.Root("local", tmp_path)]).title == "Flare"
+    assert load_study(str(folder), tmp_path).title == "Flare"
+
+
+def tag_tree(tmp_path):
+    return make_study(tmp_path, "Einmusik", "Flare")
+
+
+def test_a_marker_without_the_new_fields_still_loads_and_the_record_carries_them(tmp_path):
+    folder = tag_tree(tmp_path)
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "t0": 0.0}))
+    s = load_study("Flare", tmp_path)
+    assert (s.key, s.camelot, s.key_source, s.key_confidence, s.key_url) == (None, None, None, None, None)
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "bpm": 124, "key": "Am",
+                                                   "key_source": "online", "key_url": "https://x/y"}))
+    d = to_json(load_study("Flare", tmp_path))
+    assert (d["bpm"], d["key"], d["camelot"], d["key_source"], d["key_url"]) == (124.0, "Am", "8A", "online", "https://x/y")
+
+
+def test_tag_writes_only_its_fields_and_keeps_the_others(tmp_path):
+    folder = tag_tree(tmp_path)
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "Flare_124bpm_stems", "t0": 0.5}))
+    study.tag_study(folder, key="Am", bpm=124)
+    on_disk = json.loads((folder / "study.json").read_text())
+    assert on_disk == {"kind": "study_marker", "stems": "Flare_124bpm_stems", "t0": 0.5, "bpm": 124,
+                       "key": "A minor", "camelot": "8A", "key_source": "tagged"}
+    study.tag_study(folder, bpm=124.5)                            # a bpm alone leaves the key
+    s = load_study("Flare", tmp_path)
+    assert (s.bpm, s.key, s.camelot, s.key_source) == (124.5, "A minor", "8A", "tagged")
+    assert json.loads((folder / "study.json").read_text())["t0"] == 0.5
+
+
+def test_a_stronger_key_source_wins_and_by_ear_beats_all(tmp_path):
+    folder = tag_tree(tmp_path)
+    study.tag_study(folder, key="E minor", source="tagged")
+    with pytest.raises(ValueError, match="outranks"):
+        study.tag_study(folder, key="Am", source="detected", confidence=0.2)
+    with pytest.raises(ValueError, match="outranks"):
+        study.tag_study(folder, key="Am", source="online", url="https://x/y")
+    assert load_study("Flare", tmp_path).key == "E minor"
+    study.tag_study(folder, key="Bm", source="by ear")
+    with pytest.raises(ValueError, match="outranks"):
+        study.tag_study(folder, key="Em", source="tagged")
+    s = load_study("Flare", tmp_path)
+    assert (s.key, s.camelot, s.key_source) == ("B minor", "10A", "by ear")
+    # a weaker key can still be written when nothing stronger is on record, and carries its confidence
+    other = make_study(tmp_path, "Einmusik", "Limba")
+    study.tag_study(other, key="C", source="detected", confidence=0.12)
+    assert json.loads((other / "study.json").read_text())["key_confidence"] == 0.12
+    study.tag_study(other, key="G", source="online", url="https://x/y")      # stronger replaces, stale confidence goes
+    assert "key_confidence" not in json.loads((other / "study.json").read_text())
+
+
+def test_tag_refuses_to_overwrite_a_file_that_is_not_a_marker_or_a_bad_key(tmp_path):
+    folder = tag_tree(tmp_path)
+    (folder / "study.json").write_text('{"something": "else"}')
+    with pytest.raises(ValueError, match="not a study marker"):
+        study.tag_study(folder, key="Am")
+    (folder / "study.json").unlink()
+    with pytest.raises(ValueError, match="not a key"):
+        study.tag_study(folder, key="Hm")
+    assert not (folder / "study.json").exists()
+
+
+def test_cli_tag_then_list_and_show_print_bpm_key_and_camelot(tmp_path):
+    make_study(tmp_path, "Einmusik", "Flare [124 Am 8A]")
+    make_study(tmp_path, "Bodzin", "Earth")
+    env = dict(os.environ, ROADIE_STUDIES=str(tmp_path))
+    run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, "study.py"), *a], capture_output=True,
+                                    text=True, env=env)
+    assert run("tag", "Flare", "--key", "Am", "--bpm", "124", "--by-ear").returncode == 0
+    assert run("tag", "Earth", "--key", "Em", "--source", "detected", "--confidence", "0.1").returncode == 0
+    out = run("list").stdout
+    flare = [l for l in out.splitlines() if "Einmusik/Flare" in l][0].split("has:")[0].split()
+    assert flare[1:] == ["124", "Am", "8A"]
+    earth = [l for l in out.splitlines() if "Bodzin/Earth" in l][0].split("has:")[0].split()
+    assert earth[1:] == ["124", "Em?", "9A?"]                      # a detected key is marked as an estimate
+    assert "key: A minor (Am, 8A), source by ear" in run("show", "Flare").stdout
+    assert "key: E minor? (Em?, 9A?), source detected, confidence 0.1" in run("show", "Earth").stdout
+    weaker = run("tag", "Flare", "--key", "C", "--source", "online")
+    assert weaker.returncode == 1 and "outranks" in weaker.stderr
+    assert run("tag", "Flare").returncode == 1                    # nothing to tag
+    assert run("tag", "Flare", "--key", "Am", "--by-ear", "--source", "online").returncode == 1
+
+
+def test_a_pcloud_study_is_tagged_by_rclone_copyto_of_the_one_file(tmp_path, monkeypatch):
+    import types
+    folder = tag_tree(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, json.loads(open(cmd[2]).read())))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(study.keymod, "pcloud_remote", lambda p: "pcloud:Music/Studies/Einmusik/Flare/study.json")
+    monkeypatch.setattr(study.subprocess, "run", fake_run)
+    study.tag_study(folder, key="Am", bpm=124)
+    (cmd, sent), = calls
+    assert cmd[:2] == ["rclone", "copyto"] and cmd[3] == "pcloud:Music/Studies/Einmusik/Flare/study.json"
+    assert sent["key"] == "A minor" and sent["bpm"] == 124
+    assert not (folder / "study.json").exists()                 # nothing written through the mount

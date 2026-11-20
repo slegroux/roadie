@@ -42,7 +42,8 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
 | `roadie arrangement read --scenes A-B [--json]` | the open Live Set's Session scenes A-B as a table: per 8 bars, which role (kick, bass, lead, ...) plays, enters, varies or leaves. Read-only; `--roles MAP.json` maps track names to roles; `--metrics` adds sections, steps that add nothing, hook, bass entry, kick-out, Drop 2 / Drop 1 and hats; `roadie arrangement ref <study>` gives the same block for a reference study, bar by bar, from the `bar_activity` that `roadie sections` now saves in `sections.json` (no notes, so no "varied" or hook) | `arrangement.py` |
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
-| `roadie study list\|show <name>` | the studies under the Studies folder and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)) | `study.py` |
+| `roadie study list\|show <name>` | the studies under the Studies folder with their bpm, key, Camelot code and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)); `roadie study tag <name> --key Am` writes a study's own key and bpm | `study.py` |
+| `roadie key <study or stems folder>` | estimate the key from the bass and synths stems (an estimate, with a confidence; see [Reading a study](#reading-a-study)) | `roadie_analysis/key.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 | `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
 
@@ -156,6 +157,36 @@ files are listed under `extras`, not interpreted. A study whose stems sit in a
 folder not named `*_stems` has a `study.json` at its root,
 `{"kind": "study_marker", "stems": "truth", "bpm": 124, "t0": 0.0}`. The MCP tools
 `study_list` and `study_read` return the same JSON.
+
+### Bpm and key
+
+`list` has a column each for bpm, key and Camelot code; `show` and the JSON carry them as `bpm`, `key`, `camelot`,
+`key_source`, `key_confidence` and `key_url`. They live in the optional fields of the same `study.json`
+(`{"kind": "study_marker", "bpm": 124, "key": "A minor", "camelot": "8A", "key_source": "tagged"}`); a study
+without them still loads, with the key shown as `-` and the bpm taken from its analysis. A bpm in `study.json`
+is the record's own and wins over the measured one. `key_source` says where the key came from, weakest first:
+`detected` (a `roadie key` estimate, shown with a `?`: `Am?  8A?`), `online` (a published listing, with its
+`key_url`), `tagged` (the user's own tag) and `by ear`. A key never replaces one from a stronger source.
+
+A folder may carry its tempo and key in its name, `<Title> [124 Am 8A]`. The trailing `[...]` is not part of the
+title: `roadie study show Flare` finds `Flare [124 Am 8A]`, as do `Einmusik/Flare` and `pcloud:Flare`, and the
+record's `title` is `Flare`.
+
+```bash
+roadie key Flare                   # estimate the key from the bass and synths stems; --json for the record
+roadie study tag Flare --key Am --bpm 124                    # the user's own tag (source "tagged")
+roadie study tag Flare --key Am --by-ear                     # settled by ear: beats every other source
+roadie study tag Flare --key "A minor" --source online --url https://www.beatport.com/track/flare/18146849
+```
+
+`tag` is the only command that writes in a Studies folder, and it writes one file: it sets the fields it was
+given in `study.json` and keeps the others (`stems`, `t0`). A study on the pCloud mount is written with
+`rclone copyto` of that one small file, a local one directly. `roadie key` takes the key from the chroma of
+the bass and synths stems summed over the whole track (Krumhansl-Kessler profiles), and gives the key, its
+short form and Camelot code, a confidence (the margin over the runner-up, which is printed too) and the
+runner-up. A small margin usually means a relative major/minor or a fifth apart: use it to cross-check a
+published key, not to overrule one. For a study on the pCloud mount it copies the two stems to a temporary
+folder with `rclone copyto` instead of reading them through the mount, and deletes them afterwards.
 
 ## Arrangement: the Set's scenes against reference studies
 

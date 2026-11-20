@@ -278,6 +278,19 @@ def test_study_read_is_the_cli_json_and_filters_layers(S, tmp_path, monkeypatch)
     assert "no study named" in failure(S, "study_read", name="Nope")
 
 
+def test_study_tools_carry_bpm_key_and_camelot_from_study_json(S, tmp_path, monkeypatch):
+    import study
+    study_tree(tmp_path)
+    (tmp_path / "Einmusik" / "Flare").rename(tmp_path / "Einmusik" / "Flare [124 Am 8A]")
+    study.tag_study(tmp_path / "Einmusik" / "Flare [124 Am 8A]", key="Am", bpm=124, source="online", url="https://x/y")
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
+    row = {r["title"]: r for r in json.loads(call(S, "study_list"))["studies"]}["Flare"]
+    assert (row["bpm"], row["key"], row["camelot"], row["key_source"]) == (124, "A minor", "8A", "online")
+    full = json.loads(call(S, "study_read", name="Flare"))
+    assert (full["title"], full["bpm"], full["key"], full["camelot"], full["key_url"]) == (
+        "Flare", 124, "A minor", "8A", "https://x/y")
+
+
 def test_arrangement_compare_is_the_cli_report_and_writes_the_markdown(S, tmp_path, monkeypatch):
     """The tool gives the report the CLI builds from the same saved read, and with `out` also the
     Markdown file and its path (a relative one under the home folder); a study without the activity
