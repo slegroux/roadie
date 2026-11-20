@@ -2,6 +2,7 @@
 """Read a range of Session View scenes from Live as an arrangement: which element plays when.
 
     arrangement.py read --scenes A-B [--roles MAP.json] [--json] [--metrics]
+    arrangement.py ref <study> [--json]
 
 The Set's scenes, played top to bottom, ARE the arrangement. This reads scenes A..B (1-based, as
 Live's scene numbers) and builds, per 8-bar step, one cell per scene x role: playing, silent, or
@@ -36,6 +37,10 @@ that add nothing ("nothing new") or only remove, pitched parts per section, the 
 any track mapped to it: LD, LEAD, 27-Diva), the bass entry bar, how long the kick is out between
 two stretches of kick, Drop 2 / Drop 1, and whether the hats stay on. A clip named "silent
 carrier" counts as silent.
+
+ref <study> runs the same metrics on a reference study: its sections and its per-bar stem activity
+(`bar_activity` in sections.json) as one-bar steps, in file bars. No notes, so no "varied", no
+"nothing new" and no hook: the output says so.
 
 NOT READ: clip automation (envelopes). A filter ramp on a lead counts as "no change"; the output
 says so in its notes.
@@ -713,6 +718,7 @@ def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
             if flag:
                 flags.append(rec)
     out["changes"], out["flags"] = changes, flags
+    out["changes_available"] = any("change" in c for x in steps for c in x["cells"].values())
 
     def playing(role):
         return [_playing(x, role) for x in steps]
@@ -854,25 +860,32 @@ def format_table(result):
     return "\n".join(lines)
 
 
-def format_metrics(m):
-    def where(r):
-        return "bar %d, %d bars, scene %d" % (r["bar"], r["bars"], r["scene"])
-    lines = ["Structure: %d bars in %d steps of 8 (bars count from the first scene of the range)"
-             % (m["bars"], m["steps"]), "", "sections"]
-    for s in m["sections"]:
-        sc = ("scene %d" % s["scenes"][0] if s["scenes"][0] == s["scenes"][1]
-              else "scenes %d-%d" % tuple(s["scenes"]))
-        lines.append("  %-10s %-14s bar %-3d %3d bars   pitched parts, most at once: %d"
-                     % (s["label"] or "(no label)", sc, s["bar"], s["bars"],
-                        s["pitched_parts"]["max"]))
-    if m["unlabelled_scenes"]:
-        lines.append("  scenes whose name matches no section label: " + ", ".join(
-            "%d (%r)" % (u["scene"], u["name"]) for u in m["unlabelled_scenes"]))
-    lines += ["", "8-bar steps that add nothing"]
-    if m["flags"]:
+def format_metrics(m, unavailable=None, title=None):
+    """The metric block as text. `unavailable` says, per metric, why a source cannot give it
+    ("changes", "hook"): printed in its place, never a silent zero or "none"."""
+    unavailable = unavailable or {}
+    unit = ("%d-bar steps" % m["step_bars"]) if m["step_bars"] != 1 else "1-bar steps"
+    lines = [title or "Structure: %d bars in %d steps of %d (bars count from the first scene of "
+             "the range)" % (m["bars"], m["steps"], m["step_bars"]), "", "sections"]
+    for sec in m["sections"]:
+        sc = sec.get("scenes")
+        where = ("" if not sc else "scene %d" % sc[0] if sc[0] == sc[1] else "scenes %d-%d" % tuple(sc))
+        lines.append("  %-12s %-13s bar %-3d %3d bars   pitched parts, most at once: %d"
+                     % (sec["label"] or "(no label)", where, sec["bar"], sec["bars"],
+                        sec["pitched_parts"]["max"]))
+    for u in m.get("unlabelled_scenes", []):
+        lines.append("  scene %d (%r) matches no section label" % (u["scene"], u["name"]))
+    if not m.get("unlabelled_scenes"):
+        for u in m["unlabelled"]:
+            lines.append("  section at bar %d (%r) matches no base label: listed, not guessed"
+                         % (u["bar"], u["name"]))
+    lines += ["", "%s that add nothing or only remove" % ("8-bar steps" if m["step_bars"] == 8 else unit)]
+    if not m["changes_available"]:
+        lines.append("  not available: " + unavailable.get("changes", "the steps carry no change"))
+    elif m["flags"]:
         for f in m["flags"]:
             lines.append("  %s, bars %s of the scene (bar %d): %s"
-                         % ((f["name"] or "scene %d" % f["scene"])[:30], f["in_scene"], f["bar"],
+                         % ((f["name"] or "scene %s" % f["scene"])[:30], f["in_scene"], f["bar"],
                             f["flag"]))
     else:
         lines.append("  none")
@@ -884,20 +897,24 @@ def format_metrics(m):
                         h["longest_run"]["bars"], h["longest_run"]["bar"]))
         lines.append("  varies at %d steps, %d distinct variants" % (h["varies"],
                                                                       h["distinct_variants"]))
+    elif h:
+        lines.append("  never plays")
     else:
-        lines.append("  never plays" if h else "  no %s role in this range" % HOOK_ROLE)
+        lines.append("  not available: " + unavailable.get(
+            "hook", "no %s role in this range" % HOOK_ROLE))
     b = m["bass"]
-    lines += ["", "bass: " + ("no bass role in this range" if b is None else
+    lines += ["", "bass: " + ("no bass role" if b is None else
                               "never plays" if b["entry_bar"] is None else
-                              "in at bar %d (scene %d)%s" % (
-                                  b["entry_bar"], b["entry_scene"],
+                              "in at bar %d%s%s" % (
+                                  b["entry_bar"],
+                                  " (scene %d)" % b["entry_scene"] if b["entry_scene"] else "",
                                   "" if b["before_first_drop"] is None else
                                   ", %s the first drop (bar %d)" % (
                                       "BEFORE" if b["before_first_drop"] else "not before",
                                       b["first_drop_bar"])))]
     k = m["kick"]
     if k is None:
-        lines.append("kick: no kick role in this range")
+        lines.append("kick: no kick role")
     elif k["first_bar"] is None:
         lines.append("kick: never plays")
     else:
@@ -906,9 +923,9 @@ def format_metrics(m):
             for g in k["out"]) or "never between two stretches it plays"))
     dr = m["drop_ratio"]
     lines.append("drops: " + ("Drop 2 %d bars / Drop 1 %d bars = %g" % (
-        dr["drop2_bars"], dr["drop1_bars"], dr["ratio"]) if dr else "no Drop 1 and Drop 2 in this range"))
+        dr["drop2_bars"], dr["drop1_bars"], dr["ratio"]) if dr else "no Drop 1 and Drop 2"))
     ht = m["hats"]
-    lines.append("hats: " + ("no hats role in this range" if ht is None else
+    lines.append("hats: " + ("no hats role" if ht is None else
                              "never play" if ht["first_bar"] is None else
                              "in at bar %d, play %d of %d steps, %s%s" % (
                                  ht["first_bar"], ht["steps_playing"], ht["of_steps"],
@@ -918,6 +935,71 @@ def format_metrics(m):
                                  "; out for the last %d bars" % ht["trailing_out_bars"]
                                  if ht["trailing_out_bars"] else "")))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# a reference: the same metrics from a study's per-bar stem activity
+# --------------------------------------------------------------------------
+
+# The study roles (study.STEM_ROLES) as the Set's roles: what a metric looks for by name.
+STUDY_ROLE = {"kick": "kick", "bass": "bass", "hats": "hats", "snare": "snare", "perc": "perc",
+              "synths": "synth", "vocals": "vox"}
+REF_UNAVAILABLE = {
+    "changes": "a reference is audio, not notes, so there is nothing to call 'varied' and no step "
+               "can be flagged as adding nothing or only removing",
+    "hook": "the stems have no lead part (the synths stem is leads and pads together), so the hook "
+            "run and its variation are not read",
+}
+
+
+def reference_metrics(study):
+    """The structure metrics of a study (`study.Study`): one-bar steps from its `bar_activity` and
+    its sections, through `metrics_from_steps(step_bars=1)`. Bars are the study's FILE bars (the
+    Live bar is the file bar plus `bar_offset` when it is known). Needs sections.json with a
+    bar_activity (`roadie sections <stems>`); raises ValueError without one."""
+    act = study.activity()
+    if act is None:
+        raise ValueError("%s - %s has no bar_activity in its sections.json: run `roadie sections "
+                         "<its stems folder>`" % (study.artist, study.title))
+    first = study.activity_first_bar()
+    n = len(next(iter(act.values())))
+    sections = []
+    for sec in study.sections():
+        base = section_of(sec.label)
+        sections.append({"label": base[0] if base else None, "bar": sec.bar, "bars": sec.bars,
+                         "name": sec.label})
+
+    def section_at(bar):
+        return next((x["name"] for x in sections if x["bar"] <= bar < x["bar"] + x["bars"]), None)
+
+    steps = [{"bar": first + i, "bars": 1, "section": section_at(first + i),
+              "cells": {STUDY_ROLE.get(r, r): {"state": "playing" if flags[i] else "silent"}
+                        for r, flags in act.items()}} for i in range(n)]
+    caveats = []
+    for name in ("sections", "grid", "activity"):
+        layer = study.layers[name]
+        caveats += layer.caveats
+        if layer.source is None and name == "grid":
+            caveats.append("no grid: alignment.json is missing, the bar lines are the tempo and "
+                           "anchor sections.json was made with")
+    caveats.append("pitched parts counts stems (bass, synths), not notes")
+    caveats.append("bars are file bars" + (", Live bar = file bar + %d" % study.bar_offset
+                                           if study.bar_offset is not None else
+                                           "; no Live bar is known"))
+    return {"kind": "arrangement_reference", "version": 1,
+            "study": {"artist": study.artist, "title": study.title, "root": study.source,
+                      "bpm": study.bpm, "bar_offset": study.bar_offset},
+            "caveats": caveats, "unavailable": REF_UNAVAILABLE,
+            "metrics": metrics_from_steps(steps, sections, 1)}
+
+
+def format_reference(ref):
+    st = ref["study"]
+    title = "Structure of %s - %s (reference, %s bpm), %d bars in 1-bar steps, file bars" % (
+        st["artist"], st["title"], "%g" % st["bpm"] if st["bpm"] else "unknown",
+        ref["metrics"]["bars"])
+    return (format_metrics(ref["metrics"], ref["unavailable"], title)
+            + "\n\n" + "\n".join("note: " + c for c in ref["caveats"]))
 
 
 def parse_scenes(text):
@@ -940,7 +1022,18 @@ def main(argv=None):
     rd.add_argument("--json", action="store_true", help="JSON instead of the text table")
     rd.add_argument("--metrics", action="store_true",
                     help="add the structure metrics: sections, steps that add nothing, hook, bass, kick, drops, hats")
+    rf = sub.add_parser("ref", help="the same metrics for a reference study, from its bar_activity")
+    rf.add_argument("study", help="a study title under the studies roots, or a path (see `roadie study list`)")
+    rf.add_argument("--json", action="store_true", help="JSON instead of the text block")
     args = ap.parse_args(argv)
+    if args.cmd == "ref":
+        try:
+            import study as study_reader
+            ref = reference_metrics(study_reader.load_study(args.study))
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+            sys.exit("arrangement: %s" % e)
+        print(json.dumps(ref, indent=1, ensure_ascii=False) if args.json else format_reference(ref))
+        return
     try:
         first, last = parse_scenes(args.scenes)
         role_map = load_role_map(args.roles) if args.roles else None

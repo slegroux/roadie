@@ -75,7 +75,7 @@ STEM_ROLES = {
 MISSING = {
     "grid": "roadie load <stems> (writes alignment.json)",
     "sections": "roadie sections <stems>",
-    "activity": "not made yet: bar_activity in sections.json (roadie/01 item 3)",
+    "activity": "bar_activity: re-run the sections command on the stems folder (a sections.json made before it has none)",
     "mix": "reference_profile (roadie MCP tool) on the mix and stems, per section",
     "drums": "not made yet: drum roles per stem (studies/04 item 4)",
 }
@@ -123,7 +123,21 @@ class Study:
                         s.get("live_bar"), s.get("stems", [])) for s in data["sections"]]
 
     def activity(self) -> dict[str, list[bool]] | None:
-        return self.layers["activity"].data
+        """Which bars each role plays, from file bar `activity_first_bar()`: role -> one flag per
+        bar, a role playing when any of its stems does. None when sections.json has no bar_activity."""
+        data = self.layers["activity"].data
+        if not data:
+            return None
+        out = {}
+        for role, names in STEM_ROLES.items():
+            flags = [[c == "1" for c in data["stems"][n]] for n in names if n in data["stems"]]
+            if flags:
+                out[role] = [any(bar) for bar in zip(*flags)]
+        return out
+
+    def activity_first_bar(self) -> int | None:
+        data = self.layers["activity"].data
+        return data["first_bar"] if data else None
 
     def mix(self) -> list[dict] | None:
         data = self.layers["mix"].data
@@ -313,6 +327,27 @@ def _mix_layer(folder: Path, path: Path, prof: dict) -> tuple[Layer, str]:
     return Layer("mix", path, made_by, prof, None, caveats + [line]), state
 
 
+def _activity_layer(path: Path, act) -> Layer:
+    """The activity layer from sections.json's `bar_activity`, or an unreadable layer when it is not
+    {"first_bar": int, "bars": n, "stems": {stem: n characters of 0/1}}."""
+    try:
+        ok = (isinstance(act["first_bar"], int) and isinstance(act["bars"], int)
+              and isinstance(act["stems"], dict) and act["stems"]
+              and all(isinstance(v, str) and len(v) == act["bars"] and set(v) <= {"0", "1"}
+                      for v in act["stems"].values()))
+    except (KeyError, TypeError):
+        ok = False
+    if not ok:
+        return Layer("activity", path, None, None, None, ["bar_activity exists but could not be read"])
+    mapped = {n for names in STEM_ROLES.values() for n in names}
+    caveats = ["playing = the stem's level within 30 dB of its own loud level, per bar: a reading "
+               "of the audio, not of notes"]
+    other = sorted(n for n in act["stems"] if n not in mapped)
+    if other:
+        caveats.append("stems that are in no role, so not in activity(): %s" % ", ".join(other))
+    return Layer("activity", path, "sections (stems method, bar_activity)", act, None, caveats)
+
+
 def load_study(name_or_path: str, roots=None) -> Study:
     folder, source = _resolve(name_or_path, _roots(roots))
     stems_dir = _stems_dir(folder)
@@ -359,6 +394,9 @@ def load_study(name_or_path: str, roots=None) -> Study:
             layers["sections"] = Layer("sections", path,
                                        "sections (%s method)" % secs.get("method", "spectral"),
                                        secs, None, caveats)
+            act = secs.get("bar_activity")
+            if act is not None:
+                layers["activity"] = _activity_layer(path, act)
         else:
             layers["sections"] = unreadable("sections", path)
 

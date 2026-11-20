@@ -947,3 +947,37 @@ def test_too_short_is_its_own_error_and_auto_hands_over(tmp_path):
     with pytest.raises(ValueError, match="beats") as e:
         analyze_sections(d, period=0.5, grid_t0=0.0, method="auto")
     assert not isinstance(e.value, SectionsTooShort)
+
+
+OLD_RESULT_KEYS = ["bpm", "period", "grid_t0", "duration_sec", "beat_count", "phrase_bars",
+                   "segments_requested", "mix_stems", "sections", "method", "phrase_offset_bars"]
+
+
+def test_bar_activity_is_added_and_nothing_else_changes(tmp_path):
+    """The stems method keeps every field it had, in the order it had them, and gains bar_activity:
+    one 0/1 character per bar per stem that has an activity, from file bar 1. By hand from _layout():
+    the kick plays bars 1-48 (muffled bars 49-56 count as out) and 81-112; the bass 17-48 and 65-112;
+    a stem with no activity (an empty ride) has no entry."""
+    layout = _layout()
+    layout["drums_ride"] = []
+    res = _by_stems(_write_stems(tmp_path / "s", layout, 128))
+    assert list(res)[:len(OLD_RESULT_KEYS)] == OLD_RESULT_KEYS and list(res)[-1] == "bar_activity"
+    ba = res["bar_activity"]
+    assert (ba["first_bar"], ba["bars"]) == (1, 128)
+    assert sorted(ba["stems"]) == ["bass", "drums_hh", "drums_kick", "synths"]
+    assert all(len(v) == 128 for v in ba["stems"].values())
+    plays = lambda stem, a, b: ba["stems"][stem][a - 1:b]            # bars a..b inclusive
+    assert plays("drums_kick", 1, 48) == "1" * 48 and plays("drums_kick", 49, 56) == "0" * 8
+    assert plays("drums_kick", 81, 112) == "1" * 32 and plays("drums_kick", 113, 128) == "0" * 16
+    assert plays("bass", 1, 16) == "0" * 16 and plays("bass", 17, 48) == "1" * 32
+    assert plays("bass", 65, 112) == "1" * 48
+
+
+def test_a_one_bar_kick_break_survives_in_bar_activity_but_not_in_the_sections(tmp_path):
+    """The sections despeckle (a presence must hold 4 bars); bar_activity does not: a kick that is
+    out for bar 41 only is out for bar 41."""
+    layout = _layout()
+    layout["drums_kick"] = [(0, 40, 1.0), (41, 48 + 0, 1.0)] + layout["drums_kick"][1:]
+    res = _by_stems(_write_stems(tmp_path / "s", layout, 128))
+    assert res["bar_activity"]["stems"]["drums_kick"][36:48] == "1111" + "0" + "1" * 7
+    assert all(not (s["beat"] // 4 == 40) for s in res["sections"])

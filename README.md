@@ -40,7 +40,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
 | `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
 | `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
-| `roadie arrangement read --scenes A-B [--json]` | the open Live Set's Session scenes A-B as a table: per 8 bars, which role (kick, bass, lead, ...) plays, enters, varies or leaves. Read-only; `--roles MAP.json` maps track names to roles; `--metrics` adds sections, steps that add nothing, hook, bass entry, kick-out, Drop 2 / Drop 1 and hats | `arrangement.py` |
+| `roadie arrangement read --scenes A-B [--json]` | the open Live Set's Session scenes A-B as a table: per 8 bars, which role (kick, bass, lead, ...) plays, enters, varies or leaves. Read-only; `--roles MAP.json` maps track names to roles; `--metrics` adds sections, steps that add nothing, hook, bass entry, kick-out, Drop 2 / Drop 1 and hats; `roadie arrangement ref <study>` gives the same block for a reference study, bar by bar, from the `bar_activity` that `roadie sections` now saves in `sections.json` (no notes, so no "varied" or hook) | `arrangement.py` |
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
 | `roadie study list\|show <name>` | the studies under the Studies folder and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)) | `study.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |

@@ -392,3 +392,37 @@ def test_the_record_carries_the_path_and_empty_names_are_rejected(tmp_path):
     for bad in ("", "  ", "local:"):
         with pytest.raises(ValueError):
             load_study(bad, [study.Root("local", tmp_path)])
+
+
+# --- the activity layer: bar_activity in sections.json ------------------------
+
+def _with_activity(tmp_path, activity):
+    folder = make_study(tmp_path, "Rodriguez Jr.", "Synthwave")
+    stems = next(folder.glob("*_stems"))
+    secs = json.loads((stems / "sections.json").read_text())
+    secs["bar_activity"] = activity
+    (stems / "sections.json").write_text(json.dumps(secs))
+    return load_study("Synthwave", tmp_path)
+
+
+def test_activity_comes_back_by_role_from_bar_activity(tmp_path):
+    """Per stem in the file, per role out: the hats role is drums_hh or drums_ride (either plays),
+    `returns` is in no role and is named in the layer's caveats. First bar and flags by hand."""
+    s = _with_activity(tmp_path, {"first_bar": 1, "bars": 6, "stems": {
+        "drums_kick": "001111", "bass": "000011", "drums_hh": "011000", "drums_ride": "000100",
+        "returns": "111111"}})
+    layer = s.layers["activity"]
+    assert layer.source.name == "sections.json" and layer.missing is None
+    assert any("returns" in c for c in layer.caveats)
+    assert s.activity_first_bar() == 1
+    assert s.activity() == {"kick": [False, False, True, True, True, True],
+                            "bass": [False, False, False, False, True, True],
+                            "hats": [False, True, True, True, False, False]}
+
+
+def test_activity_stays_absent_without_bar_activity_and_unreadable_when_malformed(tmp_path):
+    assert load_study("Flare", make_study(tmp_path / "a", "E", "Flare").parent.parent).activity() is None
+    s = _with_activity(tmp_path / "b", {"first_bar": 1, "bars": 6, "stems": {"bass": "0101"}})
+    assert s.activity() is None and s.layers["activity"].caveats == [
+        "bar_activity exists but could not be read"]
+    assert s.layers["activity"].missing is None        # the file is there: no command offered over it

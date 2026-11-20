@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import arrangement as A
 from fake_live import Chain, Clip, Device, FakeLive
+from study import load_study
 
 BAR = 4.0
 
@@ -680,3 +681,66 @@ def test_silent_carrier_is_a_marker_at_the_end_of_the_clip_name(monkeypatch):
     r = table(m, monkeypatch, roles={"E21 kick (silent carrier)": "play"})
     assert [states(r, sc, "kick") for sc in (1, 2, 3)] == [["silent"], ["changed"], ["changed"]]
     assert r["warnings"].count("silent-carrier clips counted as silent: 'S-BD' (1 clips)") == 1
+
+
+# --------------------------------------------------------------------------
+# a reference: the same metrics from a study's per-bar activity
+# --------------------------------------------------------------------------
+
+def _reference(tmp_path, with_activity=True):
+    """A 32-bar study. Sections: Intro 1-4, Drop 1 5-12, Breakdown 1 13-16, Drop 2 17-28, Outro 29-32.
+    Kick plays bars 5-12 and 17-28, bass 5-28, hats 1-32, synths 5-32."""
+    stems = tmp_path / "Rod" / "Synth" / "Synth_124bpm_stems"
+    stems.mkdir(parents=True)
+    on = lambda *spans: "".join("1" if any(a <= b <= z for a, z in spans) else "0"
+                                for b in range(1, 33))
+    secs = [("Intro", 1, 4), ("Drop 1", 5, 8), ("Breakdown 1", 13, 4), ("Drop 2", 17, 12),
+            ("Outro", 29, 4)]
+    data = {"bpm": 124.0, "method": "stems", "sections": [
+        {"beat": (bar - 1) * 4, "bar": bar, "duration_beats": bars * 4, "stems": [], "label": name}
+        for name, bar, bars in secs]}
+    if with_activity:
+        data["bar_activity"] = {"first_bar": 1, "bars": 32, "stems": {
+            "drums_kick": on((5, 12), (17, 28)), "bass": on((5, 28)), "drums_hh": on((1, 32)),
+            "synths": on((5, 32))}}
+    (stems / "sections.json").write_text(json.dumps(data))
+    return load_study("Synth", tmp_path)
+
+
+def test_reference_metrics_from_one_bar_activity(tmp_path):
+    """By hand, in file bars: Drop 1 8 bars and Drop 2 12 -> ratio 1.5; the bass enters at bar 5, the
+    drop itself, so not before it; the kick is out for the 4 bars of the breakdown (bar 13); the hats
+    never leave; at most bass + synths = 2 pitched parts, in the drops. Entry bars are to the bar."""
+    m = A.reference_metrics(_reference(tmp_path))["metrics"]
+    assert (m["bars"], m["steps"], m["step_bars"]) == (32, 32, 1)
+    assert m["drop_ratio"] == {"drop1_bars": 8, "drop2_bars": 12, "ratio": 1.5}
+    assert (m["bass"]["entry_bar"], m["bass"]["before_first_drop"]) == (5, False)
+    assert m["kick"]["first_bar"] == 5
+    assert [(g["bar"], g["bars"], g["section"]) for g in m["kick"]["out"]] == [(13, 4, "Breakdown 1")]
+    assert (m["hats"]["constant"], m["hats"]["steps_playing"], m["hats"]["first_bar"]) == (True, 32, 1)
+    assert {s["label"]: s["pitched_parts"]["max"] for s in m["sections"]} == {
+        "Intro": 0, "Drop 1": 2, "Breakdown 1": 2, "Drop 2": 2, "Outro": 1}
+
+
+def test_a_reference_says_what_it_cannot_tell_rather_than_printing_zero(tmp_path, capsys, monkeypatch):
+    """No notes: no "varied", no steps that add nothing, no hook. The text says so where the numbers
+    would be, and the JSON carries the reasons and the study's caveats."""
+    ref = A.reference_metrics(_reference(tmp_path))
+    m = ref["metrics"]
+    assert m["changes_available"] is False and m["flags"] == [] and m["hook"] is None
+    text = A.format_reference(ref)
+    assert "not available: a reference is audio, not notes" in text
+    assert "not available: the stems have no lead part" in text
+    assert "note: labels by rule, not checked by ear" in text
+    assert "note: no grid: alignment.json is missing" in text and "no Live bar is known" in text
+    import study as study_mod
+    monkeypatch.setattr(study_mod, "STUDIES_ROOTS", study_mod.parse_roots("r=%s" % tmp_path))
+    A.main(["ref", "Synth", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["kind"] == "arrangement_reference" and data["unavailable"]["hook"]
+    assert data["metrics"]["bass"]["entry_bar"] == 5
+
+
+def test_a_reference_without_bar_activity_is_refused_with_the_command(tmp_path):
+    with pytest.raises(ValueError, match="no bar_activity.*roadie sections"):
+        A.reference_metrics(_reference(tmp_path, with_activity=False))
