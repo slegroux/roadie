@@ -71,6 +71,7 @@ claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clo
 | `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
 | `study_list()` | every study under the Studies folder and which analysis layers each has; the JSON of `roadie study list --json` |
 | `study_read(name, layers=None)` | one study as a record, the JSON of `roadie study show <name> --json`; `layers` keeps only some |
+| `arrangement_compare(scenes=None, ref="all", roles=None, read=None, out=None)` | the Set's Session scenes against reference studies, in numbers: the JSON of `roadie arrangement compare`, and with `out` the Markdown report too; `read` is a saved `roadie arrangement read --json` instead of Live |
 | `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's; writes `mix_report.json` and `mix_report.md` |
 
 The first three have the names, arguments and output of Sideman's tools of the
@@ -144,10 +145,10 @@ roadie study show Flare --json     # the same record as JSON ({"kind": "study", 
 or a path. A title found in two roots is an error naming both; give the root to
 pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
 (`root`) and its absolute `path`. Names match across Unicode forms (pCloud keeps
-decomposed accents). `list` shows which layers a study has from file names alone, so it can
+decomposed accents). `list` shows which layers a study has from file names alone (it opens `sections.json` only to look for `bar_activity`), so it can
 differ from `show` for a profile nested deeper than `analysis/`. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
 `mix` (a `*.profile.json` of kind `reference_profile`, with a note saying whether
-its inputs are fresh, stale or could not be checked), and `activity` and `drums`,
+its inputs are fresh, stale or could not be checked), and `activity` (the `bar_activity` that `roadie sections` saves in `sections.json`) and `drums`,
 which no tool writes yet. A layer is returned with caveats rather than guessed
 at: a profile of a newer version than the reader knows is listed, not read, and
 an unparseable file is shown with its path, never as missing. Other JSON result
@@ -155,6 +156,45 @@ files are listed under `extras`, not interpreted. A study whose stems sit in a
 folder not named `*_stems` has a `study.json` at its root,
 `{"kind": "study_marker", "stems": "truth", "bpm": 124, "t0": 0.0}`. The MCP tools
 `study_list` and `study_read` return the same JSON.
+
+## Arrangement: the Set's scenes against reference studies
+
+```
+roadie arrangement read --scenes 33-47 [--metrics] [--roles MAP.json] [--json]
+roadie arrangement ref "Flare" [--json]
+roadie arrangement compare --scenes 33-47 --ref Flare --ref "Synthwave 1 benchmark" --out report.md
+roadie arrangement compare --scenes 33-47 --ref all --set-json saved-read.json --out report.md
+```
+
+`read` reads a range of Session View scenes from the open Live Set (read-only: nothing is
+changed or played) and prints a table, one row per scene and one column per role (kick, bass,
+lead, ...), one character per 8 bars: `+` enters, `~` varies, `=` same, `-` leaves, `.` silent.
+A scene's length is its longest looping clip, never its name; notes held across a boundary, loop
+and start markers, one-shots and Drum Rack pads (by chain name and `in_note`) are read as they
+sound. `--metrics` adds the structure: sections by the base labels in the scene names (Intro,
+Main N, Build N, Drop N, Breakdown, Outro), the 8-bar steps that add nothing or only remove, the
+hook (the lead), the bass entry, kick-outs, Drop 2 / Drop 1 and the hats. Roles come from track
+names; `--roles` takes a JSON map (`{"27-Diva": "lead", "SYNTH KIT/Rim Shot": "perc"}`, the role
+`ignore` leaves a track out) and unmapped tracks are listed, never dropped. A clip named
+`... (silent carrier)` counts as silent. Clip automation is not read.
+
+`ref <study>` gives the same metrics for a study, bar by bar, from the `bar_activity` that
+`roadie sections` saves in `sections.json` (per bar, which stems play). A reference is audio, so
+nothing is called varied and it has no hook: the output says so.
+
+`compare` puts the two side by side: one row per reference (with its root) and the Set first,
+a range and a median row last, and readings in plain numbers. Positions are relative to the
+first drop, never absolute bars. `--ref all` is every analysed study that has the `activity`
+layer; the others are listed as left out, with why. `--set-json` takes a saved
+`read --json` instead of Live.
+
+```
+- Bass: enters 16 bars before the first drop in the Set; in 15 of 33 references it enters with
+  the first drop or later, in 18 before it (median -1, range -148 to 0, over 33 of 34 references).
+- Drop 2 / Drop 1: 1 in the Set (32 / 32 bars); median 1, range 0.167 to 8.5, over 31 of 34 references
+```
+
+The MCP tool `arrangement_compare` takes the same arguments.
 
 ## Drum roles
 

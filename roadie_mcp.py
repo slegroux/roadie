@@ -4,8 +4,9 @@
     roadie mcp                      run it (stdio); an MCP client starts it, not you
     claude mcp add --scope user roadie -- /abs/path/to/roadie/roadie mcp
 
-Six tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list and
-study_read (the Studies folder, read-only: `roadie study`). The first three
+Seven tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list,
+study_read (the Studies folder, read-only: `roadie study`) and arrangement_compare (the Set's scene
+order against reference studies: `roadie arrangement compare`). The first three
 have the names, arguments, defaults and output of Sideman's tools of the same name; session_compare
 is Sideman's mix_report with a reference profile. Measuring the Set on its own (audio_analyze,
 audio_compare, mix_report with no reference or an audio file) stays in Sideman's server: register
@@ -50,6 +51,7 @@ except ModuleNotFoundError as _e:
         raise
     sys.exit("sideman is not installed in .venv: run ./install.sh")
 
+import arrangement
 import study
 from roadie_analysis import oneshot, profile
 
@@ -59,7 +61,7 @@ mcp = MCPServer(
         "Analysis that needs a reference track, its stems or samples: drum one-shots (sample_analyze, "
         "sample_compare), a reference track measured once per section (reference_profile), and a capture "
         "of the Set compared with that profile (session_compare); the studies on disk and what was analysed in each "
-        "(study_list, study_read). Measuring the Set on its own "
+        "(study_list, study_read); the Set's arrangement against those studies (arrangement_compare). Measuring the Set on its own "
         "(audio_analyze, audio_compare, mix_report) is Sideman's server. A source is a file path or an "
         "audio clip's LOM path such as \"live_set tracks 3 clip_slots 0 clip\"."
     ),
@@ -370,6 +372,38 @@ def study_read(name: str, layers: list[str] | None = None) -> str:
         return json.dumps(study.to_json(study.load_study(name), layers), indent=2)
     except STUDY_ERRORS as e:
         raise AnalysisError("cannot read the study: %s: %s" % (type(e).__name__, e))
+
+
+@mcp.tool()
+def arrangement_compare(scenes: str | None = None, ref: list[str] | str = "all",
+                        roles: str | dict[str, str] | None = None, read: str | None = None,
+                        out: str | None = None) -> str:
+    """The Set's scene order set against reference studies, in numbers: for the Set's Session scenes
+    `scenes` ("33-47", 1-based) and each reference, the length, bars before the first drop, bass
+    entry against the drop (negative = before), Drop 1, Drop 2 and their ratio, the longest kick-out,
+    kick and hats gaps of 4+ bars (one-to-three-bar fills counted apart), as one row per reference
+    with a range and a median row, and readings of where the Set sits ("the bass enters 16 bars
+    before the first drop; in 15 of 33 references it enters with the drop or later"). `ref` is a
+    study name (as `study_read` takes it) or a list of them, or "all": every analysed study that has
+    the activity layer (the others come back in `left_out` with the reason). Positions are relative
+    to the first drop, never absolute bars. A reference is audio: the steps that add nothing, the
+    hook and the pitched roles are the Set's alone (`set_only`). `roles` is a track name -> role map
+    (a dict, or the path of a JSON file); `read` is the path of a saved `roadie arrangement read --json`,
+    used instead of Live. Without `read` the scenes are read from the open Live Set (read-only: gets and
+    note reads, nothing is changed or played). Returns the report as JSON; with `out` (a .md path) it
+    also writes the Markdown report and gives its path as `markdown_path`. Reads the Studies folders
+    only (small JSON files); writes only `out`."""
+    refs = [ref] if isinstance(ref, str) else list(ref)
+    try:
+        rep = arrangement.build_compare(scenes, refs, roles, read)
+        if out:
+            path = os.path.abspath(os.path.expanduser(out))
+            with open(path, "w") as f:
+                f.write(arrangement.format_compare(rep))
+            rep["markdown_path"] = path
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, client.LiveError) as e:
+        raise AnalysisError("cannot compare the arrangement: %s: %s" % (type(e).__name__, e))
+    return json.dumps(rep, indent=2)
 
 
 def main() -> None:
