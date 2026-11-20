@@ -189,7 +189,8 @@ class ClipSlot(_Obj):
 
 class Track(_Obj):
     PROPS = ("name", "color", "has_audio_input", "mixer_device", "arrangement_clips",
-             "clip_slots")
+             "clip_slots", "devices", "is_foldable", "has_midi_input", "is_grouped",
+             "group_track", "mute", "muted_via_solo")
     WRITABLE = ("name", "color")
     CALLS = ("create_audio_clip", "create_midi_clip")
 
@@ -199,6 +200,13 @@ class Track(_Obj):
         self.mixer_device = Mixer(model)
         self.clips = []
         self.clip_slots = [ClipSlot(model, self) for _ in range(scenes)]
+        self.devices = []
+        self.is_foldable = False
+        self.group_track = None
+        self.mute = self.muted_via_solo = False
+
+    has_midi_input = property(lambda self: not self.audio)
+    is_grouped = property(lambda self: self.group_track is not None)
 
     name = property(lambda self: self._name,
                     lambda self, v: (self._m._wrote(self, "name"),
@@ -249,6 +257,23 @@ class Track(_Obj):
         self._m._moved(self, "arrangement_clips", 0)
         self._m._wrote(self._m.song, "song_length")
         self._m.changed()
+
+
+class Chain(_Obj):
+    PROPS = ("name", "in_note")
+
+    def __init__(self, model, name, in_note):
+        super().__init__(model)
+        self.name, self.in_note = name, in_note
+
+
+class Device(_Obj):
+    """A device a test puts on a track; a Drum Rack (class_name DrumGroupDevice) has chains."""
+    PROPS = ("name", "class_name", "chains")
+
+    def __init__(self, model, name, class_name="Device", chains=()):
+        super().__init__(model)
+        self.name, self.class_name, self.chains = name, class_name, list(chains)
 
 
 class Scene(_Obj):
@@ -611,6 +636,16 @@ class FakeLive(object):
             self.changed()
         return {"path": p["path"], "added": len(p["notes"])}
 
+    def op_notes_get(self, p):
+        clip = self.resolve(p["path"])
+        if not getattr(clip, "is_midi_clip", False):
+            raise TypeError("%s is not a MIDI clip" % p["path"])
+        lo = float(p.get("from_time", 0.0))
+        hi = lo + float(p.get("time_span", float("inf")))
+        notes = [dict({"velocity": 100.0, "mute": False}, note_id=i, **n)
+                 for i, n in enumerate(clip.notes) if lo <= n["start_time"] < hi]
+        return {"path": p["path"], "count": len(notes), "total": len(clip.notes), "notes": notes}
+
     def op_ping(self, p):
         return {"handlers": True}
 
@@ -627,7 +662,7 @@ class FakeLive(object):
         return run_ops(self.dispatch, p["ops"], p.get("stop_on_error", True), self._undo(),
                        self.OPS)
 
-    OPS = ("ping", "get", "set", "call", "count", "warp_markers_set", "notes_add",
+    OPS = ("ping", "get", "set", "call", "count", "warp_markers_set", "notes_add", "notes_get",
            "get_batch", "set_batch", "transaction")
 
     def dispatch(self, op, params):

@@ -8,6 +8,7 @@
 #   roadie study list | show <name> [--json]  studies and their saved analyses (study.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
+#   roadie arrangement read --scenes A-B [--json] [--metrics] | ref <study>   Session scenes as an arrangement table; a study's structure (arrangement.py)
 #   roadie batch plan|run|verify-sources ...   unattended overnight batch   (batch.py)
 #   roadie stats                     summarise the local usage log
 #   roadie mcp                       MCP server (stdio) for the analysis tools (roadie_mcp.py)
@@ -136,6 +137,7 @@ case "$cmd" in
     exec "$PY" "$REPO/study.py" "$@" ;;
   scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
   als)      run_logged als      "$(first_dir "$@")" "$REPO/als_writer.py" "$@" ;;
+  arrangement) run_logged arrangement "" "$REPO/arrangement.py" "$@" ;;
   batch)
     # Not logged to the usage log: each track it processes calls roadie itself.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3

@@ -30,7 +30,8 @@ import test_analysis_equivalence as E
 
 HERE = pathlib.Path(__file__).resolve().parent
 MCP_GOLDEN = HERE / "mcp_golden" / "sideman_main.json"
-TOOLS = {"sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read"}
+TOOLS = {"sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read",
+         "arrangement_compare"}
 CLIP = "live_set tracks 2 clip_slots 0 clip"
 
 
@@ -275,3 +276,56 @@ def test_study_read_is_the_cli_json_and_filters_layers(S, tmp_path, monkeypatch)
     assert list(only["layers"]) == ["sections"] and only["layers"]["sections"]["data"]
     assert "unknown layer" in failure(S, "study_read", name="Flare", layers=["nope"])
     assert "no study named" in failure(S, "study_read", name="Nope")
+
+
+def test_arrangement_compare_is_the_cli_report_and_writes_the_markdown(S, tmp_path, monkeypatch):
+    """The tool gives the report the CLI builds from the same saved read, and with `out` also the
+    Markdown file and its path (a relative one under the home folder); a study without the activity
+    layer comes back left out; an empty ref list, roles with a saved read and a bad scene range are tool
+    errors."""
+    import arrangement
+    import study
+    folder = tmp_path / "lib" / "A" / "One" / "One_124bpm_stems"
+    folder.mkdir(parents=True)
+    on = lambda a, b, n=16: "".join("1" if a <= i <= b else "0" for i in range(1, n + 1))
+    (folder / "sections.json").write_text(json.dumps({"bpm": 124.0, "method": "stems", "sections": [
+        {"beat": 0, "bar": 1, "duration_beats": 32, "stems": [], "label": "Intro"},
+        {"beat": 32, "bar": 9, "duration_beats": 32, "stems": [], "label": "Drop 1"}],
+        "bar_activity": {"first_bar": 1, "bars": 16, "stems": {"drums_kick": on(9, 16), "bass": on(5, 16)}}}))
+    old = tmp_path / "lib" / "B" / "Two" / "Two_124bpm_stems"
+    old.mkdir(parents=True)
+    (old / "sections.json").write_text(json.dumps({"bpm": 124.0, "method": "stems", "sections": []}))
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path / "lib")])
+    cell = lambda state, change: {"state": state, "change": change, "sig": "x"}
+    saved = {"set": "x", "scenes": [1, 2], "window_bars": 8, "roles": ["pad"], "unmapped": [], "ignored": [],
+             "warnings": [], "notes": [], "rows": [
+                 {"scene": 1, "name": "Intro", "bars": 8, "windows": 1, "cells": {"pad": {"windows": [cell("playing", None)]}}},
+                 {"scene": 2, "name": "Drop 1", "bars": 8, "windows": 1, "cells": {"pad": {"windows": [cell("playing", "same")]}}}]}
+    read = tmp_path / "read.json"
+    read.write_text(json.dumps(saved))
+    report = tmp_path / "r.md"
+    got = json.loads(call(S, "arrangement_compare", read=str(read), ref="all", out=str(report)))
+    want = arrangement.build_compare(refs=["all"], read=dict(saved))
+    assert got.pop("markdown_path") == str(report)
+    assert got == json.loads(json.dumps(want))
+    assert [r["title"] for r in got["references"]] == ["One"] and [x["name"] for x in got["left_out"]] == ["B/Two"]
+    assert report.read_text() == arrangement.format_compare(want)
+    assert "saved read is of scenes" in failure(S, "arrangement_compare", scenes="5-9", read=str(read))
+    assert "at least one reference" in failure(S, "arrangement_compare", ref=[], read=str(read))
+    assert "roles apply when the Set is read from Live" in failure(S, "arrangement_compare", read=str(read), roles={"a": "b"})
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    rel = json.loads(call(S, "arrangement_compare", read=str(read), out="rep.md"))
+    assert rel["markdown_path"] == str(tmp_path / "home" / "rep.md") and (tmp_path / "home" / "rep.md").exists()
+
+
+def test_arrangement_compare_reading_live_has_a_deadline_and_says_so(S, monkeypatch):
+    """The Live read is bounded by `timeout_s`: past it the call is a tool error that names the deadline
+    and points at a saved read."""
+    from fake_live import FakeLive
+    m = FakeLive(tracks=("midi",), scenes=2)
+    m.install(monkeypatch)
+    msg = failure(S, "arrangement_compare", scenes="1-2", ref="all", timeout_s=0)
+    assert "took over 0 s" in msg and "saved read" in msg
+    tool = next(t for t in asyncio.run(S.mcp.list_tools()) if t.name == "arrangement_compare")
+    assert tool.input_schema["properties"]["timeout_s"]["default"] == 240.0

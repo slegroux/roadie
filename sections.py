@@ -497,6 +497,19 @@ def _snap_bars(cuts, offset, phrase_bars, n_bars):
     return out
 
 
+def bar_activity(act, n_bars):
+    """Which stems play in which bar, for tools that read the arrangement bar by bar.
+
+    {"first_bar": 1, "bars": n, "stems": {stem: "0101..."}}, one character per bar from file bar
+    `first_bar`: "1" where the stem plays, from the same per-bar activity the sections come from
+    (`_activity`, then `_hysteresis`). Not despeckled: the sections need a presence to hold for
+    STEM_MIN_RUN bars to cut on, but a one-bar kick break is real and is kept here. A stem too
+    quiet to have an activity (`_activity` gave None) is absent, not all zeros.
+    """
+    return {"first_bar": 1, "bars": int(n_bars),
+            "stems": {n: "".join("1" if x else "0" for x in _hysteresis(a)) for n, a in act.items()}}
+
+
 def stem_labels(rows):
     """Name sections from which stems play. Rules, like `arrangement_labels`.
 
@@ -653,6 +666,7 @@ def analyze_sections_by_stems(stems_dir, period, grid_t0, downbeat_sec=None,
         "sections": sections,
         "method": "stems",
         "phrase_offset_bars": int(offset),
+        "bar_activity": bar_activity(act, n_bars),
     }
 
 

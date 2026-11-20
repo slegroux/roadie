@@ -4,8 +4,9 @@
     roadie mcp                      run it (stdio); an MCP client starts it, not you
     claude mcp add --scope user roadie -- /abs/path/to/roadie/roadie mcp
 
-Six tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list and
-study_read (the Studies folder, read-only: `roadie study`). The first three
+Seven tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list,
+study_read (the Studies folder, read-only: `roadie study`) and arrangement_compare (the Set's scene
+order against reference studies: `roadie arrangement compare`). The first three
 have the names, arguments, defaults and output of Sideman's tools of the same name; session_compare
 is Sideman's mix_report with a reference profile. Measuring the Set on its own (audio_analyze,
 audio_compare, mix_report with no reference or an audio file) stays in Sideman's server: register
@@ -50,6 +51,7 @@ except ModuleNotFoundError as _e:
         raise
     sys.exit("sideman is not installed in .venv: run ./install.sh")
 
+import arrangement
 import study
 from roadie_analysis import oneshot, profile
 
@@ -59,7 +61,7 @@ mcp = MCPServer(
         "Analysis that needs a reference track, its stems or samples: drum one-shots (sample_analyze, "
         "sample_compare), a reference track measured once per section (reference_profile), and a capture "
         "of the Set compared with that profile (session_compare); the studies on disk and what was analysed in each "
-        "(study_list, study_read). Measuring the Set on its own "
+        "(study_list, study_read); the Set's arrangement against those studies (arrangement_compare). Measuring the Set on its own "
         "(audio_analyze, audio_compare, mix_report) is Sideman's server. A source is a file path or an "
         "audio clip's LOM path such as \"live_set tracks 3 clip_slots 0 clip\"."
     ),
@@ -370,6 +372,48 @@ def study_read(name: str, layers: list[str] | None = None) -> str:
         return json.dumps(study.to_json(study.load_study(name), layers), indent=2)
     except STUDY_ERRORS as e:
         raise AnalysisError("cannot read the study: %s: %s" % (type(e).__name__, e))
+
+
+@mcp.tool()
+def arrangement_compare(scenes: str | None = None, ref: list[str] | str = "all",
+                        roles: str | dict[str, str] | None = None, read: str | None = None,
+                        out: str | None = None, timeout_s: float = 240.0) -> str:
+    """The Set's scene order set against reference studies, in numbers. The main table is groove
+    blocks, measured the same way on the Set and on each reference from activity, not from labels:
+    a block is a stretch in which kick and bass both play (a fill under 4 bars ignored, from 8 bars),
+    separated by 4+ bars without it. Per source: the bars before block 1, block 1 and block 2 lengths
+    and their ratio, the kick-out before block 2, the bass lead (bars the bass plays before the kick
+    joins) at blocks 1 and 2, and kick and hats gaps; one row per reference, with range and median
+    rows over all references and over the unflagged ones, and readings of where the Set sits. The
+    labelled drops (the Set's scene names, a reference's rules) are a second table that is not
+    comparable and has no ratio. `scenes` is the Set's Session range ("33-47", 1-based). `ref` is a
+    study name (as `study_read` takes it), a list of them, or "all": every analysed study with the
+    activity layer (the others, and duplicates of one track, come back in `left_out` with the reason);
+    an empty list is an error. A reference is audio: steps that add nothing, the hook and pitched
+    roles are the Set's alone (`set_only`). `read` is the path of a saved `roadie arrangement read
+    --json`, used instead of Live (its metrics are recomputed; `roles` is then refused, the roles were
+    applied when it was made). Without `read`, the Set is read from the open Live Set (read-only: gets and
+    note reads, nothing changed or played): a full read is about 130 requests, a minute when Live is
+    free and has taken 10-25 minutes when it is busy, so `timeout_s` (default 240) is a deadline for
+    the whole read and exceeding it is a tool error that says so: save a read and pass `read`.
+    `roles` is a track name -> role map (a dict, or the path of a JSON file). Returns the report as
+    JSON; with `out` (a .md path; a relative one is under the home folder) it also writes the Markdown
+    and gives its path as `markdown_path`. Reads the Studies folders only (small JSON files); writes
+    only `out`."""
+    refs = [ref] if isinstance(ref, str) else list(ref)
+    try:
+        if not refs:
+            raise ValueError("give at least one reference (a study name, or \"all\")")
+        rep = arrangement.build_compare(scenes, refs, roles, read, timeout_s)
+        if out:
+            path = os.path.expanduser(out)
+            path = os.path.abspath(path if os.path.isabs(path) else os.path.join(os.path.expanduser("~"), path))
+            with open(path, "w") as f:
+                f.write(arrangement.format_compare(rep))
+            rep["markdown_path"] = path
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, client.LiveError) as e:
+        raise AnalysisError("cannot compare the arrangement: %s: %s" % (type(e).__name__, e))
+    return json.dumps(rep, indent=2)
 
 
 def main() -> None:
