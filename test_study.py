@@ -337,6 +337,9 @@ def test_list_only_lists_directories_it_never_opens_the_json(tmp_path):
     (folder / "analysis" / "x.profile.json").write_text("{broken")
     flags = study.list_to_json([study.Root("l", root)])["studies"][0]["layers"]
     assert flags["sections"] and flags["mix"] and flags["grid"] and not flags["activity"]
+    (stems / "sections.json").write_text('{"method": "stems", "bar_activity": {broken')   # the key, not the JSON
+    flags = study.list_to_json([study.Root("l", root)])["studies"][0]["layers"]
+    assert flags["activity"] and flags["sections"]
 
 
 def test_names_match_across_unicode_forms(tmp_path):

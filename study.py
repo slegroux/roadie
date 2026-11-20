@@ -491,11 +491,17 @@ def _show(study: Study) -> None:
 
 
 def _layer_flags(ref: StudyRef) -> dict[str, bool]:
-    """Which layers a study has, by file names alone (listing, no JSON read): the files in the
-    stems folder, and `*.profile.json` in the study folder, its analysis/ and the stems folder."""
+    """Which layers a study has, by file names (listing, no JSON parsed): the files in the stems
+    folder, and `*.profile.json` in the study folder, its analysis/ and the stems folder. The one
+    file opened is sections.json (a few KB), searched for the text "bar_activity"."""
     flags = {n: False for n in LAYER_NAMES}
     flags["grid"] = (ref.stems_dir / "alignment.json").exists()
     flags["sections"] = (ref.stems_dir / "sections.json").exists()
+    if flags["sections"]:      # the one file opened here, only to look for the key
+        try:
+            flags["activity"] = '"bar_activity"' in (ref.stems_dir / "sections.json").read_text()
+        except (OSError, ValueError):
+            pass
     for d in (ref.root, ref.root / "analysis", ref.stems_dir):
         try:
             if any(f.endswith(".profile.json") and not f.startswith(".") for f in os.listdir(d)):
@@ -505,8 +511,9 @@ def _layer_flags(ref: StudyRef) -> dict[str, bool]:
     return flags
 
 
-LAYERS_NOTE = ("layer flags come from file names only (nothing is opened); `roadie study show <name>` "
-               "reads the files and is the check")
+LAYERS_NOTE = ("layer flags come from file names only, except that sections.json is opened to look for "
+               "its bar_activity key (the activity layer); `roadie study show <name>` reads the files "
+               "and is the check")
 
 
 def list_to_json(roots=None) -> dict:
