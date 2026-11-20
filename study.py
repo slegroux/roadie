@@ -148,6 +148,8 @@ def _resolve(name_or_path: str, root: Path) -> Path:
     want = name_or_path.strip().lower()
     hits = [r.root for r in find_studies(root) if r.analysed and want in (
         r.title.lower(), ("%s/%s" % (r.artist, r.title)).lower())]
+    if not hits:      # no exact title: a title that contains the name, if that is one study or several
+        hits = [r.root for r in find_studies(root) if r.analysed and want in r.title.lower()]
     if not hits:
         raise ValueError("no study named %r under %s" % (name_or_path, root))
     if len(hits) > 1:
@@ -164,24 +166,30 @@ def _json_files(folder: Path) -> list[Path]:
     return out
 
 
-def _stale(folder: Path, prof: dict) -> str:
-    """One line: which profile inputs changed on disk, and which check was used."""
+def _check(folder: Path, prof: dict) -> tuple[str, str]:
+    """(state, one line) for a profile's inputs against the disk. State is fresh, stale,
+    ambiguous or unchecked; a wrong shape raises KeyError/TypeError/AttributeError."""
     by_name = {}
     for dirpath, _dirs, files in os.walk(folder):
         for f in files:
-            by_name.setdefault(f, os.path.join(dirpath, f))
+            by_name.setdefault(f, []).append(os.path.join(dirpath, f))
     inputs = list(prof["inputs"]["mix"]) + [i for items in prof["inputs"]["stems"].values() for i in items]
-    changed, by_path, by_size = [], 0, 0
+    if not inputs:
+        return "unchecked", "not checked: the profile records no inputs"
+    changed, ambiguous, by_path, by_size = [], [], 0, 0
     for item in inputs:
         name = os.path.basename(item["path"])
+        what = []
         if os.path.exists(item["path"]):
             by_path += 1
             st = os.stat(item["path"])
             what = [w for w, bad in (("size", st.st_size != item["size"]),
                                      ("mtime", abs(st.st_mtime - item["mtime"]) > 2.0)) if bad]
+        elif len(by_name.get(name, [])) > 1:
+            ambiguous.append(name)
         elif name in by_name:
             by_size += 1
-            what = ["size"] if os.path.getsize(by_name[name]) != item["size"] else []
+            what = ["size"] if os.path.getsize(by_name[name][0]) != item["size"] else []
         else:
             what = ["missing"]
         if what:
@@ -189,29 +197,33 @@ def _stale(folder: Path, prof: dict) -> str:
     check = ("path, mtime and size" if by_path and not by_size else
              "file name and size, the recorded paths do not exist here" if by_size and not by_path else
              "path, mtime and size, else file name and size")
+    amb = "; several files share the name of: %s" % ", ".join(sorted(set(ambiguous))) if ambiguous else ""
     if changed:
-        return "stale: %s changed since the profile was made (checked by %s)" % ("; ".join(changed), check)
-    return "fresh: %d inputs unchanged (checked by %s)" % (len(inputs), check)
+        return "stale", "stale: %s changed since the profile was made (checked by %s)%s" % (
+            "; ".join(changed), check, amb)
+    if ambiguous:
+        return "ambiguous", "ambiguous: could not tell if inputs changed%s (checked by %s)" % (amb, check)
+    return "fresh", "fresh: %d inputs unchanged (checked by %s)" % (len(inputs), check)
 
 
-def _mix_layer(folder: Path, path: Path, prof: dict, others: int) -> Layer:
+def _mix_layer(folder: Path, path: Path, prof: dict) -> tuple[Layer, str]:
+    """The mix layer for one profile, and its state (fresh, stale, ambiguous, unchecked, newer, unreadable)."""
     version = prof.get("version")
-    caveats = []
-    if others:
-        caveats.append("%d older profile(s) listed under extras" % others)
     made_by = "reference_profile v%s" % version
     if not isinstance(version, int) or version > PROFILE_VERSION:
-        caveats.append("profile version %s is newer than this reader knows (%d): not interpreted"
-                       % (version, PROFILE_VERSION))
-        return Layer("mix", path, made_by, None, None, caveats)
+        return Layer("mix", path, made_by, None, None, [
+            "profile version %s is newer than this reader knows (%d): not interpreted"
+            % (version, PROFILE_VERSION)]), "newer"
+    caveats = []
     if version < PROFILE_VERSION:
         caveats.append("profile version %d is older than %d: rebuild it before comparing"
                        % (version, PROFILE_VERSION))
     try:
-        caveats.append(_stale(folder, prof))
-    except (KeyError, TypeError, OSError):
-        caveats.append("inputs could not be checked: the profile has no readable inputs")
-    return Layer("mix", path, made_by, prof, None, caveats)
+        state, line = _check(folder, prof)
+    except (KeyError, TypeError, AttributeError, ValueError, OSError) as e:
+        return Layer("mix", path, made_by, None, None, caveats + [
+            "could not read: the profile's inputs are malformed (%s: %s)" % (type(e).__name__, e)]), "unreadable"
+    return Layer("mix", path, made_by, prof, None, caveats + [line]), state
 
 
 def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
@@ -274,10 +286,20 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
         else:
             extras.append(p)
     if profiles:
-        profiles.sort(key=lambda pd: pd[0].stat().st_mtime)
-        path, prof = profiles.pop()
-        extras += [p for p, _ in profiles]
-        layers["mix"] = _mix_layer(folder, path, prof, len(profiles))
+        # A fresh profile of a known version first, then the newest: a pCloud re-sync touches
+        # mtimes, so mtime alone could pick a stale profile.
+        cands = []
+        for p, d in profiles:
+            layer, state = _mix_layer(folder, p, d)
+            cands.append((state != "fresh", -p.stat().st_mtime, str(p), layer))
+        cands.sort(key=lambda c: c[:3])
+        layers["mix"] = cands[0][3]
+        rest = [c[3].source for c in cands[1:]]
+        if rest:
+            layers["mix"].caveats.insert(0, "chosen among %d profiles (a fresh one first, then the newest); "
+                                         "also found, listed under extras: %s" % (
+                                             len(cands), ", ".join(str(p.relative_to(folder)) for p in rest)))
+        extras += rest
     else:
         bad = [p for p in extras if p.name.endswith(".profile.json")]
         if bad:
@@ -337,7 +359,7 @@ def _list() -> int:
     for r in done:
         try:
             st = load_study(str(r.root))
-        except (ValueError, KeyError, TypeError, AttributeError) as e:
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
             print("  %-37s could not read: %s" % ("%s/%s" % (r.artist, r.title), e))
             continue
         have = [n for n, l in st.layers.items() if l.source]
@@ -366,7 +388,7 @@ def main(argv=None) -> int:
             print(json.dumps(to_json(study), indent=2))
         else:
             _show(study)
-    except (ValueError, KeyError, TypeError, AttributeError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         print("study: %s: %s" % ("could not read" if not isinstance(e, ValueError) else "error", e),
               file=sys.stderr)
         return 1

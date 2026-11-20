@@ -175,7 +175,7 @@ def test_cli_list_shows_layers_and_the_not_analysed(tmp_path):
     assert "Anyma/Anyma Project" in out
 
 
-def add_profile(folder, version=6, rewrite_paths=None):
+def add_profile(folder, version=6, name="x.profile.json"):
     """A reference profile in <folder>/analysis whose inputs are the study's own stems."""
     stems = next(folder.glob("*_stems"))
     for f in stems.glob("*.flac"):
@@ -185,7 +185,7 @@ def add_profile(folder, version=6, rewrite_paths=None):
     prof = {"kind": "reference_profile", "version": version, "inputs": {"mix": ins[:1], "stems": {"all": ins[1:]}},
             "sections": [{"name": "s%d" % i} for i in range(3)]}
     (folder / "analysis").mkdir(exist_ok=True)
-    path = folder / "analysis" / "x.profile.json"
+    path = folder / "analysis" / name
     path.write_text(json.dumps(prof))
     return path, prof
 
@@ -229,3 +229,57 @@ def test_other_json_files_are_extras_but_the_study_own_files_are_not(tmp_path):
     s = load_study("Earth", tmp_path)
     assert [str(p.relative_to(folder)) for p in s.extras] == ["rebuild/arrangement.json", "rebuild/score.json"]
     assert s.layers["mix"].missing
+
+
+def test_profile_with_no_inputs_is_not_checked_never_fresh(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    path, prof = add_profile(folder)
+    prof["inputs"] = {"mix": [], "stems": {}}
+    path.write_text(json.dumps(prof))
+    assert load_study("Flare", tmp_path).layers["mix"].caveats[-1].startswith("not checked")
+
+
+def test_a_fresh_profile_beats_a_newer_stale_one_and_the_caveat_names_the_other(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    fresh, _ = add_profile(folder)
+    stale, prof = add_profile(folder, name="stale.profile.json")
+    prof["inputs"]["mix"][0]["size"] += 5
+    stale.write_text(json.dumps(prof))
+    os.utime(stale, (fresh.stat().st_mtime + 100,) * 2)                   # the stale one is newer
+    s = load_study("Flare", tmp_path)
+    assert s.layers["mix"].source.name == "x.profile.json"
+    assert "analysis/stale.profile.json" in s.layers["mix"].caveats[0]
+    assert stale in s.extras
+
+
+def test_fallback_by_name_with_two_files_of_that_name_is_ambiguous(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    path, prof = add_profile(folder)
+    for i in prof["inputs"]["mix"]:
+        i["path"] = "/elsewhere/" + os.path.basename(i["path"])
+    path.write_text(json.dumps(prof))
+    name = os.path.basename(prof["inputs"]["mix"][0]["path"])
+    (folder / "copy").mkdir()
+    (folder / "copy" / name).write_bytes(b"x" * 10)
+    line = load_study("Flare", tmp_path).layers["mix"].caveats[-1]
+    assert line.startswith("ambiguous") and name in line
+
+
+def test_malformed_profile_inputs_do_not_take_the_study_down(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    path, prof = add_profile(folder)
+    prof["inputs"]["stems"] = None
+    path.write_text(json.dumps(prof))
+    s = load_study("Flare", tmp_path)
+    assert s.mix() is None and "could not read" in s.layers["mix"].caveats[-1]
+    assert s.sections()
+
+
+def test_a_unique_title_substring_resolves_when_there_is_no_exact_match(tmp_path):
+    make_study(tmp_path, "Rodriguez", "Synthwave 1 benchmark")
+    make_study(tmp_path, "Bodzin", "Earth")
+    make_study(tmp_path, "Other", "Earthbound")
+    assert load_study("synthwave", tmp_path).title == "Synthwave 1 benchmark"
+    assert load_study("Earth", tmp_path).artist == "Bodzin"               # exact still wins
+    with pytest.raises(ValueError, match="ambiguous"):
+        load_study("th", tmp_path)
