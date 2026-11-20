@@ -377,8 +377,11 @@ def load_study(name_or_path: str, roots=None) -> Study:
         else:
             layers["grid"] = unreadable("grid", path)
 
+    layers["activity"].missing = ("roadie sections <stems> first: it makes sections.json, and "
+                                  "bar_activity in it when the stems have a kick and a bass")
     path = stems_dir / "sections.json"
     if path.exists():
+        layers["activity"].missing = MISSING["activity"]
         secs = _read_json(path)
         if isinstance(secs, dict) and isinstance(secs.get("sections"), list):
             bpm = _number(secs.get("bpm")) if bpm is None else bpm
@@ -397,8 +400,13 @@ def load_study(name_or_path: str, roots=None) -> Study:
             act = secs.get("bar_activity")
             if act is not None:
                 layers["activity"] = _activity_layer(path, act)
+            elif secs.get("method", "spectral") != "stems":
+                layers["activity"].missing = (
+                    "none, and none possible: these sections came from the spectral method (the "
+                    "stems have no usable kick and bass), which makes no per-bar stem activity")
         else:
             layers["sections"] = unreadable("sections", path)
+            layers["activity"].missing = "sections.json exists but could not be read"
 
     known = {stems_dir / "alignment.json", stems_dir / "sections.json", folder / "study.json"}
     profiles, extras = [], []

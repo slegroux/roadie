@@ -667,12 +667,25 @@ def _span(steps, i, n):
             "section": steps[i].get("section"), "scene": steps[i].get("scene")}
 
 
+MIN_ENTRY_BARS = 4        # a stretch shorter than this is bleed or a hit, not a part coming in
+
+
+def _stretch(steps, play, min_bars=MIN_ENTRY_BARS):
+    """(first, last) step index of the first and the last stretch of at least `min_bars` bars in
+    which a role plays, or None. A one-bar blip of bleed before the real entry is not an entry."""
+    runs = [(i, i + k - 1) for i, k in _runs(steps, play)
+            if sum(x["bars"] for x in steps[i:i + k]) >= min_bars]
+    return (runs[0][0], runs[-1][1]) if runs else None
+
+
 def _internal_gaps(steps, play):
-    """(gaps, trailing bars): the stretches a role is out between two stretches it plays, and the
-    bars it is out after the last. What comes before its first stretch is not "out"."""
-    if True not in play:
+    """(gaps, trailing bars): the stretches a role is out between its first and its last stretch of
+    MIN_ENTRY_BARS or more, read bar by bar, and the bars it is out after the last. What comes
+    before its first stretch is not "out"."""
+    st = _stretch(steps, play)
+    if st is None:
         return [], 0
-    first, last = play.index(True), len(play) - 1 - play[::-1].index(True)
+    first, last = st
     gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
             if first < i and i + k - 1 < last]
     return gaps, sum(x["bars"] for x in steps[last + 1:])
@@ -688,6 +701,9 @@ def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
     "bar", "bars"}, optionally "name"/"scenes". `step_bars` is the resolution of `steps`: every bar
     this reports (entry, kick-out, hat gaps) is a step boundary, so a reference's per-bar activity
     gives bars and a Set's 8-bar steps give multiples of 8 plus 1. Roles the steps lack are None.
+    An entry (bass, kick, hats) is the first stretch of MIN_ENTRY_BARS or more, so a bar of bleed
+    before the real entry is not one; gaps are read bar by bar between the first and last such
+    stretch.
     """
     n = len(steps)
     roles = {r for x in steps for r in x["cells"]}
@@ -744,9 +760,12 @@ def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
     # bass: the bar it enters, and whether that is before the first drop
     if "bass" in roles and n:
         play = playing("bass")
-        i = play.index(True) if True in play else None
+        st = _stretch(steps, play)
+        i = st[0] if st else None
+        raw = play.index(True) if True in play else None
         drop = next((x["bar"] for x in sections if (x["label"] or "").startswith("Drop")), None)
         out["bass"] = {"entry_bar": steps[i]["bar"] if i is not None else None,
+                       "entry_bar_raw": steps[raw]["bar"] if raw is not None else None,
                        "entry_scene": steps[i].get("scene") if i is not None else None,
                        "first_drop_bar": drop,
                        "before_first_drop": (None if i is None or drop is None
@@ -758,9 +777,10 @@ def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
     if "kick" in roles and n:
         play = playing("kick")
         gaps, trailing = _internal_gaps(steps, play)
-        if True in play:
-            last = len(play) - 1 - play[::-1].index(True)
-            out["kick"] = {"first_bar": steps[play.index(True)]["bar"], "out": gaps,
+        st = _stretch(steps, play)
+        if st:
+            first, last = st
+            out["kick"] = {"first_bar": steps[first]["bar"], "out": gaps,
                            "longest_out_bars": max([g["bars"] for g in gaps], default=0),
                            "last_bar": steps[last]["bar"] + steps[last]["bars"] - 1,
                            "trailing_out_bars": trailing}
@@ -783,9 +803,10 @@ def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
     if "hats" in roles and n:
         play = playing("hats")
         gaps, trailing = _internal_gaps(steps, play)
-        out["hats"] = {"first_bar": steps[play.index(True)]["bar"] if True in play else None,
+        st = _stretch(steps, play)
+        out["hats"] = {"first_bar": steps[st[0]]["bar"] if st else None,
                        "steps_playing": sum(play), "of_steps": n,
-                       "constant": True in play and not gaps, "gaps": gaps,
+                       "constant": st is not None and not gaps, "gaps": gaps,
                        "trailing_out_bars": trailing}
     else:
         out["hats"] = None
@@ -945,10 +966,24 @@ def format_metrics(m, unavailable=None, title=None):
 STUDY_ROLE = {"kick": "kick", "bass": "bass", "hats": "hats", "snare": "snare", "perc": "perc",
               "synths": "synth", "vocals": "vox"}
 REF_UNAVAILABLE = {
-    "changes": "a reference is audio, not notes, so there is nothing to call 'varied' and no step "
-               "can be flagged as adding nothing or only removing",
+    "flags": "a reference is audio, not notes: nothing can be called 'varied', so no step is flagged "
+             "as adding nothing or only removing",
+    "changes": "a reference is audio, not notes: what each step adds, varies or removes is not read",
     "hook": "the stems have no lead part (the synths stem is leads and pads together), so the hook "
             "run and its variation are not read",
+}
+# A reference's numbers that look like the Set's but are not the same measure.
+REF_NOT_COMPARABLE = {
+    "pitched_parts": "counts stems (bass, synths) and is at most 2 for a reference; the Set's counts "
+                     "pitched roles among 7: not comparable, never one row",
+    "sections_vs_bars": "the section map and the Drop 2 / Drop 1 ratio come from despeckled activity "
+                        "(a stretch must last 4 bars); entries and kick/hats gaps are read bar by "
+                        "bar (an entry is the first stretch of 4 bars or more). A one-bar fill can "
+                        "make a kick-out 15 bars inside a 16-bar breakdown: that is the fill, not "
+                        "a disagreement",
+    "bar_numbers": "file bars from the audio's grid start (a lead-in shifts them); the Set counts "
+                   "from its first scene: compare relative to the first drop or the first kick, "
+                   "never bare bar numbers",
 }
 
 
@@ -959,8 +994,9 @@ def reference_metrics(study):
     bar_activity (`roadie sections <stems>`); raises ValueError without one."""
     act = study.activity()
     if act is None:
-        raise ValueError("%s - %s has no bar_activity in its sections.json: run `roadie sections "
-                         "<its stems folder>`" % (study.artist, study.title))
+        raise ValueError("%s - %s has no bar_activity: %s" % (
+            study.artist, study.title, study.layers["activity"].missing
+            or "its sections.json carries one that could not be read"))
     first = study.activity_first_bar()
     n = len(next(iter(act.values())))
     sections = []
@@ -982,15 +1018,17 @@ def reference_metrics(study):
         if layer.source is None and name == "grid":
             caveats.append("no grid: alignment.json is missing, the bar lines are the tempo and "
                            "anchor sections.json was made with")
-    caveats.append("pitched parts counts stems (bass, synths), not notes")
     caveats.append("bars are file bars" + (", Live bar = file bar + %d" % study.bar_offset
                                            if study.bar_offset is not None else
                                            "; no Live bar is known"))
+    m = metrics_from_steps(steps, sections, 1)
+    # What a reference cannot give is null with a reason, never an empty list that reads as "none".
+    m["changes"] = m["flags"] = m["hook"] = None
+    m["not_available"] = {k: REF_UNAVAILABLE[k] for k in ("flags", "changes", "hook")}
     return {"kind": "arrangement_reference", "version": 1,
             "study": {"artist": study.artist, "title": study.title, "root": study.source,
                       "bpm": study.bpm, "bar_offset": study.bar_offset},
-            "caveats": caveats, "unavailable": REF_UNAVAILABLE,
-            "metrics": metrics_from_steps(steps, sections, 1)}
+            "caveats": caveats, "not_comparable": REF_NOT_COMPARABLE, "metrics": m}
 
 
 def format_reference(ref):
@@ -998,8 +1036,10 @@ def format_reference(ref):
     title = "Structure of %s - %s (reference, %s bpm), %d bars in 1-bar steps, file bars" % (
         st["artist"], st["title"], "%g" % st["bpm"] if st["bpm"] else "unknown",
         ref["metrics"]["bars"])
-    return (format_metrics(ref["metrics"], ref["unavailable"], title)
-            + "\n\n" + "\n".join("note: " + c for c in ref["caveats"]))
+    return (format_metrics(ref["metrics"], ref["metrics"]["not_available"], title)
+            + "\n\n" + "\n".join("note: " + c for c in ref["caveats"])
+            + "\n" + "\n".join("not comparable with the Set (%s): %s" % (k, v)
+                                for k, v in ref["not_comparable"].items()))
 
 
 def parse_scenes(text):

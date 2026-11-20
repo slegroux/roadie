@@ -727,20 +727,53 @@ def test_a_reference_says_what_it_cannot_tell_rather_than_printing_zero(tmp_path
     would be, and the JSON carries the reasons and the study's caveats."""
     ref = A.reference_metrics(_reference(tmp_path))
     m = ref["metrics"]
-    assert m["changes_available"] is False and m["flags"] == [] and m["hook"] is None
+    assert m["changes_available"] is False and m["flags"] is None and m["hook"] is None
     text = A.format_reference(ref)
     assert "not available: a reference is audio, not notes" in text
     assert "not available: the stems have no lead part" in text
     assert "note: labels by rule, not checked by ear" in text
     assert "note: no grid: alignment.json is missing" in text and "no Live bar is known" in text
+    assert "not comparable with the Set (pitched_parts): counts stems (bass, synths) and is at most 2" in text
+    assert "despeckled activity" in text and "a one-bar fill can make a kick-out 15 bars" in text
     import study as study_mod
     monkeypatch.setattr(study_mod, "STUDIES_ROOTS", study_mod.parse_roots("r=%s" % tmp_path))
     A.main(["ref", "Synth", "--json"])
     data = json.loads(capsys.readouterr().out)
-    assert data["kind"] == "arrangement_reference" and data["unavailable"]["hook"]
-    assert data["metrics"]["bass"]["entry_bar"] == 5
+    m = data["metrics"]
+    assert data["kind"] == "arrangement_reference" and m["bass"]["entry_bar"] == 5
+    # not available is null with a reason, never an empty list that reads as "none"
+    assert m["flags"] is None and m["changes"] is None and m["hook"] is None
+    assert set(m["not_available"]) == {"flags", "changes", "hook"} and all(m["not_available"].values())
+    assert "pitched_parts" in data["not_comparable"] and "bar_numbers" in data["not_comparable"]
 
 
-def test_a_reference_without_bar_activity_is_refused_with_the_command(tmp_path):
-    with pytest.raises(ValueError, match="no bar_activity.*roadie sections"):
-        A.reference_metrics(_reference(tmp_path, with_activity=False))
+def test_a_reference_without_bar_activity_is_refused_with_the_right_advice(tmp_path):
+    """Made before the field: re-run the sections command. Made by the spectral method: no
+    bar_activity is possible, say that. No sections.json at all: run roadie sections first."""
+    with pytest.raises(ValueError, match="no bar_activity: bar_activity: re-run the sections"):
+        A.reference_metrics(_reference(tmp_path / "a", with_activity=False))
+    s = _reference(tmp_path / "b", with_activity=False)
+    path = s.layers["sections"].source
+    data = json.loads(path.read_text())
+    data["method"] = "spectral"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="none possible: these sections came from the spectral method"):
+        A.reference_metrics(load_study("Synth", tmp_path / "b"))
+    path.unlink()
+    with pytest.raises(ValueError, match="roadie sections <stems> first"):
+        A.reference_metrics(load_study("Synth", tmp_path / "b"))
+
+
+def test_a_blip_of_bleed_before_the_entry_is_not_the_entry():
+    """A bass stem with one bar of bleed at bar 2 and the real part from bar 22, a Drop at bar 22:
+    the entry is bar 22 (the first stretch of 4 bars or more), not before the drop; the blip is
+    reported raw. The kick blip at bar 3 does not make a kick-out from bar 4 to 9 either."""
+    play = lambda on: {"state": "playing" if on else "silent"}
+    steps = [{"bar": b, "bars": 1, "cells": {"bass": play(b == 2 or b >= 22),
+                                             "kick": play(b == 3 or 10 <= b <= 30)}}
+             for b in range(1, 31)]
+    secs = [{"label": "Intro", "bar": 1, "bars": 21}, {"label": "Drop 1", "bar": 22, "bars": 9}]
+    m = A.metrics_from_steps(steps, secs, step_bars=1)
+    assert (m["bass"]["entry_bar"], m["bass"]["entry_bar_raw"], m["bass"]["before_first_drop"]) == (
+        22, 2, False)
+    assert m["kick"]["first_bar"] == 10 and m["kick"]["out"] == []
