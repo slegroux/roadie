@@ -326,7 +326,7 @@ def test_sigterm_kills_the_child_group_and_writes_the_report(env, monkeypatch):
            "--logs", str(tmp / "cache" / "logs"), "--report-dir", str(tmp / "reports")]
     p = subprocess.Popen(cmd, env=e, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        for _ in range(60):
+        for _ in range(600):   # up to 30 s: the child re-execs and imports, slow on a loaded machine
             if calls(tmp):
                 break
             time.sleep(0.05)
