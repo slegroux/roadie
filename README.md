@@ -178,7 +178,7 @@ names; `--roles` takes a JSON map (`{"27-Diva": "lead", "SYNTH KIT/Rim Shot": "p
 `ignore` leaves a track out) and unmapped tracks are listed, never dropped. A clip named
 `... (silent carrier)` counts as silent. Clip automation is not read.
 
-`ref <study>` gives the same metrics for a study, bar by bar, from the `bar_activity` that
+`ref <study>` gives the same metrics for a study, bar by bar (groove blocks included; labels only as the section map), from the `bar_activity` that
 `roadie sections` saves in `sections.json` (per bar, which stems play). A reference is audio, so
 nothing is called varied and it has no hook: the output says so.
 
@@ -196,9 +196,12 @@ with why. `--set-json` takes a saved `read --json` (its metrics are recomputed; 
 refused) instead of Live.
 
 ```
-- Block 1: 8 bars in the Set; median 48 over 32 of 32 references (range 11 to 112); 48 over the 13 unflagged.
-- Bass lead (bars the bass plays before the kick joins, 1 bar or less read as 0): in the Set 0 at
-  block 1, 8 at block 2; references at block 1: no lead in 28 of 32, median 0 ...
+- Length ratio (the first two blocks of 16+ bars, so a short teaser block does not count): 40 / 32 bars
+  = 1.25 in the Set; median ... over n of 32 references, the 2nd shorter than the 1st in .. of .., longer in ..
+- The Set is itself flagged (a block under 16 bars; block 3 and later not compared): its raw block 1 and
+  block 2 / block 1 are given over all references only.
+- Bass lead (bars the bass plays before the kick joins, 1 bar or less read as 0): in the Set 0 at block 1,
+  8 at block 2; references at block 1: no lead in 28 of 32 ...
 ```
 
 The MCP tool `arrangement_compare` takes the same arguments.

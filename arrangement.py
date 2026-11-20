@@ -917,6 +917,8 @@ DUPLICATE_AGREEMENT = 0.9
 BLOCK_COLUMNS = (("n_blocks", "blocks"), ("bars_before_block1", "bars before block 1"),
                  ("block1_bars", "block 1"), ("block2_bars", "block 2"),
                  ("block_ratio", "block 2 / block 1"),
+                 ("major1_bars", "1st block of 16+ bars"), ("major2_bars", "2nd block of 16+ bars"),
+                 ("major_ratio", "2nd / 1st of 16+ bars"),
                  ("kick_out_before_block2", "kick out before block 2"),
                  ("bass_lead1", "bass lead at block 1"), ("bass_lead2", "bass lead at block 2"))
 GAP_COLUMNS = (("longest_kick_out_bars", "longest kick-out"), ("kick_gaps", "kick gaps of 4+ bars"),
@@ -934,10 +936,14 @@ def profile_of(m):
     b1 = blocks[0] if blocks else None
     b2 = blocks[1] if blocks and len(blocks) > 1 else None
     first = m.get("first_bar") or 1
+    big = [x for x in blocks or [] if x["bars"] >= SHORT_BLOCK]    # the blocks that are not a teaser
     out = {"n_blocks": len(blocks) if blocks is not None else None,
            "bars_before_block1": b1["bar"] - first if b1 else None,
            "block1_bars": b1["bars"] if b1 else None, "block2_bars": b2["bars"] if b2 else None,
            "block_ratio": round(b2["bars"] / b1["bars"], 3) if b1 and b2 else None,
+           "major1_bars": big[0]["bars"] if big else None,
+           "major2_bars": big[1]["bars"] if len(big) > 1 else None,
+           "major_ratio": round(big[1]["bars"] / big[0]["bars"], 3) if len(big) > 1 else None,
            "kick_out_before_block2": b2["kick_out_before"] if b2 else None,
            "bass_lead1": b1["bass_lead"] if b1 else None,
            "bass_lead2": b2["bass_lead"] if b2 else None}
@@ -1069,37 +1075,50 @@ def _g(x):
 
 
 def readings(sp, stats, refs):
-    """Where the Set sits against the references, in plain numbers, from the block table only. Each
-    median is given over all references and over the unflagged ones."""
+    """Where the Set sits against the references, in plain numbers, from the block table only. The
+    headline is the length ratio of the first two blocks of 16+ bars, which a short teaser block
+    does not distort; medians are given over all references and over the unflagged ones, except
+    where the Set is itself flagged (its raw block numbers are not alike to the unflagged group)."""
     N = len(refs)
     all_, clean = stats["all"], stats["unflagged"]
     out = []
+    flagged = bool(sp["flags"])
 
-    def span(k):
+    def span(k, both=True):
         a, c = all_[k], clean[k]
         return "median %s over %d of %d references (range %s to %s)%s" % (
             _g(a["median"]), a["n"], N, _g(a["min"]), _g(a["max"]),
-            "; %s over the %d unflagged" % (_g(c["median"]), c["n"]) if c["n"] != a["n"] else "")
+            "; %s over the %d unflagged" % (_g(c["median"]), c["n"]) if both and c["n"] != a["n"] else "")
 
     def count(key, pred):
         vals = [r["profile"][key] for r in refs if r["profile"][key] is not None]
         return sum(1 for v in vals if pred(v)), len(vals)
 
+    if sp["major_ratio"] is not None and all_["major_ratio"]["n"]:
+        shorter, n = count("major_ratio", lambda v: v < 1)
+        longer, _ = count("major_ratio", lambda v: v > 1)
+        out.append("Length ratio (the first two blocks of 16+ bars, so a short teaser block does not count): "
+                   "%d / %d bars = %s in the Set; %s; the 2nd is shorter than the 1st in %d of %d, longer in %d." % (
+                       sp["major2_bars"], sp["major1_bars"], _g(sp["major_ratio"]), span("major_ratio"),
+                       shorter, n, longer))
+    if flagged:
+        out.append("The Set is itself flagged (%s): its raw block 1 and block 2 / block 1 below are not alike "
+                   "to the unflagged references, so they are given over all references only." % "; ".join(sp["flags"]))
     if sp["bars_before_block1"] is not None and all_["bars_before_block1"]["n"]:
         early, n = count("bars_before_block1", lambda v: v < EARLY_BARS)
         out.append("Groove start: kick and bass first play together %d bars in, in the Set; %s; in %d of %d "
                    "references they are together within the first %d bars." % (
                        sp["bars_before_block1"], span("bars_before_block1"), early, n, EARLY_BARS))
     if sp["block1_bars"] is not None and all_["block1_bars"]["n"]:
-        out.append("Block 1: %d bars in the Set; %s." % (sp["block1_bars"], span("block1_bars")))
+        out.append("Block 1: %d bars in the Set; %s." % (sp["block1_bars"], span("block1_bars", not flagged)))
     if sp["n_blocks"] is not None and all_["n_blocks"]["n"]:
-        out.append("Blocks: %d in the Set; %s." % (sp["n_blocks"], span("n_blocks")))
+        out.append("Blocks: %d in the Set; %s." % (sp["n_blocks"], span("n_blocks", False)))
     if sp["block_ratio"] is not None and all_["block_ratio"]["n"]:
         shorter, n = count("block_ratio", lambda v: v < 1)
         longer, _ = count("block_ratio", lambda v: v > 1)
         out.append("Block 2 / block 1: %s in the Set (%d / %d bars); %s; block 2 is shorter than block 1 in "
                    "%d of %d, longer in %d." % (_g(sp["block_ratio"]), sp["block2_bars"], sp["block1_bars"],
-                                                span("block_ratio"), shorter, n, longer))
+                                                span("block_ratio", not flagged), shorter, n, longer))
     if sp["bass_lead1"] is not None and all_["bass_lead1"]["n"]:
         zero1, n1 = count("bass_lead1", lambda v: v == 0)
         text = ("Bass lead (bars the bass plays before the kick joins, 1 bar or less read as 0): in the Set "
@@ -1344,9 +1363,11 @@ def format_table(result):
     return "\n".join(lines)
 
 
-def format_metrics(m, unavailable=None, title=None):
+def format_metrics(m, unavailable=None, title=None, by_labels=True):
     """The metric block as text. `unavailable` says, per metric, why a source cannot give it
-    ("changes", "hook"): printed in its place, never a silent zero or "none"."""
+    ("changes", "hook"): printed in its place, never a silent zero or "none". `by_labels` False (a
+    reference) keeps the labels as the section map only: no Drop 2 / Drop 1 and no bass-against-drop,
+    which depend on how the sections were labelled; the groove blocks stand in their place."""
     unavailable = unavailable or {}
     unit = ("%d-bar steps" % m["step_bars"]) if m["step_bars"] != 1 else "1-bar steps"
     lines = [title or "Structure: %d bars in %d steps of %d (bars count from the first scene of "
@@ -1392,7 +1413,7 @@ def format_metrics(m, unavailable=None, title=None):
                               "in at bar %d%s%s" % (
                                   b["entry_bar"],
                                   " (scene %d)" % b["entry_scene"] if b["entry_scene"] else "",
-                                  "" if b["before_first_drop"] is None else
+                                  "" if b["before_first_drop"] is None or not by_labels else
                                   ", %s the first drop (bar %d)" % (
                                       "BEFORE" if b["before_first_drop"] else "not before",
                                       b["first_drop_bar"])))]
@@ -1406,8 +1427,13 @@ def format_metrics(m, unavailable=None, title=None):
             "%d bars from bar %d (%s)" % (g["bars"], g["bar"], g["section"] or "no label")
             for g in k["out"]) or "never between two stretches it plays"))
     dr = m["drop_ratio"]
-    lines.append("drops: " + ("Drop 2 %d bars / Drop 1 %d bars = %g" % (
-        dr["drop2_bars"], dr["drop1_bars"], dr["ratio"]) if dr else "no Drop 1 and Drop 2"))
+    if by_labels:
+        lines.append("drops: " + ("Drop 2 %d bars / Drop 1 %d bars = %g" % (
+            dr["drop2_bars"], dr["drop1_bars"], dr["ratio"]) if dr else "no Drop 1 and Drop 2"))
+    else:
+        lines.append("drops as labelled (rules; a drop is often Drop + the Main after it; no ratio): " + (
+            "; ".join("%s %d%s" % (d["label"], d["bars"], " + Main %d" % d["mains_after"] if d["mains_after"] else "")
+                      for d in labelled_drops(m)) or "no Drop label"))
     ht = m["hats"]
     lines.append("hats: " + ("no hats role" if ht is None else
                              "never play" if ht["first_bar"] is None else
@@ -1418,6 +1444,17 @@ def format_metrics(m, unavailable=None, title=None):
                                                        for g in ht["gaps"]),
                                  "; out for the last %d bars" % ht["trailing_out_bars"]
                                  if ht["trailing_out_bars"] else "")))
+    blocks = m.get("blocks")
+    lines += ["", "groove blocks (kick and bass together; a fill under 4 bars ignored, from 8 bars; split by 4+ bars "
+                  "without it%s)" % ("; 8-bar steps: a gap of 4 to 7 bars cannot be seen" if m["step_bars"] == 8 else "")]
+    if blocks is None:
+        lines.append("  not available: no kick or no bass role")
+    elif not blocks:
+        lines.append("  none")
+    for x in blocks or []:
+        lines.append("  bar %d, %d bars, bass lead %d%s" % (
+            x["bar"], x["bars"], x["bass_lead"],
+            ", kick out %d bars before it" % x["kick_out_before"] if "kick_out_before" in x else ""))
     return "\n".join(lines)
 
 
@@ -1439,13 +1476,13 @@ REF_UNAVAILABLE = {
 REF_NOT_COMPARABLE = {
     "pitched_parts": "counts stems (bass, synths) and is at most 2 for a reference; the Set's counts "
                      "pitched roles among 7: not comparable, never one row",
-    "sections_vs_bars": "the section map and the Drop 2 / Drop 1 ratio come from despeckled activity "
+    "sections_vs_bars": "the section map (and the drop lengths, in the JSON only) comes from despeckled activity "
                         "(a stretch must last 4 bars); entries and kick/hats gaps are read bar by "
                         "bar (an entry is the first stretch of 4 bars or more). A one-bar fill can "
                         "make a kick-out 15 bars inside a 16-bar breakdown: that is the fill, not "
                         "a disagreement",
     "bar_numbers": "file bars from the audio's grid start (a lead-in shifts them); the Set counts "
-                   "from its first scene: compare relative to the first drop or the first kick, "
+                   "from its first scene: compare positions as bars before the first groove block, "
                    "never bare bar numbers",
 }
 
@@ -1499,7 +1536,7 @@ def format_reference(ref):
     title = "Structure of %s - %s (reference, %s bpm), %d bars in 1-bar steps, file bars" % (
         st["artist"], st["title"], "%g" % st["bpm"] if st["bpm"] else "unknown",
         ref["metrics"]["bars"])
-    return (format_metrics(ref["metrics"], ref["metrics"]["not_available"], title)
+    return (format_metrics(ref["metrics"], ref["metrics"]["not_available"], title, by_labels=False)
             + "\n\n" + "\n".join("note: " + c for c in ref["caveats"])
             + "\n" + "\n".join("not comparable with the Set (%s): %s" % (k, v)
                                 for k, v in ref["not_comparable"].items()))

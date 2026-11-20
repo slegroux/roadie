@@ -1007,3 +1007,54 @@ def test_a_read_that_goes_past_its_deadline_says_so(monkeypatch):
     with pytest.raises(A.ReadTooSlow, match="took over 0 s.*save a read"):
         A.read_arrangement(1, 2, None, timeout_s=0)
     assert A.read_arrangement(1, 2, None, timeout_s=60)["rows"]
+
+
+def test_a_six_bar_kick_gap_splits_a_reference_block_but_not_the_sets(tmp_path):
+    """The documented limit of the Set's 8-bar steps: kick out for bars 21-26 (6 bars). A reference sees two
+    blocks, 1-20 and 27-64 (lead 6 at the second); the Set's steps keep one block, 1-64."""
+    _study(tmp_path / "r", "K", "Gap6", [("Intro", 1, 8)], 64, {"drums_kick": [(1, 20), (27, 64)], "bass": [(1, 64)]})
+    ref = A.reference_metrics(load_study("Gap6", tmp_path / "r"))["metrics"]
+    assert _blocks(ref) == [(1, 20, 0), (27, 38, 6)]
+    one = build(("Main", 64, dict(kick="o=======", bass="o=======")))
+    assert _blocks(A.structure_metrics(one)) == [(1, 64, 0)]
+
+
+def test_kick_and_bass_from_bar_one_on_the_set_side_is_flagged_too():
+    t = build(("Main", 16, dict(kick="o=", bass="o=")), ("Breakdown", 8, dict(kick="-", bass="=")),
+              ("Drop", 16, dict(kick="+=", bass="==")))
+    p = A.profile_of(A.structure_metrics(t))
+    assert (p["bars_before_block1"], p["block1_bars"], p["n_blocks"]) == (0, 16, 2)
+    assert p["flags"] == ["groove already on in the first 8 bars"]
+
+
+def test_the_headline_ratio_skips_a_teaser_and_a_flagged_set_says_so(library):
+    """The Set's first block is an 8-bar teaser (bars 9-16), then 17-48 (32) and 57-96 (40): flagged, and the
+    ratio that counts is 40 / 32 = 1.25 over the blocks of 16+ bars. References: One has one block of 16+ bars
+    (no ratio), Two 16 / 20 = 1.25, Three one block (no ratio); medians over those that have it."""
+    t = build(("Intro", 8, dict(pad="o")), ("Main 1", 8, dict(kick="+", bass="+", pad="=")),
+              ("Build", 8, dict(kick="-", bass="=", pad="=")), ("Drop 1", 32, dict(kick="+===", bass="====", pad="====")),
+              ("Breakdown", 8, dict(kick="-", bass="=", pad="=")), ("Drop 2", 40, dict(kick="+====", bass="=====", pad="=====")))
+    rep = A.build_compare(refs=["all"], read=t)
+    sp = rep["set"]["profile"]
+    assert [(b["bar"], b["bars"]) for b in rep["set"]["blocks"]] == [(9, 8), (25, 32), (65, 40)]
+    assert (sp["major1_bars"], sp["major2_bars"], sp["major_ratio"]) == (32, 40, 1.25)
+    assert sp["flags"] == ["a block under 16 bars", "block 3 and later not compared (3 blocks)"]
+    got = {r["title"]: r["profile"] for r in rep["references"]}
+    assert [(got[k]["major1_bars"], got[k]["major2_bars"], got[k]["major_ratio"]) for k in ("One", "Two", "Three")] == [
+        (16, None, None), (16, 20, 1.25), (24, None, None)]
+    assert rep["median"]["all"]["major_ratio"] == {"value": 1.25, "n": 1}
+    text = rep["readings"]
+    assert text[0].startswith("Length ratio (the first two blocks of 16+ bars, so a short teaser block does not count): "
+                              "40 / 32 bars = 1.25 in the Set; median 1.25 over 1 of 3 references")
+    assert text[1].startswith("The Set is itself flagged (a block under 16 bars; block 3 and later not compared (3 blocks))")
+    assert not any("over the 2 unflagged" in r for r in text if r.startswith(("Block 1", "Block 2", "Blocks")))
+    assert not any(r.startswith("Blocks:") and "unflagged" in r for r in text)
+
+
+def test_the_reference_text_shows_blocks_and_no_drop_ratio(library, capsys):
+    A.main(["ref", "Two"])
+    out = capsys.readouterr().out
+    assert "groove blocks (kick and bass together" in out and "  bar 9, 16 bars, bass lead 4" in out
+    assert "  bar 29, 20 bars, bass lead 4, kick out 4 bars before it" in out
+    assert "drops as labelled (rules" in out and "Drop 2 / Drop 1" not in out and "BEFORE" not in out
+    assert "compare relative to the first drop" not in out
