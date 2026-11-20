@@ -3,6 +3,7 @@
 
     arrangement.py read --scenes A-B [--roles MAP.json] [--json] [--metrics]
     arrangement.py ref <study> [--json]
+    arrangement.py compare --scenes A-B --ref <study>... | --ref all [--roles MAP] [--set-json FILE] [--out REPORT.md]
 
 The Set's scenes, played top to bottom, ARE the arrangement. This reads scenes A..B (1-based, as
 Live's scene numbers) and builds, per 8-bar step, one cell per scene x role: playing, silent, or
@@ -837,6 +838,293 @@ def structure_metrics(result):
 
 
 # --------------------------------------------------------------------------
+# compare: the Set against reference studies
+# --------------------------------------------------------------------------
+
+GAP_BARS = 4          # a kick or hats gap shorter than this is a fill, counted apart from the gaps
+
+# (key, column heading) of the two tables. Nothing here is an absolute bar number: the Set counts
+# from the first scene read, a reference from the start of its file (a lead-in shifts it).
+FORM_COLUMNS = (("total_bars", "bars"), ("sections", "sections"),
+                ("bars_to_first_drop", "bars before the first drop"), ("drop1_bars", "Drop 1"),
+                ("drop2_bars", "Drop 2"), ("drop_ratio", "Drop 2 / Drop 1"))
+PART_COLUMNS = (("bass_vs_first_drop", "bass vs first drop (bars, - = before)"),
+                ("kick_vs_first_drop", "kick vs first drop"),
+                ("longest_kick_out_bars", "longest kick-out"),
+                ("kick_gaps", "kick gaps of 4+ bars"), ("kick_fills", "kick fills (under 4)"),
+                ("hats_gaps", "hats gaps of 4+ bars"), ("hats_fills", "hats fills (under 4)"))
+NUMERIC = [k for k, _ in FORM_COLUMNS + PART_COLUMNS]
+
+
+def profile_of(m):
+    """The numbers of one metric block (`metrics_from_steps`), measured the same way on a Set range
+    and on a reference: lengths, and positions relative to the first drop. None where it does not
+    exist (no Drop section, no kick stem)."""
+    drop = next((x for x in m["sections"] if (x["label"] or "").startswith("Drop")), None)
+    fd = drop["bar"] if drop else None
+    d = m["drop_ratio"]
+    bass, kick, hats = m["bass"], m["kick"], m["hats"]
+    out = {"total_bars": m["bars"], "sections": len(m["sections"]),
+           "bars_to_first_drop": fd - 1 if fd else None,
+           "drop1_bars": d["drop1_bars"] if d else None, "drop2_bars": d["drop2_bars"] if d else None,
+           "drop_ratio": d["ratio"] if d else None,
+           "bass_vs_first_drop": (bass["entry_bar"] - fd if bass and bass["entry_bar"] and fd
+                                  else None),
+           "kick_vs_first_drop": (kick["first_bar"] - fd if kick and kick["first_bar"] and fd
+                                  else None)}
+    if kick and kick["first_bar"]:
+        gaps = kick["out"]
+        longest = max(gaps, key=lambda g: g["bars"], default=None)
+        out.update(longest_kick_out_bars=longest["bars"] if longest else 0,
+                   longest_kick_out_in=(longest["section"] or "no label") if longest else None,
+                   kick_gaps=sum(1 for g in gaps if g["bars"] >= GAP_BARS),
+                   kick_fills=sum(1 for g in gaps if g["bars"] < GAP_BARS))
+    else:
+        out.update(longest_kick_out_bars=None, longest_kick_out_in=None, kick_gaps=None,
+                   kick_fills=None)
+    if hats and hats["first_bar"]:
+        out.update(hats_gaps=sum(1 for g in hats["gaps"] if g["bars"] >= GAP_BARS),
+                   hats_fills=sum(1 for g in hats["gaps"] if g["bars"] < GAP_BARS))
+    else:
+        out.update(hats_gaps=None, hats_fills=None)
+    return out
+
+
+def resolve_refs(names):
+    """([Study], [{"name", "root", "reason"}]) for `names` (study names, or "all": every analysed
+    study under the roots). A study without the activity layer, or one that cannot be read, is
+    left out with its reason, never silently."""
+    import study as study_reader
+    if any(n.strip().lower() == "all" for n in names):
+        found = [r for r in study_reader.find_studies() if r.analysed]
+        entries = [(str(r.root), "%s/%s" % (r.artist, r.title), r.source) for r in found]
+    else:
+        entries = [(n, n, "") for n in names]
+    studies, left, seen = [], [], set()
+    for target, label, root in entries:
+        try:
+            st = study_reader.load_study(target)
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+            left.append({"name": label, "root": root, "reason": "cannot be read: %s" % e})
+            continue
+        key = (st.source, st.artist, st.title)
+        if key in seen:
+            continue
+        seen.add(key)
+        if st.activity() is None:
+            left.append({"name": "%s/%s" % (st.artist, st.title), "root": st.source,
+                         "reason": st.layers["activity"].missing
+                         or "its bar_activity could not be read"})
+        else:
+            studies.append(st)
+    return studies, left
+
+
+def _stats(profiles):
+    """{key: {min, max, median, n}} over the references that have the number."""
+    import statistics
+    out = {}
+    for k in NUMERIC:
+        vals = [p[k] for p in profiles if p.get(k) is not None]
+        out[k] = ({"min": min(vals), "max": max(vals), "median": statistics.median(vals),
+                   "n": len(vals)} if vals else {"min": None, "max": None, "median": None, "n": 0})
+    return out
+
+
+def _g(x):
+    return "n/a" if x is None else "%g" % x
+
+
+def readings(sp, st, refs):
+    """Where the Set sits against the references, in plain numbers (a sentence each)."""
+    N = len(refs)
+    out = []
+
+    def span(k):
+        return "median %s, range %s to %s, over %d of %d references" % (
+            _g(st[k]["median"]), _g(st[k]["min"]), _g(st[k]["max"]), st[k]["n"], N)
+
+    if sp["bars_to_first_drop"] is not None and st["bars_to_first_drop"]["n"]:
+        out.append("First drop: %d bars after the start of the range in the Set; %s."
+                   % (sp["bars_to_first_drop"], span("bars_to_first_drop")))
+    v = sp["bass_vs_first_drop"]
+    vals = [r["profile"]["bass_vs_first_drop"] for r in refs
+            if r["profile"]["bass_vs_first_drop"] is not None]
+    if v is not None and vals:
+        where = ("%d bars before the first drop" % -v if v < 0 else
+                 "with the first drop" if v == 0 else "%d bars after the first drop" % v)
+        out.append("Bass: enters %s in the Set; in %d of %d references it enters with the first drop "
+                   "or later, in %d before it (%s)." % (
+                       where, sum(1 for x in vals if x >= 0), len(vals),
+                       sum(1 for x in vals if x < 0), span("bass_vs_first_drop")))
+    if sp["drop_ratio"] is not None and st["drop_ratio"]["n"]:
+        rs = [r["profile"]["drop_ratio"] for r in refs if r["profile"]["drop_ratio"] is not None]
+        out.append("Drop 2 / Drop 1: %s in the Set (%d / %d bars); %s; Drop 2 is shorter than Drop 1 in "
+                   "%d, equal in %d, longer in %d." % (
+                       _g(sp["drop_ratio"]), sp["drop2_bars"], sp["drop1_bars"], span("drop_ratio"),
+                       sum(1 for x in rs if x < 1), sum(1 for x in rs if x == 1),
+                       sum(1 for x in rs if x > 1)))
+    elif st["drop_ratio"]["n"]:
+        out.append("Drop 2 / Drop 1: the range has no Drop 1 and Drop 2 to compare; references: %s."
+                   % span("drop_ratio"))
+    if sp["longest_kick_out_bars"] is not None and st["longest_kick_out_bars"]["n"]:
+        out.append("Kick-out: the Set's longest is %d bars (%s) and it has %d kick gaps of 4+ bars; "
+                   "references: longest %s; gaps of 4+ bars %s; no such gap in %d of %d. The Set's "
+                   "gaps come in whole 8-bar steps, so it cannot show the %s one-to-three-bar fills "
+                   "the references have (median)." % (
+                       sp["longest_kick_out_bars"], sp["longest_kick_out_in"] or "none", sp["kick_gaps"],
+                       span("longest_kick_out_bars"), span("kick_gaps"),
+                       sum(1 for r in refs if r["profile"]["kick_gaps"] == 0), st["kick_gaps"]["n"],
+                       _g(st["kick_fills"]["median"])))
+    if sp["hats_gaps"] is not None and st["hats_gaps"]["n"]:
+        out.append("Hats: %d gaps of 4+ bars in the Set; %d of %d references have none (%s)." % (
+            sp["hats_gaps"], sum(1 for r in refs if r["profile"]["hats_gaps"] == 0),
+            st["hats_gaps"]["n"], span("hats_gaps")))
+    out.append("Length: the Set range is %d bars in %d sections; references: %d bars median (range %s to %s) "
+               "in %s sections median (whole tracks: the range is only the scenes read)." % (
+                   sp["total_bars"], sp["sections"], st["total_bars"]["median"] or 0,
+                   _g(st["total_bars"]["min"]), _g(st["total_bars"]["max"]), _g(st["sections"]["median"])))
+    return out
+
+
+def compare_report(set_result, studies, left_out=()):
+    """The Set's metrics against each reference's: one report, as plain data. `set_result` is a read
+    (`read_arrangement`, or the JSON of `roadie arrangement read --json`)."""
+    sm = set_result.get("metrics") or structure_metrics(set_result)
+    sp = profile_of(sm)
+    refs = []
+    for st in studies:
+        r = reference_metrics(st)
+        prof = profile_of(r["metrics"])
+        notes = []
+        if prof["bars_to_first_drop"] is None:
+            notes.append("no Drop section (labels: %s)" % ", ".join(
+                x["name"] for x in r["metrics"]["sections"]) )
+        elif prof["drop_ratio"] is None:
+            notes.append("Drop labels without a Drop 1 / Drop 2 pair (%s)" % ", ".join(
+                x["name"] for x in r["metrics"]["sections"] if (x["label"] or "").startswith("Drop")))
+        if st.layers["grid"].source is None:
+            notes.append("no grid")
+        if any("chance-level" in c for c in st.layers["grid"].caveats):
+            notes.append("chance-level downbeat")
+        for role, key in (("kick", "kick"), ("bass", "bass"), ("hats", "hats")):
+            if r["metrics"][key] is None:
+                notes.append("no %s stem" % role)
+        refs.append({"name": "%s - %s" % (st.artist, st.title), "root": st.source, "artist": st.artist,
+                     "title": st.title, "profile": prof, "notes": notes})
+    refs.sort(key=lambda r: (r["artist"].casefold(), r["title"].casefold(), r["root"]))
+    stats = _stats([r["profile"] for r in refs])
+    pitched = [{"label": x["label"] or "(no label)", "bar": x["bar"], "bars": x["bars"],
+                "roles_at_once": x["pitched_parts"]["max"]} for x in sm["sections"]]
+    return {
+        "kind": "arrangement_compare", "version": 1,
+        "set": {"name": set_result.get("set") or "", "scenes": set_result.get("scenes"),
+                "profile": sp},
+        "references": refs, "left_out": list(left_out),
+        "range": {k: {"min": v["min"], "max": v["max"], "n": v["n"]} for k, v in stats.items()},
+        "median": {k: {"value": v["median"], "n": v["n"]} for k, v in stats.items()},
+        "readings": readings(sp, stats, refs),
+        "set_only": {"flags": sm["flags"], "hook": sm["hook"], "pitched_parts": pitched,
+                     "changes_available": sm.get("changes_available", True)},
+        "notes": [
+            "Positions are relative to the first drop and lengths are in bars; nothing is compared as an "
+            "absolute bar number (the Set counts from the first scene read, a reference from the start of "
+            "its file, a lead-in included).",
+            "Section labels of the references are rules over which stems play, not checked by ear; "
+            "the Set's come from its scene names.",
+            "Kick and hats gaps are read bar by bar on a reference (one-to-three-bar fills included, "
+            "counted apart) and in 8-bar steps on the Set.",
+            "Pitched parts is not compared: a reference counts stems (at most 2), the Set counts roles.",
+            "Automation in the Set's clips is not read.",
+            "A study whose sections.json predates bar_activity and could not be re-made without changing "
+            "its other fields is left out, not re-run.",
+            "Medians and ranges are computed over the references that have the number (n in each cell)."],
+    }
+
+
+def format_compare(rep):
+    """The report as Markdown: references in rows, Set first, range and median last."""
+    sp, refs = rep["set"]["profile"], rep["references"]
+    sc = rep["set"]["scenes"]
+    lines = ["# Arrangement compare: %s%s against %d reference%s" % (
+        rep["set"]["name"] or "the Set", ", scenes %d-%d" % tuple(sc) if sc else "", len(refs),
+        "" if len(refs) == 1 else "s"), "", "## Readings", ""]
+    lines += ["- " + r for r in rep["readings"]] + [""]
+
+    def row(name, root, prof, cols, extra=""):
+        return "| %s | %s | %s |%s" % (name, root, " | ".join(_g(prof.get(k)) for k, _ in cols),
+                                      extra)
+
+    def stat_row(label, src, cols):
+        cells = []
+        for k, _ in cols:
+            if label == "Range":
+                v = rep["range"][k]
+                cells.append("n/a" if not v["n"] else "%s to %s (n=%d)" % (_g(v["min"]), _g(v["max"]), v["n"]))
+            else:
+                v = rep["median"][k]
+                cells.append("n/a" if not v["n"] else "%s (n=%d)" % (_g(v["value"]), v["n"]))
+        return "| **%s** | | %s |" % (label, " | ".join(cells))
+
+    for title, cols, notes_col in (("Form", FORM_COLUMNS, True), ("Bass, kick and hats", PART_COLUMNS, False)):
+        head = "| Source | Root | %s |%s" % (" | ".join(h for _, h in cols), " Notes |" if notes_col else "")
+        lines += ["## " + title, "", head, "|" + "---|" * (2 + len(cols) + (1 if notes_col else 0))]
+        lines.append(row("**The Set**", "live", sp, cols, " |" if notes_col else ""))
+        for r in refs:
+            lines.append(row(r["name"], r["root"], r["profile"], cols,
+                             " %s |" % ("; ".join(r["notes"]) or "") if notes_col else ""))
+        for label in ("Range", "Median"):
+            lines.append(stat_row(label, None, cols) + (" |" if notes_col else ""))
+        if title == "Bass, kick and hats":
+            lines.append("")
+            kicks = ["%s %s" % (r["name"], r["profile"]["longest_kick_out_in"])
+                     for r in refs if r["profile"]["longest_kick_out_in"]]
+            lines.append("Where the longest kick-out falls: Set: %s%s." % (
+                sp["longest_kick_out_in"] or "n/a",
+                "; " + "; ".join("%s: %s" % (r["name"], r["profile"]["longest_kick_out_in"])
+                                 for r in refs if r["profile"]["longest_kick_out_in"]) if kicks else ""))
+        lines.append("")
+    so = rep["set_only"]
+    lines += ["## The Set only (a reference is audio, so none of this exists for it)", ""]
+    if so["flags"]:
+        for f in so["flags"]:
+            lines.append("- %s, bars %s of the scene: %s" % ((f["name"] or "scene %s" % f["scene"])[:40],
+                                                             f["in_scene"], f["flag"]))
+    else:
+        lines.append("- no 8-bar step adds nothing or only removes")
+    h = so["hook"]
+    lines.append("- hook (lead): " + ("not in this range" if not h else "never plays" if not h["first_bar"] else
+                                     "runs %d bars from bar %d, varies at %d steps, %d variants" % (
+                                         h["longest_run"]["bars"], h["longest_run"]["bar"], h["varies"],
+                                         h["distinct_variants"])))
+    lines.append("- pitched roles at once, by section: " + ", ".join(
+        "%s %d" % (p["label"], p["roles_at_once"]) for p in so["pitched_parts"]))
+    lines += ["", "## Left out", ""]
+    lines += (["- %s [%s]: %s" % (x["name"], x["root"] or "-", x["reason"]) for x in rep["left_out"]]
+              or ["- none"])
+    lines += ["", "## Notes", ""] + ["- " + n for n in rep["notes"]]
+    return "\n".join(lines) + "\n"
+
+
+def build_compare(scenes=None, refs=("all",), roles=None, read=None):
+    """The compare report. `read` is a saved read (a dict or the path of `roadie arrangement read
+    --json`), else the scenes are read from Live (read-only); `roles` is a role map (dict or JSON path)."""
+    if isinstance(read, (str, os.PathLike)):
+        with open(read) as f:
+            read = json.load(f)
+    if read is None:
+        if not scenes:
+            raise ValueError("give the scene range (A-B) or a saved read")
+        first, last = parse_scenes(scenes)
+        rm = load_role_map(roles) if isinstance(roles, (str, os.PathLike)) else roles
+        read = read_arrangement(first, last, rm)
+    elif scenes and read.get("scenes") and list(parse_scenes(scenes)) != list(read["scenes"]):
+        raise ValueError("the saved read is of scenes %d-%d, not %s" % (read["scenes"][0], read["scenes"][1], scenes))
+    studies, left = resolve_refs(list(refs))
+    return compare_report(read, studies, left)
+
+
+# --------------------------------------------------------------------------
 # output
 # --------------------------------------------------------------------------
 
@@ -1065,7 +1353,31 @@ def main(argv=None):
     rf = sub.add_parser("ref", help="the same metrics for a reference study, from its bar_activity")
     rf.add_argument("study", help="a study title under the studies roots, or a path (see `roadie study list`)")
     rf.add_argument("--json", action="store_true", help="JSON instead of the text block")
+    cp = sub.add_parser("compare", help="the Set's metrics next to those of reference studies")
+    cp.add_argument("--scenes", metavar="A-B", help="1-based scene range (not needed with --set-json)")
+    cp.add_argument("--ref", action="append", required=True, metavar="STUDY",
+                    help="a study name (see `roadie study list`); repeat it, or --ref all")
+    cp.add_argument("--roles", metavar="MAP.json", help="track name -> role map for the Live read")
+    cp.add_argument("--set-json", metavar="FILE", help="a saved `roadie arrangement read --json` instead of Live")
+    cp.add_argument("--out", metavar="REPORT.md", help="write the Markdown here")
+    cp.add_argument("--json", action="store_true", help="print the report as JSON instead of Markdown")
     args = ap.parse_args(argv)
+    if args.cmd == "compare":
+        try:
+            rep = build_compare(args.scenes, args.ref, args.roles, args.set_json)
+        except (ValueError, OSError) as e:
+            sys.exit("arrangement: %s" % e)
+        except LiveError as e:
+            sys.exit("arrangement: Live refused: %s" % e)
+        md = format_compare(rep)
+        if args.out:
+            with open(os.path.expanduser(args.out), "w") as f:
+                f.write(md)
+            print("wrote %s: %d references, %d left out" % (args.out, len(rep["references"]),
+                                                            len(rep["left_out"])))
+        print(json.dumps(rep, indent=1, ensure_ascii=False) if args.json
+              else (md if not args.out else "\n".join("- " + r for r in rep["readings"])))
+        return
     if args.cmd == "ref":
         try:
             import study as study_reader
