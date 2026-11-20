@@ -310,7 +310,12 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
                  stems, layers, sorted(extras))
 
 
-def to_json(study: Study) -> dict:
+def to_json(study: Study, layers: list[str] | None = None) -> dict:
+    """The record as JSON. `layers` keeps only those layers (a name not in LAYER_NAMES is an error)."""
+    unknown = [n for n in layers or [] if n not in LAYER_NAMES]
+    if unknown:
+        raise ValueError("unknown layer %s; the layers are %s" % (", ".join(unknown), ", ".join(LAYER_NAMES)))
+
     def rel(p):
         return str(Path(p).relative_to(study.root))
 
@@ -321,7 +326,7 @@ def to_json(study: Study) -> dict:
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
                        "missing": l.missing, "caveats": l.caveats, "data": l.data}
-                   for n, l in study.layers.items()},
+                   for n, l in study.layers.items() if layers is None or n in layers},
         "extras": [rel(p) for p in study.extras],
     }
 
@@ -352,36 +357,53 @@ def _show(study: Study) -> None:
             print("    %s" % p.relative_to(study.root))
 
 
-def _list() -> int:
-    refs = find_studies()
-    done = [r for r in refs if r.analysed]
+def list_to_json(root: Path = STUDIES_ROOT) -> dict:
+    """Every study under root: {artist, title, analysed, layers: {name: has it}}."""
+    out = []
+    for r in find_studies(root):
+        row = {"artist": r.artist, "title": r.title, "analysed": r.analysed, "layers": None}
+        if r.analysed:
+            try:
+                row["layers"] = {n: l.source is not None for n, l in load_study(str(r.root)).layers.items()}
+            except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+                row["error"] = "could not read: %s" % e
+        out.append(row)
+    return {"kind": "study_list", "version": 1, "studies": out}
+
+
+def _list(as_json: bool) -> int:
+    data = list_to_json()
+    if as_json:
+        print(json.dumps(data, indent=2))
+        return 0
+    done = [r for r in data["studies"] if r["analysed"]]
     print("analysed (%d)" % len(done))
     for r in done:
-        try:
-            st = load_study(str(r.root))
-        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
-            print("  %-37s could not read: %s" % ("%s/%s" % (r.artist, r.title), e))
+        name = "%s/%s" % (r["artist"], r["title"])
+        if r["layers"] is None:
+            print("  %-37s %s" % (name, r.get("error")))
             continue
-        have = [n for n, l in st.layers.items() if l.source]
-        print("  %-37s has: %-22s missing: %s" % ("%s/%s" % (r.artist, r.title), " ".join(have) or "-",
-                                                  " ".join(n for n in st.layers if n not in have) or "-"))
-    rest = [r for r in refs if not r.analysed]
+        have = [n for n, ok in r["layers"].items() if ok]
+        print("  %-37s has: %-22s missing: %s" % (name, " ".join(have) or "-",
+                                                  " ".join(n for n in r["layers"] if n not in have) or "-"))
+    rest = [r for r in data["studies"] if not r["analysed"]]
     print("not analysed (%d)" % len(rest))
     for r in rest:
-        print("  %s/%s" % (r.artist, r.title))
+        print("  %s/%s" % (r["artist"], r["title"]))
     return 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roadie study", description="Read a study as one record")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list", help="every study under the studies root")
+    ls = sub.add_parser("list", help="every study under the studies root")
+    ls.add_argument("--json", action="store_true", help="print the list as JSON")
     show = sub.add_parser("show", help="print one study")
     show.add_argument("name", help="a title under the studies root, or a path")
     show.add_argument("--json", action="store_true", help="print the record as JSON")
     args = ap.parse_args(argv)
     if args.cmd == "list":
-        return _list()
+        return _list(args.json)
     try:
         study = load_study(args.name)
         if args.json:

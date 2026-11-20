@@ -4,7 +4,8 @@
     roadie mcp                      run it (stdio); an MCP client starts it, not you
     claude mcp add --scope user roadie -- /abs/path/to/roadie/roadie mcp
 
-Four tools: sample_analyze, sample_compare, reference_profile and session_compare. The first three
+Six tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list and
+study_read (the Studies folder, read-only: `roadie study`). The first three
 have the names, arguments, defaults and output of Sideman's tools of the same name; session_compare
 is Sideman's mix_report with a reference profile. Measuring the Set on its own (audio_analyze,
 audio_compare, mix_report with no reference or an audio file) stays in Sideman's server: register
@@ -49,6 +50,7 @@ except ModuleNotFoundError as _e:
         raise
     sys.exit("sideman is not installed in .venv: run ./install.sh")
 
+import study
 from roadie_analysis import oneshot, profile
 
 mcp = MCPServer(
@@ -56,7 +58,8 @@ mcp = MCPServer(
     instructions=(
         "Analysis that needs a reference track, its stems or samples: drum one-shots (sample_analyze, "
         "sample_compare), a reference track measured once per section (reference_profile), and a capture "
-        "of the Set compared with that profile (session_compare). Measuring the Set on its own "
+        "of the Set compared with that profile (session_compare); the studies on disk and what was analysed in each "
+        "(study_list, study_read). Measuring the Set on its own "
         "(audio_analyze, audio_compare, mix_report) is Sideman's server. A source is a file path or an "
         "audio clip's LOM path such as \"live_set tracks 3 clip_slots 0 clip\"."
     ),
@@ -337,6 +340,35 @@ def reference_profile(mix: str, stems: dict[str, str | list[str]], tempo: float,
                        "beats_per_bar": prof["beats_per_bar"], "sample_rate": prof["sample_rate"],
                        "roles": list(prof["inputs"]["stems"]), "notes": prof["notes"], "sections": rows},
                       indent=2)
+
+
+STUDY_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError)
+
+
+@mcp.tool()
+def study_list() -> str:
+    """List every study under the Studies folder (ROADIE_STUDIES, default
+    ~/Projects/Music/slgMusProd/Studies), analysed or not, with which layers each has
+    (grid, sections, activity, mix, drums). Same JSON as `roadie study list --json`.
+    Read-only; computes nothing."""
+    try:
+        return json.dumps(study.list_to_json(study.STUDIES_ROOT), indent=2)
+    except STUDY_ERRORS as e:
+        raise AnalysisError("cannot list the studies: %s: %s" % (type(e).__name__, e))
+
+
+@mcp.tool()
+def study_read(name: str, layers: list[str] | None = None) -> str:
+    """Read one study as a record: bpm, stems by role, and each analysis layer with the file
+    it came from, what made it, caveats (stale, unchecked, labels by rule) and its data, or
+    the command that would make it when absent. `name` is a title (an exact title, else a
+    unique part of one), `Artist/Title`, or a path; an ambiguous name is an error listing the
+    matches. `layers` keeps only those of grid, sections, activity, mix, drums. Same JSON as
+    `roadie study show <name> --json`. Read-only; computes nothing."""
+    try:
+        return json.dumps(study.to_json(study.load_study(name, study.STUDIES_ROOT), layers), indent=2)
+    except STUDY_ERRORS as e:
+        raise AnalysisError("cannot read the study: %s: %s" % (type(e).__name__, e))
 
 
 def main() -> None:
