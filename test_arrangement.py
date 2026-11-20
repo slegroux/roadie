@@ -734,7 +734,7 @@ def test_a_reference_says_what_it_cannot_tell_rather_than_printing_zero(tmp_path
     assert "note: labels by rule, not checked by ear" in text
     assert "note: no grid: alignment.json is missing" in text and "no Live bar is known" in text
     assert "not comparable with the Set (pitched_parts): counts stems (bass, synths) and is at most 2" in text
-    assert "despeckled activity" in text and "a one-bar fill can make a kick-out 15 bars" in text
+    assert "despeckled activity" in text and "A one-bar fill can make a kick-out 15 bars" in text
     import study as study_mod
     monkeypatch.setattr(study_mod, "STUDIES_ROOTS", study_mod.parse_roots("r=%s" % tmp_path))
     A.main(["ref", "Synth", "--json"])
