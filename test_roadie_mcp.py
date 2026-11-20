@@ -280,7 +280,9 @@ def test_study_read_is_the_cli_json_and_filters_layers(S, tmp_path, monkeypatch)
 
 def test_arrangement_compare_is_the_cli_report_and_writes_the_markdown(S, tmp_path, monkeypatch):
     """The tool gives the report the CLI builds from the same saved read, and with `out` also the
-    Markdown file and its path; a study without the activity layer comes back left out."""
+    Markdown file and its path (a relative one under the home folder); a study without the activity
+    layer comes back left out; an empty ref list, roles with a saved read and a bad scene range are tool
+    errors."""
     import arrangement
     import study
     folder = tmp_path / "lib" / "A" / "One" / "One_124bpm_stems"
@@ -309,3 +311,21 @@ def test_arrangement_compare_is_the_cli_report_and_writes_the_markdown(S, tmp_pa
     assert [r["title"] for r in got["references"]] == ["One"] and [x["name"] for x in got["left_out"]] == ["B/Two"]
     assert report.read_text() == arrangement.format_compare(want)
     assert "saved read is of scenes" in failure(S, "arrangement_compare", scenes="5-9", read=str(read))
+    assert "at least one reference" in failure(S, "arrangement_compare", ref=[], read=str(read))
+    assert "roles apply when the Set is read from Live" in failure(S, "arrangement_compare", read=str(read), roles={"a": "b"})
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    rel = json.loads(call(S, "arrangement_compare", read=str(read), out="rep.md"))
+    assert rel["markdown_path"] == str(tmp_path / "home" / "rep.md") and (tmp_path / "home" / "rep.md").exists()
+
+
+def test_arrangement_compare_reading_live_has_a_deadline_and_says_so(S, monkeypatch):
+    """The Live read is bounded by `timeout_s`: past it the call is a tool error that names the deadline
+    and points at a saved read."""
+    from fake_live import FakeLive
+    m = FakeLive(tracks=("midi",), scenes=2)
+    m.install(monkeypatch)
+    msg = failure(S, "arrangement_compare", scenes="1-2", ref="all", timeout_s=0)
+    assert "took over 0 s" in msg and "saved read" in msg
+    tool = next(t for t in asyncio.run(S.mcp.list_tools()) if t.name == "arrangement_compare")
+    assert tool.input_schema["properties"]["timeout_s"]["default"] == 240.0

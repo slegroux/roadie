@@ -182,16 +182,23 @@ names; `--roles` takes a JSON map (`{"27-Diva": "lead", "SYNTH KIT/Rim Shot": "p
 `roadie sections` saves in `sections.json` (per bar, which stems play). A reference is audio, so
 nothing is called varied and it has no hook: the output says so.
 
-`compare` puts the two side by side: one row per reference (with its root) and the Set first,
-a range and a median row last, and readings in plain numbers. Positions are relative to the
-first drop, never absolute bars. `--ref all` is every analysed study that has the `activity`
-layer; the others are listed as left out, with why. `--set-json` takes a saved
-`read --json` instead of Live.
+`compare` puts the two side by side, measured the same way from activity, not from labels. The
+main table is groove blocks: a block is a stretch in which kick and bass both play (a fill under
+4 bars ignored, from 8 bars), separated by 4 or more bars without it. Per source: bars before
+block 1, the lengths of block 1 and 2 and their ratio, the kick-out before block 2, and the bass
+lead (bars the bass plays before the kick joins; 1 bar or less reads as 0). One row per reference
+(with its root), the Set first, range and median rows over all references and over the unflagged
+ones (groove already on in the first 8 bars, a block under 16 bars, a third block not compared).
+The labelled drops (the Set's scene names, a reference's rules, which split one drop into Drop and
+Main) are a second table that is not comparable, with no ratio. `--ref all` is every analysed study
+that has the `activity` layer; the others, and duplicates of one track, are listed as left out,
+with why. `--set-json` takes a saved `read --json` (its metrics are recomputed; `--roles` is then
+refused) instead of Live.
 
 ```
-- Bass: enters 16 bars before the first drop in the Set; in 15 of 33 references it enters with
-  the first drop or later, in 18 before it (median -1, range -148 to 0, over 33 of 34 references).
-- Drop 2 / Drop 1: 1 in the Set (32 / 32 bars); median 1, range 0.167 to 8.5, over 31 of 34 references
+- Block 1: 8 bars in the Set; median 48 over 32 of 32 references (range 11 to 112); 48 over the 13 unflagged.
+- Bass lead (bars the bass plays before the kick joins, 1 bar or less read as 0): in the Set 0 at
+  block 1, 8 at block 2; references at block 1: no lead in 28 of 32, median 0 ...
 ```
 
 The MCP tool `arrangement_compare` takes the same arguments.

@@ -806,72 +806,117 @@ SET_64 = build(
     ("Breakdown", 16, dict(kick="-.", bass="==", pad="==", hats="==")),
     ("Drop 2", 16, dict(kick="+=", bass="==", pad="==", hats="==")))
 
+ONE = ([("Intro", 1, 8), ("Drop 1", 9, 8), ("Breakdown 1", 17, 8), ("Drop 2", 25, 16)], 40,
+       {"drums_kick": [(9, 16), (25, 40)], "bass": [(9, 40)], "drums_hh": [(1, 40)]})
+TWO = ([("Intro", 1, 8), ("Drop 1", 9, 16), ("Breakdown 1", 25, 8), ("Drop 2", 33, 16)], 48,
+       {"drums_kick": [(9, 19), (21, 24), (29, 48)], "bass": [(5, 48)], "drums_hh": [(9, 24), (33, 48)]})
+THREE = ([("Intro", 1, 8), ("Main", 9, 24)], 32,
+         {"drums_kick": [(9, 32)], "bass": [(9, 32)], "drums_hh": [(1, 32)]})
+
 
 @pytest.fixture
 def library(tmp_path, monkeypatch):
     """Three references with activity (One, Two, Three) and one without (Four)."""
     import study as study_mod
     root = tmp_path / "lib"
-    _study(root, "A", "One", [("Intro", 1, 8), ("Drop 1", 9, 8), ("Breakdown 1", 17, 8), ("Drop 2", 25, 16)], 40,
-           {"drums_kick": [(9, 16), (25, 40)], "bass": [(9, 40)], "drums_hh": [(1, 40)]})
-    _study(root, "B", "Two", [("Intro", 1, 8), ("Drop 1", 9, 16), ("Breakdown 1", 25, 8), ("Drop 2", 33, 16)], 48,
-           {"drums_kick": [(9, 19), (21, 24), (29, 48)], "bass": [(5, 48)], "drums_hh": [(9, 24), (33, 48)]})
-    _study(root, "C", "Three", [("Intro", 1, 8), ("Main", 9, 24)], 32,
-           {"drums_kick": [(9, 32)], "bass": [(9, 32)], "drums_hh": [(1, 32)]})
+    _study(root, "A", "One", *ONE)
+    _study(root, "B", "Two", *TWO)
+    _study(root, "C", "Three", *THREE)
     _study(root, "D", "Four", [("Intro", 1, 8), ("Drop 1", 9, 8)], 16, None)
     monkeypatch.setattr(study_mod, "STUDIES_ROOTS", [study_mod.Root("local", root)])
     return root
 
 
+def _blocks(metrics):
+    return [(b["bar"], b["bars"], b["bass_lead"]) for b in metrics["blocks"]]
+
+
+def test_blocks_are_the_same_on_a_set_table_and_on_one_bar_activity(tmp_path):
+    """SET_64 and a study whose one-bar activity describes the same arrangement (kick 17-32 and 49-64,
+    bass 9-64) give the same blocks, by hand: bars 17-32 and 49-64 (16 each), the bass 8 bars ahead of the
+    kick at the first and 16 at the second (it stays through the breakdown), 16 bars of kick-out between."""
+    _study(tmp_path / "r", "E", "Same", [("Intro", 1, 16), ("Drop 1", 17, 16)], 64,
+           {"drums_kick": [(17, 32), (49, 64)], "bass": [(9, 64)]})
+    mine = A.structure_metrics(SET_64)
+    ref = A.reference_metrics(load_study("Same", tmp_path / "r"))["metrics"]
+    assert _blocks(mine) == _blocks(ref) == [(17, 16, 8), (49, 16, 16)]
+    assert mine["blocks"][1]["kick_out_before"] == ref["blocks"][1]["kick_out_before"] == 16
+
+
+def test_a_fill_inside_a_block_is_bridged_and_a_four_bar_gap_splits_it(tmp_path):
+    """Two's kick is out for bar 20 only (a fill: the block runs 9-24, 16 bars) and for bars 25-28 (4 bars:
+    a gap, so a second block 29-48, 20 bars). The bass is in from bar 5, so it leads the kick by 4 bars at
+    block 1 (bars 5-8) and 4 at block 2 (bars 25-28). One 8-bar step on the Set never bridges anything."""
+    _study(tmp_path / "r", *("B", "Two"), *TWO)
+    m = A.reference_metrics(load_study("Two", tmp_path / "r"))["metrics"]
+    assert _blocks(m) == [(9, 16, 4), (29, 20, 4)]
+    assert (m["blocks"][1]["gap_before"], m["blocks"][1]["kick_out_before"]) == (4, 4)
+
+
+def test_a_one_bar_bass_lead_reads_as_zero_and_a_short_block_is_dropped(tmp_path):
+    """The bass joins 1 bar ahead of the kick (a snapped section against raw activity): lead 0, raw 1.
+    A 6-bar stretch of kick and bass is under 8 bars and is not a block."""
+    _study(tmp_path / "r", "F", "Snap", [("Intro", 1, 8)], 48,
+           {"drums_kick": [(9, 20), (28, 33), (41, 48)], "bass": [(8, 48)]})
+    m = A.reference_metrics(load_study("Snap", tmp_path / "r"))["metrics"]
+    assert _blocks(m) == [(9, 12, 0), (41, 8, 7)]
+    assert m["blocks"][0]["bass_lead_raw"] == 1
+
+
+def test_a_groove_from_bar_one_is_flagged(tmp_path, monkeypatch):
+    import study as study_mod
+    _study(tmp_path / "r", "G", "Early", [("Intro", 1, 32)], 32,
+           {"drums_kick": [(1, 32)], "bass": [(1, 32)]})
+    monkeypatch.setattr(study_mod, "STUDIES_ROOTS", [study_mod.Root("local", tmp_path / "r")])
+    rep = A.build_compare(refs=["Early"], read=dict(SET_64))
+    (ref,) = rep["references"]
+    assert ref["profile"]["bars_before_block1"] == 0 and ref["profile"]["flags"] == [
+        "groove already on in the first 8 bars"]
+    assert rep["median"]["unflagged"]["block1_bars"]["n"] == 0 and rep["median"]["all"]["block1_bars"]["value"] == 32
+
+
 def test_compare_numbers_range_and_median_by_hand(library):
-    """The Set (64 bars): first drop after 16 bars, bass at bar 9 = 8 bars before the drop at 17,
-    Drop 1 and 2 of 16 (ratio 1), kick in with the drop, out for the 16 bars of the Breakdown, hats on.
-    References, by hand: One 40 bars, drop after 8, Drops 8 / 16 (ratio 2), bass with the drop, kick out
-    8 bars; Two 48 bars, drop after 8, Drops 16 / 16, bass 4 bars before the drop (bar 5 against 9),
-    kick gaps of 1 bar (a fill, bar 20) and 4 bars, hats out for 8; Three 32 bars, no Drop."""
+    """The Set (64 bars): blocks 17-32 and 49-64, 16 bars before block 1, bass leading by 8 and 16,
+    16 bars of kick-out. References, by hand: One blocks 9-16 (8) and 25-40 (16), lead 0 and 8, kick out 8;
+    Two 9-24 (16) and 29-48 (20), lead 4 and 4, kick out 4; Three one block 9-32 (24). One is flagged (a
+    block under 16 bars); Two and Three are not (one block only is a note, not a flag)."""
     rep = A.build_compare(refs=["all"], read=dict(SET_64))
     sp = rep["set"]["profile"]
-    assert (sp["total_bars"], sp["sections"], sp["bars_to_first_drop"]) == (64, 5, 16)
-    assert (sp["drop1_bars"], sp["drop2_bars"], sp["drop_ratio"]) == (16, 16, 1)
-    assert (sp["bass_vs_first_drop"], sp["kick_vs_first_drop"]) == (-8, 0)
-    assert (sp["longest_kick_out_bars"], sp["longest_kick_out_in"], sp["kick_gaps"], sp["kick_fills"]) == (
-        16, "Breakdown", 1, 0)
-    assert (sp["hats_gaps"], sp["hats_fills"]) == (0, 0)
+    assert (sp["n_blocks"], sp["bars_before_block1"], sp["block1_bars"], sp["block2_bars"], sp["block_ratio"]) == (2, 16, 16, 16, 1)
+    assert (sp["kick_out_before_block2"], sp["bass_lead1"], sp["bass_lead2"], sp["flags"]) == (16, 8, 16, [])
     got = {r["title"]: r["profile"] for r in rep["references"]}
     assert [r["title"] for r in rep["references"]] == ["One", "Two", "Three"]
-    assert (got["One"]["total_bars"], got["One"]["bars_to_first_drop"], got["One"]["drop_ratio"]) == (40, 8, 2)
-    assert (got["One"]["bass_vs_first_drop"], got["One"]["longest_kick_out_bars"]) == (0, 8)
-    assert (got["Two"]["bass_vs_first_drop"], got["Two"]["kick_gaps"], got["Two"]["kick_fills"],
-            got["Two"]["longest_kick_out_bars"]) == (-4, 1, 1, 4)
-    assert (got["Two"]["hats_gaps"], got["Two"]["drop_ratio"]) == (1, 1)
-    assert got["Three"]["bars_to_first_drop"] is None and got["Three"]["longest_kick_out_bars"] == 0
-    # range and median over the references that have the number, with how many that is
+    assert (got["One"]["block1_bars"], got["One"]["block2_bars"], got["One"]["block_ratio"]) == (8, 16, 2)
+    assert (got["One"]["bass_lead1"], got["One"]["bass_lead2"], got["One"]["kick_out_before_block2"]) == (0, 8, 8)
+    assert got["One"]["flags"] == ["a block under 16 bars"]
+    assert (got["Two"]["block1_bars"], got["Two"]["block2_bars"], got["Two"]["block_ratio"]) == (16, 20, 1.25)
+    assert (got["Two"]["bass_lead1"], got["Two"]["bass_lead2"], got["Two"]["kick_out_before_block2"]) == (4, 4, 4)
+    assert got["Two"]["flags"] == [] and got["Three"]["flags"] == []
+    assert (got["Three"]["n_blocks"], got["Three"]["block1_bars"], got["Three"]["block2_bars"]) == (1, 24, None)
+    assert (got["Two"]["kick_gaps"], got["Two"]["kick_fills"], got["Two"]["longest_kick_out_bars"]) == (1, 1, 4)
     r, m = rep["range"], rep["median"]
-    assert (r["total_bars"], m["total_bars"]) == ({"min": 32, "max": 48, "n": 3}, {"value": 40, "n": 3})
-    assert (r["bars_to_first_drop"]["n"], m["bars_to_first_drop"]["value"]) == (2, 8)
-    assert (m["drop1_bars"]["value"], m["drop2_bars"]["value"], m["drop_ratio"]["value"]) == (12, 16, 1.5)
-    assert (r["bass_vs_first_drop"], m["bass_vs_first_drop"]["value"]) == ({"min": -4, "max": 0, "n": 2}, -2)
-    assert (m["longest_kick_out_bars"]["value"], m["kick_gaps"]["value"], m["kick_fills"]["value"]) == (4, 1, 0)
+    assert (r["all"]["block1_bars"], m["all"]["block1_bars"]) == ({"min": 8, "max": 24, "n": 3}, {"value": 16, "n": 3})
+    assert (m["all"]["block2_bars"], m["all"]["block_ratio"]["value"], m["all"]["block_ratio"]["n"]) == (
+        {"value": 18, "n": 2}, 1.625, 2)
+    assert (m["all"]["kick_out_before_block2"]["value"], m["all"]["bass_lead1"]["value"],
+            m["all"]["bass_lead2"]["value"], m["all"]["n_blocks"]["value"]) == (6, 0, 6, 2)
+    assert (m["unflagged"]["block1_bars"], r["unflagged"]["block1_bars"]) == (
+        {"value": 20, "n": 2}, {"min": 16, "max": 24, "n": 2})
+    assert (m["unflagged"]["block2_bars"], m["unflagged"]["block_ratio"]) == ({"value": 20, "n": 1}, {"value": 1.25, "n": 1})
 
 
-def test_compare_readings_say_where_the_set_sits(library):
-    rep = A.build_compare(refs=["all"], read=dict(SET_64))
-    text = " ".join(rep["readings"])
-    assert "Bass: enters 8 bars before the first drop in the Set; in 1 of 2 references it enters with the " \
-           "first drop or later, in 1 before it" in text
-    assert "Drop 2 / Drop 1: 1 in the Set (16 / 16 bars)" in text and "shorter than Drop 1 in 0, equal in 1, longer in 1" in text
-    assert "First drop: 16 bars after the start of the range in the Set" in text
-    assert "the Set's longest is 16 bars (Breakdown)" in text
-
-
-def test_a_reference_without_a_drop_appears_with_n_a_and_its_caveat(library):
-    rep = A.build_compare(refs=["Three"], read=dict(SET_64))
-    (ref,) = rep["references"]
-    assert ref["profile"]["drop_ratio"] is None and any("no Drop section (labels: Intro, Main)" in n for n in ref["notes"])
-    assert "no grid" in ref["notes"]
-    assert rep["median"]["drop_ratio"] == {"value": None, "n": 0}
-    md = A.format_compare(rep)
-    assert "no Drop section (labels: Intro, Main)" in md and "n/a" in md
+def test_compare_readings_come_from_the_block_table(library):
+    text = "\n".join(A.build_compare(refs=["all"], read=dict(SET_64))["readings"])
+    assert ("Groove start: kick and bass first play together 16 bars in, in the Set; median 8 over 3 of 3 "
+            "references (range 8 to 8); 8 over the 2 unflagged; in 0 of 3 references they are together within the "
+            "first 8 bars.") in text
+    assert "Block 1: 16 bars in the Set; median 16 over 3 of 3 references (range 8 to 24); 20 over the 2 unflagged." in text
+    assert "Block 2 / block 1: 1 in the Set (16 / 16 bars); median 1.625 over 2 of 3 references" in text
+    assert ("Bass lead (bars the bass plays before the kick joins, 1 bar or less read as 0): in the Set 8 at block 1, "
+            "16 at block 2; references at block 1: no lead in 2 of 3") in text
+    assert "at block 2: no lead in 0 of 2" in text
+    assert "Kick out before block 2: 16 bars in the Set; median 6 over 2 of 3 references" in text
+    assert "Drop" not in text            # nothing is read from labels
 
 
 def test_a_study_without_the_activity_layer_is_left_out_with_its_reason(library):
@@ -883,24 +928,82 @@ def test_a_study_without_the_activity_layer_is_left_out_with_its_reason(library)
     assert "## Left out\n\n- D/Four [local]" in A.format_compare(rep)
 
 
-def test_compare_markdown_has_the_set_first_the_references_in_rows_and_range_and_median_last(library):
+def test_one_track_counted_twice_is_counted_once(library):
+    """"Two (Extended)" has Two's length and activity: kept out of the range and median, listed as a
+    duplicate of Two; a different arrangement of the same length is not a duplicate."""
+    _study(library, "B", "Two (Extended)", *TWO)
+    _study(library, "H", "Other", TWO[0], TWO[1], {"drums_kick": [(1, 8)], "bass": [(40, 48)], "drums_hh": [(1, 48)]})
+    rep = A.build_compare(refs=["all"], read=dict(SET_64))
+    assert [r["title"] for r in rep["references"]] == ["One", "Two", "Three", "Other"]
+    dup = next(x for x in rep["left_out"] if x["name"] == "B/Two (Extended)")
+    assert dup["reason"].startswith("duplicate of B/Two [local]")
+    other = next(r for r in rep["references"] if r["title"] == "Other")
+    assert other["profile"]["flags"] == ["no groove block"] and rep["median"]["all"]["block1_bars"]["n"] == 3
+
+
+def test_a_study_with_no_bass_stem_is_flagged_and_has_no_blocks(tmp_path, monkeypatch):
+    import study as study_mod
+    _study(tmp_path / "r", "J", "NoBass", [("Intro", 1, 8)], 32, {"drums_kick": [(9, 32)], "drums_hh": [(1, 32)]})
+    monkeypatch.setattr(study_mod, "STUDIES_ROOTS", [study_mod.Root("local", tmp_path / "r")])
+    (ref,) = A.build_compare(refs=["NoBass"], read=dict(SET_64))["references"]
+    assert ref["profile"]["flags"] == ["no kick or bass stem"] and ref["profile"]["n_blocks"] is None
+
+
+def test_the_labelled_drops_show_the_mains_that_follow_and_compute_no_ratio():
+    """A reference labelled Drop 1 (8), Main (16), Breakdown, Drop 2 (24): the drop as labelled is 8 + Main 16,
+    not 8; Drop 2 is 24."""
+    t = build(("Drop 1", 8, dict(pad="o")), ("Main 1", 16, dict(pad="==")), ("Breakdown", 8, dict(pad="=")),
+              ("Drop 2", 24, dict(pad="===")))
+    got = A.labelled_drops(A.structure_metrics(t))
+    assert [(d["label"], d["bars"], d["mains_after"]) for d in got] == [("Drop 1", 8, 16), ("Drop 2", 24, 0)]
+
+
+def test_compare_markdown_layout(library):
     md = A.format_compare(A.build_compare(refs=["all"], read=dict(SET_64)))
-    form = md[md.index("## Form"):md.index("## Bass, kick and hats")].splitlines()
-    rows = [l for l in form if l.startswith("|")]
-    assert rows[2].startswith("| **The Set** | live | 64 |") and rows[3].startswith("| A - One | local | 40 |")
-    assert rows[-2].startswith("| **Range** |") and "32 to 48 (n=3)" in rows[-2]
-    assert rows[-1].startswith("| **Median** |") and "40 (n=3)" in rows[-1]
-    assert "## The Set only" in md and "pitched roles at once" in md          # Set-only things are not columns
-    assert "Pitched" not in md[md.index("## Form"):md.index("## The Set only")]
+    assert md.index("> Reference sections are labelled by rules") < md.index("## Readings")
+    assert "0 of 3 references have a chance-level downbeat confidence" in md and "not excluded" in md
+    blocks = md[md.index("## Groove blocks"):md.index("## Kick and hats gaps")].splitlines()
+    rows = [l for l in blocks if l.startswith("|")]
+    assert rows[2].startswith("| **The Set** | live | 2 | 16 | 16 | 16 | 1 |") and rows[3].startswith("| A - One | local | 2 | 8 | 8 |")
+    assert [r.split("|")[1].strip() for r in rows[-4:]] == [
+        "**Range, all**", "**Median, all**", "**Range, unflagged**", "**Median, unflagged**"]
+    assert "Drop 2 / Drop 1" not in md and "sections" not in blocks[2].lower()
+    lab = md[md.index("## As labelled"):md.index("## The Set only")]
+    assert "not comparable across the two sources" in lab and "no ratio is computed" in lab
+    assert "| A - One | local | Drop 1 8; Drop 2 16 |" in lab and "| **The Set** | live | Drop 1 16; Drop 2 16 |" in lab
+    assert "Pitched" not in md[md.index("## Groove blocks"):md.index("## The Set only")]
 
 
-def test_compare_on_the_command_line_writes_the_report(library, tmp_path, capsys):
+def test_compare_on_the_command_line_and_its_refusals(library, tmp_path, capsys):
     saved = tmp_path / "read.json"
-    saved.write_text(json.dumps(SET_64))
+    stale = dict(SET_64, metrics={"bass": {"entry_bar": 999}, "blocks": [{"bar": 999, "bars": 1}]})
+    saved.write_text(json.dumps(stale))
     out = tmp_path / "report.md"
     A.main(["compare", "--set-json", str(saved), "--ref", "One", "--ref", "Two", "--out", str(out)])
     assert "wrote" in capsys.readouterr().out
     md = out.read_text()
     assert md.startswith("# Arrangement compare:") and "A - One" in md and "B - Two" in md and "C - Three" not in md
+    assert "999" not in md and "| **The Set** | live | 2 | 16 | 16 | 16 | 1 |" in md          # recomputed, not trusted
     with pytest.raises(SystemExit, match="saved read is of scenes"):
         A.main(["compare", "--scenes", "5-9", "--set-json", str(saved), "--ref", "One"])
+    with pytest.raises(SystemExit, match="roles apply when the Set is read from Live"):
+        A.main(["compare", "--set-json", str(saved), "--roles", str(saved), "--ref", "One"])
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"rows": [{"scene": 1}]}))
+    with pytest.raises(SystemExit, match="malformed"):
+        A.main(["compare", "--set-json", str(bad), "--ref", "One"])
+    bad.write_text("{nope")
+    with pytest.raises(SystemExit, match="not JSON"):
+        A.main(["compare", "--set-json", str(bad), "--ref", "One"])
+    with pytest.raises(ValueError, match="at least one reference"):
+        A.build_compare(refs=[], read=dict(SET_64))
+
+
+def test_a_read_that_goes_past_its_deadline_says_so(monkeypatch):
+    """A Live that answers, slowly: the whole read has a deadline, checked before each request."""
+    m = live(["S-BD"], scenes=2)
+    put(m, 0, 0, [note(36, 0, 1)])
+    m.install(monkeypatch)
+    with pytest.raises(A.ReadTooSlow, match="took over 0 s.*save a read"):
+        A.read_arrangement(1, 2, None, timeout_s=0)
+    assert A.read_arrangement(1, 2, None, timeout_s=60)["rows"]

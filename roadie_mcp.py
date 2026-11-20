@@ -377,27 +377,37 @@ def study_read(name: str, layers: list[str] | None = None) -> str:
 @mcp.tool()
 def arrangement_compare(scenes: str | None = None, ref: list[str] | str = "all",
                         roles: str | dict[str, str] | None = None, read: str | None = None,
-                        out: str | None = None) -> str:
-    """The Set's scene order set against reference studies, in numbers: for the Set's Session scenes
-    `scenes` ("33-47", 1-based) and each reference, the length, bars before the first drop, bass
-    entry against the drop (negative = before), Drop 1, Drop 2 and their ratio, the longest kick-out,
-    kick and hats gaps of 4+ bars (one-to-three-bar fills counted apart), as one row per reference
-    with a range and a median row, and readings of where the Set sits ("the bass enters 16 bars
-    before the first drop; in 15 of 33 references it enters with the drop or later"). `ref` is a
-    study name (as `study_read` takes it) or a list of them, or "all": every analysed study that has
-    the activity layer (the others come back in `left_out` with the reason). Positions are relative
-    to the first drop, never absolute bars. A reference is audio: the steps that add nothing, the
-    hook and the pitched roles are the Set's alone (`set_only`). `roles` is a track name -> role map
-    (a dict, or the path of a JSON file); `read` is the path of a saved `roadie arrangement read --json`,
-    used instead of Live. Without `read` the scenes are read from the open Live Set (read-only: gets and
-    note reads, nothing is changed or played). Returns the report as JSON; with `out` (a .md path) it
-    also writes the Markdown report and gives its path as `markdown_path`. Reads the Studies folders
-    only (small JSON files); writes only `out`."""
+                        out: str | None = None, timeout_s: float = 240.0) -> str:
+    """The Set's scene order set against reference studies, in numbers. The main table is groove
+    blocks, measured the same way on the Set and on each reference from activity, not from labels:
+    a block is a stretch in which kick and bass both play (a fill under 4 bars ignored, from 8 bars),
+    separated by 4+ bars without it. Per source: the bars before block 1, block 1 and block 2 lengths
+    and their ratio, the kick-out before block 2, the bass lead (bars the bass plays before the kick
+    joins) at blocks 1 and 2, and kick and hats gaps; one row per reference, with range and median
+    rows over all references and over the unflagged ones, and readings of where the Set sits. The
+    labelled drops (the Set's scene names, a reference's rules) are a second table that is not
+    comparable and has no ratio. `scenes` is the Set's Session range ("33-47", 1-based). `ref` is a
+    study name (as `study_read` takes it), a list of them, or "all": every analysed study with the
+    activity layer (the others, and duplicates of one track, come back in `left_out` with the reason);
+    an empty list is an error. A reference is audio: steps that add nothing, the hook and pitched
+    roles are the Set's alone (`set_only`). `read` is the path of a saved `roadie arrangement read
+    --json`, used instead of Live (its metrics are recomputed; `roles` is then refused, the roles were
+    applied when it was made). Without `read`, the Set is read from the open Live Set (read-only: gets and
+    note reads, nothing changed or played): a full read is about 130 requests, a minute when Live is
+    free and has taken 10-25 minutes when it is busy, so `timeout_s` (default 240) is a deadline for
+    the whole read and exceeding it is a tool error that says so: save a read and pass `read`.
+    `roles` is a track name -> role map (a dict, or the path of a JSON file). Returns the report as
+    JSON; with `out` (a .md path; a relative one is under the home folder) it also writes the Markdown
+    and gives its path as `markdown_path`. Reads the Studies folders only (small JSON files); writes
+    only `out`."""
     refs = [ref] if isinstance(ref, str) else list(ref)
     try:
-        rep = arrangement.build_compare(scenes, refs, roles, read)
+        if not refs:
+            raise ValueError("give at least one reference (a study name, or \"all\")")
+        rep = arrangement.build_compare(scenes, refs, roles, read, timeout_s)
         if out:
-            path = os.path.abspath(os.path.expanduser(out))
+            path = os.path.expanduser(out)
+            path = os.path.abspath(path if os.path.isabs(path) else os.path.join(os.path.expanduser("~"), path))
             with open(path, "w") as f:
                 f.write(arrangement.format_compare(rep))
             rep["markdown_path"] = path
