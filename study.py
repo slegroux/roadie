@@ -20,6 +20,7 @@ STUDIES_ROOT = Path(os.environ.get("ROADIE_STUDIES")
                     or "~/Projects/Music/slgMusProd/Studies").expanduser()
 
 BEATS_PER_BAR = 4
+PROFILE_KIND, PROFILE_VERSION = "reference_profile", 6    # the profile this reader knows (roadie_analysis/profile.py)
 
 # Stem files that make up each role, in preference order within a role. The names are the
 # ones sections.json uses for the roles playing in a section.
@@ -155,6 +156,64 @@ def _resolve(name_or_path: str, root: Path) -> Path:
     return hits[0]
 
 
+def _json_files(folder: Path) -> list[Path]:
+    out = []
+    for dirpath, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        out += [Path(dirpath) / f for f in sorted(files) if f.endswith(".json") and not f.startswith(".")]
+    return out
+
+
+def _stale(folder: Path, prof: dict) -> str:
+    """One line: which profile inputs changed on disk, and which check was used."""
+    by_name = {}
+    for dirpath, _dirs, files in os.walk(folder):
+        for f in files:
+            by_name.setdefault(f, os.path.join(dirpath, f))
+    inputs = list(prof["inputs"]["mix"]) + [i for items in prof["inputs"]["stems"].values() for i in items]
+    changed, by_path, by_size = [], 0, 0
+    for item in inputs:
+        name = os.path.basename(item["path"])
+        if os.path.exists(item["path"]):
+            by_path += 1
+            st = os.stat(item["path"])
+            what = [w for w, bad in (("size", st.st_size != item["size"]),
+                                     ("mtime", abs(st.st_mtime - item["mtime"]) > 2.0)) if bad]
+        elif name in by_name:
+            by_size += 1
+            what = ["size"] if os.path.getsize(by_name[name]) != item["size"] else []
+        else:
+            what = ["missing"]
+        if what:
+            changed.append("%s (%s)" % (name, ", ".join(what)))
+    check = ("path, mtime and size" if by_path and not by_size else
+             "file name and size, the recorded paths do not exist here" if by_size and not by_path else
+             "path, mtime and size, else file name and size")
+    if changed:
+        return "stale: %s changed since the profile was made (checked by %s)" % ("; ".join(changed), check)
+    return "fresh: %d inputs unchanged (checked by %s)" % (len(inputs), check)
+
+
+def _mix_layer(folder: Path, path: Path, prof: dict, others: int) -> Layer:
+    version = prof.get("version")
+    caveats = []
+    if others:
+        caveats.append("%d older profile(s) listed under extras" % others)
+    made_by = "reference_profile v%s" % version
+    if not isinstance(version, int) or version > PROFILE_VERSION:
+        caveats.append("profile version %s is newer than this reader knows (%d): not interpreted"
+                       % (version, PROFILE_VERSION))
+        return Layer("mix", path, made_by, None, None, caveats)
+    if version < PROFILE_VERSION:
+        caveats.append("profile version %d is older than %d: rebuild it before comparing"
+                       % (version, PROFILE_VERSION))
+    try:
+        caveats.append(_stale(folder, prof))
+    except (KeyError, TypeError, OSError):
+        caveats.append("inputs could not be checked: the profile has no readable inputs")
+    return Layer("mix", path, made_by, prof, None, caveats)
+
+
 def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
     folder = _resolve(name_or_path, Path(root))
     stems_dir = _stems_dir(folder)
@@ -204,8 +263,29 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
         else:
             layers["sections"] = unreadable("sections", path)
 
+    known = {stems_dir / "alignment.json", stems_dir / "sections.json", folder / "study.json"}
+    profiles, extras = [], []
+    for p in _json_files(folder):
+        if p in known:
+            continue
+        d = _read_json(p) if p.name.endswith(".profile.json") else None
+        if isinstance(d, dict) and d.get("kind") == PROFILE_KIND:
+            profiles.append((p, d))
+        else:
+            extras.append(p)
+    if profiles:
+        profiles.sort(key=lambda pd: pd[0].stat().st_mtime)
+        path, prof = profiles.pop()
+        extras += [p for p, _ in profiles]
+        layers["mix"] = _mix_layer(folder, path, prof, len(profiles))
+    else:
+        bad = [p for p in extras if p.name.endswith(".profile.json")]
+        if bad:
+            layers["mix"] = unreadable("mix", bad[0])
+            extras.remove(bad[0])
+
     return Study(folder.parent.name, folder.name, folder, bpm, BEATS_PER_BAR, bar_offset,
-                 stems, layers)
+                 stems, layers, sorted(extras))
 
 
 def to_json(study: Study) -> dict:
@@ -236,12 +316,18 @@ def _show(study: Study) -> None:
             continue
         print("  %-9s %s  [%s]" % (name, layer.source.relative_to(study.root), layer.made_by or "unreadable"))
         for c in layer.caveats:
-            print("            caveat: %s" % c)
+            print("            note: %s" % c)
+        if name == "mix" and layer.data:
+            print("            %d sections" % len(study.mix()))
         if name == "sections":
             for s in study.sections():
                 live = "Live bar %g" % s.live_bar if s.live_bar is not None else "-"
                 print("    %-12s file bar %-4d %3d bars  %-12s %s" % (
                     s.label, s.bar, s.bars, live, " ".join(s.roles)))
+    if study.extras:
+        print("  extras (%d, not interpreted)" % len(study.extras))
+        for p in study.extras:
+            print("    %s" % p.relative_to(study.root))
 
 
 def _list() -> int:

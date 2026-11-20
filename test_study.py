@@ -173,3 +173,59 @@ def test_cli_list_shows_layers_and_the_not_analysed(tmp_path):
     earth = [l for l in out.splitlines() if "Bodzin/Earth" in l][0]
     assert earth.split("missing:")[1].split()[0] == "sections"
     assert "Anyma/Anyma Project" in out
+
+
+def add_profile(folder, version=6, rewrite_paths=None):
+    """A reference profile in <folder>/analysis whose inputs are the study's own stems."""
+    stems = next(folder.glob("*_stems"))
+    for f in stems.glob("*.flac"):
+        f.write_bytes(b"x" * 10)
+    ins = [{"path": str(f), "mtime": f.stat().st_mtime, "size": f.stat().st_size}
+           for f in sorted(stems.glob("*.flac"))]
+    prof = {"kind": "reference_profile", "version": version, "inputs": {"mix": ins[:1], "stems": {"all": ins[1:]}},
+            "sections": [{"name": "s%d" % i} for i in range(3)]}
+    (folder / "analysis").mkdir(exist_ok=True)
+    path = folder / "analysis" / "x.profile.json"
+    path.write_text(json.dumps(prof))
+    return path, prof
+
+
+def test_mix_layer_fresh_then_stale_names_the_changed_stem(tmp_path):
+    folder = make_study(tmp_path, "Einmusik", "Flare")
+    add_profile(folder)
+    s = load_study("Flare", tmp_path)
+    assert s.layers["mix"].made_by == "reference_profile v6" and len(s.mix()) == 3
+    assert s.layers["mix"].caveats[-1].startswith("fresh: 5 inputs")
+    (next(folder.glob("*_stems")) / "bass.flac").write_bytes(b"longer than before")
+    stale = load_study("Flare", tmp_path).layers["mix"].caveats[-1]
+    assert stale.startswith("stale: bass.flac (size") and "path, mtime and size" in stale
+
+
+def test_mix_layer_checks_by_name_and_size_when_the_recorded_paths_are_gone(tmp_path):
+    folder = make_study(tmp_path, "Einmusik", "Flare")
+    path, prof = add_profile(folder)
+    for items in [prof["inputs"]["mix"], *prof["inputs"]["stems"].values()]:
+        for i in items:
+            i["path"] = "/elsewhere/" + os.path.basename(i["path"])
+    path.write_text(json.dumps(prof))
+    assert "fresh" in load_study("Flare", tmp_path).layers["mix"].caveats[-1]
+    assert "file name and size" in load_study("Flare", tmp_path).layers["mix"].caveats[-1]
+
+
+def test_newer_profile_version_is_not_interpreted(tmp_path):
+    folder = make_study(tmp_path, "Einmusik", "Flare")
+    add_profile(folder, version=7)
+    s = load_study("Flare", tmp_path)
+    assert s.mix() is None and s.layers["mix"].source and "newer than this reader" in s.layers["mix"].caveats[0]
+
+
+def test_other_json_files_are_extras_but_the_study_own_files_are_not(tmp_path):
+    folder = make_study(tmp_path, "Bodzin", "Earth")
+    (folder / "rebuild").mkdir()
+    (folder / "rebuild" / "score.json").write_text("{}")
+    (folder / "rebuild" / "arrangement.json").write_text("not even json")
+    (folder / ".hidden").mkdir()
+    (folder / ".hidden" / "x.json").write_text("{}")
+    s = load_study("Earth", tmp_path)
+    assert [str(p.relative_to(folder)) for p in s.extras] == ["rebuild/arrangement.json", "rebuild/score.json"]
+    assert s.layers["mix"].missing
