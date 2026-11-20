@@ -142,7 +142,8 @@ roadie study show Flare --json     # the same record as JSON ({"kind": "study", 
 `show` takes a title (an exact title, else a unique part of one), `Artist/Title`
 or a path. A title found in two roots is an error naming both; give the root to
 pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
-(`root`). `list` shows which layers a study has from file names alone, so it can
+(`root`) and its absolute `path`. Names match across Unicode forms (pCloud keeps
+decomposed accents). `list` shows which layers a study has from file names alone, so it can
 differ from `show` for a profile nested deeper than `analysis/`. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
 `mix` (a `*.profile.json` of kind `reference_profile`, with a note saying whether
 its inputs are fresh, stale or could not be checked), and `activity` and `drums`,

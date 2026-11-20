@@ -337,3 +337,58 @@ def test_list_only_lists_directories_it_never_opens_the_json(tmp_path):
     (folder / "analysis" / "x.profile.json").write_text("{broken")
     flags = study.list_to_json([study.Root("l", root)])["studies"][0]["layers"]
     assert flags["sections"] and flags["mix"] and flags["grid"] and not flags["activity"]
+
+
+def test_names_match_across_unicode_forms(tmp_path):
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "La clé des champs")
+    assert nfd != "La clé des champs"
+    make_study(tmp_path, unicodedata.normalize("NFD", "Ben Böhmer"), nfd)
+    for typed in ("La clé des champs", "LA CLÉ", "Ben Böhmer/La clé des champs"):
+        assert load_study(typed, tmp_path).title == nfd
+    two = [study.Root("a", tmp_path)]
+    assert load_study("a:la clé des champs", two).source == "a"
+
+
+def test_a_recorded_path_outside_the_study_is_not_trusted(tmp_path):
+    other = make_study(tmp_path, "B", "Other")
+    mine = make_study(tmp_path, "A", "Flare")
+    _, prof = add_profile(other, name="y.profile.json")            # inputs: the OTHER study's files
+    path, _ = add_profile(mine)
+    (next(mine.glob("*_stems")) / "bass.flac").write_bytes(b"x" * 99)  # mine differs in size
+    path.write_text(json.dumps(prof))
+    line = load_study("Flare", tmp_path).layers["mix"].caveats[-1]
+    assert not line.startswith("fresh") and "bass.flac" in line and "not files of this study" in line
+
+
+def test_an_unlistable_root_or_artist_does_not_break_the_other_root(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    make_study(a, "X", "Good")
+    make_study(b, "Locked", "Hidden")
+    make_study(b, "Open", "Fine")
+    os.chmod(b / "Locked", 0)
+    os.chmod(a, 0o755)
+    roots = [study.Root("a", a), study.Root("b", b)]
+    try:
+        assert load_study("Good", roots).source == "a" and load_study("Fine", roots).source == "b"
+        data = study.list_to_json(roots)
+        assert any("Locked" in e for e in data["roots"][1]["errors"]) and data["roots"][1]["available"]
+        os.chmod(b / "Locked", 0o755)
+        os.chmod(b, 0)
+        data = study.list_to_json(roots)
+        assert data["roots"][1]["available"] is False and data["roots"][0]["available"]
+        assert load_study("Good", roots).title == "Good"
+    finally:
+        os.chmod(b, 0o755)
+        os.chmod(b / "Locked", 0o755)
+
+
+def test_the_record_carries_the_path_and_empty_names_are_rejected(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    s = load_study("Flare", tmp_path)
+    assert to_json(s)["path"] == str(folder.absolute())
+    data = study.list_to_json(tmp_path)
+    assert data["studies"][0]["path"] == str(folder.absolute()) and "file names" in data["note"]
+    for bad in ("", "  ", "local:"):
+        with pytest.raises(ValueError):
+            load_study(bad, [study.Root("local", tmp_path)])

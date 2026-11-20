@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -40,6 +41,11 @@ def parse_roots(spec: str | None) -> list[Root]:
 
 
 STUDIES_ROOTS = parse_roots(os.environ.get("ROADIE_STUDIES"))
+
+
+def _norm(s: str) -> str:
+    """Names compare equal across Unicode forms: pCloud keeps NFD file names, a typed name is NFC."""
+    return unicodedata.normalize("NFC", s).casefold()
 
 
 def _roots(roots) -> list[Root]:
@@ -160,22 +166,42 @@ class StudyRef:
     stems_dir: Path | None = None
 
 
-def find_studies(roots=None) -> list[StudyRef]:
-    """Every <Artist>/<Title>/ folder under each root, analysed or not; hidden folders are skipped
-    and a root that is not there contributes nothing."""
-    refs = []
+def _scan(roots) -> tuple[list[StudyRef], dict[str, list[str]], set[str]]:
+    """(studies, errors by root label, labels of roots that could not be listed at all). A folder that
+    cannot be listed is recorded and skipped, so one bad root or artist never breaks lookups elsewhere."""
+    refs, errors, down = [], {}, set()
     for r in _roots(roots):
-        if r.path.is_dir():
-            for artist in sorted(p for p in r.path.iterdir() if p.is_dir() and not p.name.startswith(".")):
-                for title in sorted(p for p in artist.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        errors[r.label] = []
+        if not r.path.is_dir():
+            continue
+        try:
+            artists = sorted(p for p in r.path.iterdir() if p.is_dir() and not p.name.startswith("."))
+        except OSError as e:
+            errors[r.label].append("%s: %s" % (r.path, e.strerror or type(e).__name__))
+            down.add(r.label)
+            continue
+        for artist in artists:
+            try:
+                titles = sorted(p for p in artist.iterdir() if p.is_dir() and not p.name.startswith("."))
+                for title in titles:
                     stems = _stems_dir(title)
                     refs.append(StudyRef(artist.name, title.name, title, stems is not None, r.label, stems))
-    return refs
+            except OSError as e:
+                errors[r.label].append("%s: %s" % (artist, e.strerror or type(e).__name__))
+    return refs, errors, down
+
+
+def find_studies(roots=None) -> list[StudyRef]:
+    """Every <Artist>/<Title>/ folder under each root, analysed or not; hidden folders are skipped.
+    A root that is not there, or a folder that cannot be listed, contributes nothing."""
+    return _scan(roots)[0]
 
 
 def _resolve(name_or_path: str, roots: list[Root]) -> tuple[Path, str]:
     """(study folder, root label) for an existing path, or a title among the analysed studies.
     `label:Title` limits the search to that root."""
+    if not name_or_path.strip():
+        raise ValueError("no study name given")
     p = Path(name_or_path).expanduser()
     if p.is_dir():
         if p.name.endswith("_stems"):
@@ -191,14 +217,16 @@ def _resolve(name_or_path: str, roots: list[Root]) -> tuple[Path, str]:
             return p, "path"
     name = name_or_path.strip()
     label, _, rest = name.partition(":")
-    if rest and label.lower() in {r.label.lower() for r in roots}:
-        roots = [r for r in roots if r.label.lower() == label.lower()]
+    if rest.strip() and _norm(label) in {_norm(r.label) for r in roots}:
+        roots = [r for r in roots if _norm(r.label) == _norm(label)]
         name = rest.strip()
-    want = name.lower()
+    want = _norm(name)
+    if not want:
+        raise ValueError("no study name given")
     refs = [r for r in find_studies(roots) if r.analysed]
-    hits = [r for r in refs if want in (r.title.lower(), ("%s/%s" % (r.artist, r.title)).lower())]
+    hits = [r for r in refs if want in (_norm(r.title), _norm("%s/%s" % (r.artist, r.title)))]
     if not hits:      # no exact title: a title that contains the name, if that is one study or several
-        hits = [r for r in refs if want in r.title.lower()]
+        hits = [r for r in refs if want in _norm(r.title)]
     if not hits:
         raise ValueError("no study named %r under %s" % (name_or_path, ", ".join(
             "%s=%s%s" % (r.label, r.path, "" if r.path.is_dir() else " (not there)") for r in roots)))
@@ -228,10 +256,18 @@ def _check(folder: Path, prof: dict) -> tuple[str, str]:
     if not inputs:
         return "unchecked", "not checked: the profile records no inputs"
     changed, ambiguous, by_path, by_size = [], [], 0, 0
+    here = Path(folder).resolve()
+
+    def inside(p):          # a recorded path is trusted only when it is a file of this study
+        try:
+            return os.path.exists(p) and Path(p).resolve().is_relative_to(here)
+        except (OSError, ValueError):
+            return False
+
     for item in inputs:
         name = os.path.basename(item["path"])
         what = []
-        if os.path.exists(item["path"]):
+        if inside(item["path"]):
             by_path += 1
             st = os.stat(item["path"])
             what = [w for w, bad in (("size", st.st_size != item["size"]),
@@ -246,8 +282,8 @@ def _check(folder: Path, prof: dict) -> tuple[str, str]:
         if what:
             changed.append("%s (%s)" % (name, ", ".join(what)))
     check = ("path, mtime and size" if by_path and not by_size else
-             "file name and size, the recorded paths do not exist here" if by_size and not by_path else
-             "path, mtime and size, else file name and size")
+             "file name and size, the recorded paths are not files of this study" if by_size and not by_path else
+             "path, mtime and size where the recorded path is in this study, else file name and size")
     amb = "; several files share the name of: %s" % ", ".join(sorted(set(ambiguous))) if ambiguous else ""
     if changed:
         return "stale", "stale: %s changed since the profile was made (checked by %s)%s" % (
@@ -372,7 +408,7 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
 
     return {
         "kind": "study", "version": 1,
-        "root": study.source, "artist": study.artist, "title": study.title,
+        "root": study.source, "path": str(study.root.absolute()), "artist": study.artist, "title": study.title,
         "bpm": study.bpm, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
@@ -423,14 +459,22 @@ def _layer_flags(ref: StudyRef) -> dict[str, bool]:
     return flags
 
 
+LAYERS_NOTE = ("layer flags come from file names only (nothing is opened); `roadie study show <name>` "
+               "reads the files and is the check")
+
+
 def list_to_json(roots=None) -> dict:
-    """Every study under the roots: {source, artist, title, analysed, layers: {name: has it}}, and
-    each root with whether it is there. Shallow: directory listings only, so a slow mount is cheap."""
+    """Every study under the roots: {root, path, artist, title, analysed, layers: {name: has it}}, and
+    each root with whether it is there and what could not be listed. Shallow: directory listings
+    only, so a slow mount is cheap."""
     roots = _roots(roots)
-    studies = [{"root": r.source, "artist": r.artist, "title": r.title, "analysed": r.analysed,
-                "layers": _layer_flags(r) if r.analysed else None} for r in find_studies(roots)]
-    return {"kind": "study_list", "version": 1,
-            "roots": [{"label": r.label, "path": str(r.path), "available": r.path.is_dir(),
+    refs, errors, down = _scan(roots)
+    studies = [{"root": r.source, "path": str(r.root.absolute()), "artist": r.artist, "title": r.title,
+                "analysed": r.analysed, "layers": _layer_flags(r) if r.analysed else None} for r in refs]
+    return {"kind": "study_list", "version": 1, "note": LAYERS_NOTE,
+            "roots": [{"label": r.label, "path": str(r.path),
+                       "available": r.path.is_dir() and r.label not in down,
+                       "errors": errors[r.label],
                        "analysed": sum(1 for s in studies if s["root"] == r.label and s["analysed"]),
                        "not_analysed": sum(1 for s in studies if s["root"] == r.label and not s["analysed"])}
                       for r in roots],
@@ -438,16 +482,23 @@ def list_to_json(roots=None) -> dict:
 
 
 def _list(as_json: bool) -> int:
-    data = list_to_json()
+    try:
+        data = list_to_json()
+    except (OSError, ValueError) as e:
+        print("study: could not list: %s" % e, file=sys.stderr)
+        return 1
     if as_json:
         print(json.dumps(data, indent=2))
         return 0
     for root in data["roots"]:
         rows = [s for s in data["studies"] if s["root"] == root["label"]]
         if not root["available"]:
-            print("%s  %s: not mounted or missing, skipped" % (root["label"], root["path"]))
+            why = "; ".join(root["errors"]) or "not mounted or missing"
+            print("%s  %s: %s, skipped" % (root["label"], root["path"], why))
             continue
         print("%s  %s" % (root["label"], root["path"]))
+        for e in root["errors"]:
+            print("  could not list %s" % e)
         print("  analysed (%d)" % root["analysed"])
         for r in (s for s in rows if s["analysed"]):
             have = [n for n, ok in r["layers"].items() if ok]
@@ -456,6 +507,7 @@ def _list(as_json: bool) -> int:
         print("  not analysed (%d)" % root["not_analysed"])
         for r in (s for s in rows if not s["analysed"]):
             print("    %s/%s" % (r["artist"], r["title"]))
+    print("note: %s" % data["note"])
     return 0
 
 
