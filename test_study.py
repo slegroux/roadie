@@ -283,3 +283,57 @@ def test_a_unique_title_substring_resolves_when_there_is_no_exact_match(tmp_path
     assert load_study("Earth", tmp_path).artist == "Bodzin"               # exact still wins
     with pytest.raises(ValueError, match="ambiguous"):
         load_study("th", tmp_path)
+
+
+def two_roots(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    make_study(a, "Einmusik", "Flare")
+    make_study(b, "Einmusik", "Flare")
+    make_study(b, "Anyma", "Eternity")
+    (b / "Anyma" / "Eternity" / "Eternity_124bpm_stems" / "alignment.json").write_text(
+        json.dumps({"result": {"bpm": 125.0}}))
+    return [study.Root("local", a), study.Root("pcloud", b), study.Root("gone", tmp_path / "not-mounted")]
+
+
+def test_parse_roots_reads_labels_paths_and_defaults(monkeypatch):
+    got = study.parse_roots(os.pathsep.join(["pc=/x/y", "/plain"]))
+    assert [(r.label, str(r.path)) for r in got] == [("pc", "/x/y"), ("root2", "/plain")]
+    assert [r.label for r in study.parse_roots(None)] == ["local", "pcloud"]
+
+
+def test_a_title_in_two_roots_is_an_error_naming_both_unless_the_root_is_given(tmp_path):
+    roots = two_roots(tmp_path)
+    with pytest.raises(ValueError, match=r"local:Einmusik/Flare.*pcloud:Einmusik/Flare.*local:Flare"):
+        load_study("Flare", roots)
+    s = load_study("pcloud:Flare", roots)
+    assert s.source == "pcloud" and str(s.root).startswith(str(tmp_path / "b"))
+    assert to_json(s)["root"] == "pcloud" and load_study("LOCAL:flare", roots).source == "local"
+    assert load_study("Eternity", roots).bpm == 125.0 and load_study("Eternity", roots).source == "pcloud"
+    with pytest.raises(ValueError, match="no study named"):
+        load_study("local:Eternity", roots)
+
+
+def test_list_groups_by_root_and_a_missing_root_is_a_line_not_an_error(tmp_path):
+    roots = two_roots(tmp_path)
+    data = study.list_to_json(roots)
+    by_label = {r["label"]: r for r in data["roots"]}
+    assert (by_label["local"]["analysed"], by_label["pcloud"]["analysed"]) == (1, 2)
+    assert by_label["gone"]["available"] is False
+    assert {(s["root"], s["title"]) for s in data["studies"]} == {
+        ("local", "Flare"), ("pcloud", "Flare"), ("pcloud", "Eternity")}
+    spec = os.pathsep.join("%s=%s" % (r.label, r.path) for r in roots)
+    out = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "list"], capture_output=True,
+                         text=True, env=dict(os.environ, ROADIE_STUDIES=spec))
+    assert out.returncode == 0 and "gone  " in out.stdout and "not mounted or missing, skipped" in out.stdout
+    assert out.stdout.index("local  ") < out.stdout.index("pcloud  ")
+
+
+def test_list_only_lists_directories_it_never_opens_the_json(tmp_path):
+    root = tmp_path / "r"
+    folder = make_study(root, "A", "Flare")
+    stems = next(folder.glob("*_stems"))
+    (stems / "sections.json").write_text("{broken")                      # listing does not parse it
+    (folder / "analysis").mkdir()
+    (folder / "analysis" / "x.profile.json").write_text("{broken")
+    flags = study.list_to_json([study.Root("l", root)])["studies"][0]["layers"]
+    assert flags["sections"] and flags["mix"] and flags["grid"] and not flags["activity"]

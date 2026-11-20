@@ -255,9 +255,9 @@ def study_tree(root):
 def test_study_list_is_the_cli_json(S, tmp_path, monkeypatch):
     import study
     study_tree(tmp_path)
-    monkeypatch.setattr(study, "STUDIES_ROOT", tmp_path)
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
     got = json.loads(call(S, "study_list"))
-    assert got == study.list_to_json(tmp_path)
+    assert got == study.list_to_json([study.Root("local", tmp_path)])
     rows = {r["title"]: r for r in got["studies"]}
     assert rows["Flare"]["layers"]["sections"] is True and rows["Flare"]["layers"]["mix"] is False
     assert rows["Anyma Project"]["analysed"] is False
@@ -266,9 +266,10 @@ def test_study_list_is_the_cli_json(S, tmp_path, monkeypatch):
 def test_study_read_is_the_cli_json_and_filters_layers(S, tmp_path, monkeypatch):
     import study
     study_tree(tmp_path)
-    monkeypatch.setattr(study, "STUDIES_ROOT", tmp_path)
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
     full = json.loads(call(S, "study_read", name="flare"))
-    assert full == json.loads(json.dumps(study.to_json(study.load_study("Flare", tmp_path))))
+    assert full == json.loads(json.dumps(study.to_json(study.load_study("Flare", [study.Root("local", tmp_path)]))))
+    assert full["root"] == "local"
     assert full["kind"] == "study" and sorted(full["layers"]) == ["activity", "drums", "grid", "mix", "sections"]
     only = json.loads(call(S, "study_read", name="Flare", layers=["sections"]))
     assert list(only["layers"]) == ["sections"] and only["layers"]["sections"]["data"]

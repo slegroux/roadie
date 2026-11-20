@@ -120,21 +120,30 @@ next to its `_stems` folder.
 
 ## Reading a study
 
-A study is a folder under the Studies folder (`ROADIE_STUDIES`, default
-`~/Projects/Music/slgMusProd/Studies`) laid out `<Artist>/<Title>/`, with a
-`*_stems` folder inside it. `roadie study` reads what the analyses left there as
-one record, so a tool that compares studies does not open their files one by one.
-It is read-only: it computes nothing, and a part that is not on disk is reported
-with the command that would make it.
+A study is a folder laid out `<Artist>/<Title>/` under a Studies root, with a
+`*_stems` folder inside it. There are two roots by default: `local`
+(`~/Projects/Music/slgMusProd/Studies`, the working set) and `pcloud`
+(`~/pCloud Drive/Music/Production/Roadie/Studies`, the library). `ROADIE_STUDIES`
+replaces them with a list of paths separated by `:`, each optionally written
+`label=path` (an unlabelled one is `root1`, `root2`, ...). A root that is not
+mounted or missing is reported by `study list` and skipped, never an error.
+`roadie study` reads what the analyses left there as one record, so a tool that
+compares studies does not open their files one by one. It is read-only: it
+computes nothing, a part that is not on disk is reported with the command that
+would make it, and it never opens audio (listing reads directory entries and
+small JSON files only, so the slow pCloud mount stays cheap).
 
 ```bash
-roadie study list                  # every study, analysed or not, with the layers each has
+roadie study list                  # every study per root, analysed or not, with the layers each has
 roadie study show Flare            # one study: bpm, grid, sections, mix profile, what is missing
 roadie study show Flare --json     # the same record as JSON ({"kind": "study", "version": 1, ...})
 ```
 
 `show` takes a title (an exact title, else a unique part of one), `Artist/Title`
-or a path. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
+or a path. A title found in two roots is an error naming both; give the root to
+pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
+(`root`). `list` shows which layers a study has from file names alone, so it can
+differ from `show` for a profile nested deeper than `analysis/`. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
 `mix` (a `*.profile.json` of kind `reference_profile`, with a note saying whether
 its inputs are fresh, stale or could not be checked), and `activity` and `drums`,
 which no tool writes yet. A layer is returned with caveats rather than guessed

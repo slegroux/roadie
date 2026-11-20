@@ -347,12 +347,12 @@ STUDY_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError)
 
 @mcp.tool()
 def study_list() -> str:
-    """List every study under the Studies folder (ROADIE_STUDIES, default
-    ~/Projects/Music/slgMusProd/Studies), analysed or not, with which layers each has
-    (grid, sections, activity, mix, drums). Same JSON as `roadie study list --json`.
-    Read-only; computes nothing."""
+    """List every study under the Studies roots (ROADIE_STUDIES: the local working set and the
+    pCloud library by default; a root that is not mounted is reported, not an error), analysed or
+    not, with which layers each has (grid, sections, activity, mix, drums). Same JSON as
+    `roadie study list --json`. Read-only; lists directories only, computes nothing."""
     try:
-        return json.dumps(study.list_to_json(study.STUDIES_ROOT), indent=2)
+        return json.dumps(study.list_to_json(), indent=2)
     except STUDY_ERRORS as e:
         raise AnalysisError("cannot list the studies: %s: %s" % (type(e).__name__, e))
 
@@ -363,10 +363,11 @@ def study_read(name: str, layers: list[str] | None = None) -> str:
     it came from, what made it, caveats (stale, unchecked, labels by rule) and its data, or
     the command that would make it when absent. `name` is a title (an exact title, else a
     unique part of one), `Artist/Title`, or a path; an ambiguous name is an error listing the
-    matches. `layers` keeps only those of grid, sections, activity, mix, drums. Same JSON as
+    matches (a title found in two roots needs its root: `pcloud:Flare`, `local:Flare`). `layers`
+    keeps only those of grid, sections, activity, mix, drums. Same JSON as
     `roadie study show <name> --json`. Read-only; computes nothing."""
     try:
-        return json.dumps(study.to_json(study.load_study(name, study.STUDIES_ROOT), layers), indent=2)
+        return json.dumps(study.to_json(study.load_study(name), layers), indent=2)
     except STUDY_ERRORS as e:
         raise AnalysisError("cannot read the study: %s: %s" % (type(e).__name__, e))
 
