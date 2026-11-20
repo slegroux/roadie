@@ -91,8 +91,8 @@ class Study:
         return data["sections"] if data else None
 
 
-def _number(x):
-    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+def _number(x, default=None):
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else default
 
 
 def _read_json(path: Path) -> dict | None:
@@ -102,13 +102,42 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _marker(folder: Path) -> dict | None:
+    m = _read_json(folder / "study.json")
+    return m if isinstance(m, dict) and m.get("kind") == "study_marker" else None
+
+
 def _stems_dir(folder: Path) -> Path | None:
+    """The folder named by the study.json marker, else the first `*_stems/` folder."""
+    named = (_marker(folder) or {}).get("stems")
+    if isinstance(named, str) and named and "/" not in named and named != "..":
+        if (folder / named).is_dir():
+            return folder / named
     found = sorted(p for p in folder.glob("*_stems") if p.is_dir())
     return found[0] if found else None
 
 
+@dataclass
+class StudyRef:
+    artist: str
+    title: str
+    root: Path
+    analysed: bool          # it has a stems folder
+
+
+def find_studies(root: Path = STUDIES_ROOT) -> list[StudyRef]:
+    """Every <Artist>/<Title>/ folder under root, analysed or not; hidden folders are skipped."""
+    root = Path(root)
+    refs = []
+    if root.is_dir():
+        for artist in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+            for title in sorted(p for p in artist.iterdir() if p.is_dir() and not p.name.startswith(".")):
+                refs.append(StudyRef(artist.name, title.name, title, _stems_dir(title) is not None))
+    return refs
+
+
 def _resolve(name_or_path: str, root: Path) -> Path:
-    """The study folder for an existing path, or a title among the folders that have stems."""
+    """The study folder for an existing path, or a title among the analysed studies."""
     p = Path(name_or_path).expanduser()
     if p.is_dir():
         if p.name.endswith("_stems"):
@@ -116,11 +145,8 @@ def _resolve(name_or_path: str, root: Path) -> Path:
         if _stems_dir(p):
             return p
     want = name_or_path.strip().lower()
-    hits = []
-    for stems in sorted(root.glob("*/*/*_stems")) if root.is_dir() else []:
-        folder = stems.parent
-        if want in (folder.name.lower(), ("%s/%s" % (folder.parent.name, folder.name)).lower()):
-            hits.append(folder)
+    hits = [r.root for r in find_studies(root) if r.analysed and want in (
+        r.title.lower(), ("%s/%s" % (r.artist, r.title)).lower())]
     if not hits:
         raise ValueError("no study named %r under %s" % (name_or_path, root))
     if len(hits) > 1:
@@ -138,7 +164,7 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
     stems = {role: fs for role, fs in stems.items() if fs}
 
     layers = {n: Layer(n, missing=MISSING[n]) for n in LAYER_NAMES}
-    bpm, bar_offset = None, None
+    bpm, bar_offset = _number((_marker(folder) or {}).get("bpm")), None
 
     def unreadable(name, path):
         # The file is there: never offer the command that would overwrite it.
@@ -149,7 +175,7 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
         align = _read_json(path)
         res = align.get("result") if isinstance(align, dict) else None
         if isinstance(res, dict):
-            bpm = _number(res.get("bpm"))
+            bpm = _number(res.get("bpm"), bpm)
             caveats = []
             if res.get("downbeat_verdict") == "chance-level":
                 caveats.append("downbeat confidence is chance-level (%s)" % res.get("downbeat_confidence"))
@@ -162,8 +188,7 @@ def load_study(name_or_path: str, root: Path = STUDIES_ROOT) -> Study:
     if path.exists():
         secs = _read_json(path)
         if isinstance(secs, dict) and isinstance(secs.get("sections"), list):
-            if bpm is None:
-                bpm = _number(secs.get("bpm"))
+            bpm = _number(secs.get("bpm")) if bpm is None else bpm
             caveats = ["labels by rule, not checked by ear"]
             offsets = {int(round(x["live_bar"] - x["bar"])) for x in secs["sections"]
                        if isinstance(x.get("live_bar"), (int, float)) and isinstance(x.get("bar"), (int, float))}
@@ -219,13 +244,36 @@ def _show(study: Study) -> None:
                     s.label, s.bar, s.bars, live, " ".join(s.roles)))
 
 
+def _list() -> int:
+    refs = find_studies()
+    done = [r for r in refs if r.analysed]
+    print("analysed (%d)" % len(done))
+    for r in done:
+        try:
+            st = load_study(str(r.root))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            print("  %-37s could not read: %s" % ("%s/%s" % (r.artist, r.title), e))
+            continue
+        have = [n for n, l in st.layers.items() if l.source]
+        print("  %-37s has: %-22s missing: %s" % ("%s/%s" % (r.artist, r.title), " ".join(have) or "-",
+                                                  " ".join(n for n in st.layers if n not in have) or "-"))
+    rest = [r for r in refs if not r.analysed]
+    print("not analysed (%d)" % len(rest))
+    for r in rest:
+        print("  %s/%s" % (r.artist, r.title))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roadie study", description="Read a study as one record")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="every study under the studies root")
     show = sub.add_parser("show", help="print one study")
     show.add_argument("name", help="a title under the studies root, or a path")
     show.add_argument("--json", action="store_true", help="print the record as JSON")
     args = ap.parse_args(argv)
+    if args.cmd == "list":
+        return _list()
     try:
         study = load_study(args.name)
         if args.json:

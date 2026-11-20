@@ -142,3 +142,34 @@ def test_unreadable_file_is_shown_with_its_source_never_as_missing(tmp_path):
     r = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Bad"],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0 and "sections.json" in r.stdout and "roadie sections" not in r.stdout
+
+
+def test_find_studies_lists_every_folder_with_analysed_only_when_it_has_stems(tmp_path):
+    make_study(tmp_path, "Einmusik", "Flare")
+    (tmp_path / "Anyma" / "Anyma Project").mkdir(parents=True)             # an Ableton project, no stems
+    (tmp_path / ".omc" / "state").mkdir(parents=True)                       # tool folder, not a study
+    marked = tmp_path / "Rodriguez" / "Synth 1"
+    (marked / "truth").mkdir(parents=True)
+    (marked / "truth" / "bass.flac").write_bytes(b"")
+    (marked / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "truth", "bpm": 124, "t0": 0.0}))
+    refs = {(r.artist, r.title): r.analysed for r in study.find_studies(tmp_path)}
+    assert refs == {("Einmusik", "Flare"): True, ("Anyma", "Anyma Project"): False,
+                    ("Rodriguez", "Synth 1"): True}
+    s = load_study("Synth 1", tmp_path)
+    assert s.bpm == 124.0 and list(s.stems) == ["bass"] and s.layers["sections"].missing
+    # a marker naming a folder that is not there falls back to *_stems, or to not analysed
+    (marked / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "../x"}))
+    assert not [r for r in study.find_studies(tmp_path) if r.title == "Synth 1"][0].analysed
+
+
+def test_cli_list_shows_layers_and_the_not_analysed(tmp_path):
+    make_study(tmp_path, "Einmusik", "Flare")
+    make_study(tmp_path, "Bodzin", "Earth", sections=False)
+    (tmp_path / "Anyma" / "Anyma Project").mkdir(parents=True)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "list"], capture_output=True,
+                       text=True, env=dict(os.environ, ROADIE_STUDIES=str(tmp_path)))
+    out = r.stdout
+    assert r.returncode == 0 and "analysed (2)" in out and "not analysed (1)" in out
+    earth = [l for l in out.splitlines() if "Bodzin/Earth" in l][0]
+    assert earth.split("missing:")[1].split()[0] == "sections"
+    assert "Anyma/Anyma Project" in out
