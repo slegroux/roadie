@@ -41,6 +41,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
 | `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
+| `roadie study list\|show <name>` | the studies under the Studies folder and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)) | `study.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 | `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
 
@@ -67,6 +68,8 @@ claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clo
 | `sample_analyze(source, hit=None)` | a drum one-shot in synth terms: envelope, pitch and its drop, harmonics, noise, click, bands, width |
 | `sample_compare(a, b, hit_a=None, hit_b=None)` | two hits compared, with one plain `readings` line per difference past its threshold |
 | `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
+| `study_list()` | every study under the Studies folder and which analysis layers each has; the JSON of `roadie study list --json` |
+| `study_read(name, layers=None)` | one study as a record, the JSON of `roadie study show <name> --json`; `layers` keeps only some |
 | `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's; writes `mix_report.json` and `mix_report.md` |
 
 The first three have the names, arguments and output of Sideman's tools of the
@@ -114,6 +117,43 @@ project Live saved. Clip colours are palette indices copied from that project, s
 treat them as approximate. Samples are referenced by a path relative to the
 `.als` (the way Live 12 does for files outside a project), so keep the `.als`
 next to its `_stems` folder.
+
+## Reading a study
+
+A study is a folder laid out `<Artist>/<Title>/` under a Studies root, with a
+`*_stems` folder inside it. There are two roots by default: `local`
+(`~/Projects/Music/slgMusProd/Studies`, the working set) and `pcloud`
+(`~/pCloud Drive/Music/Production/Roadie/Studies`, the library). `ROADIE_STUDIES`
+replaces them with a list of paths separated by `:`, each optionally written
+`label=path` (an unlabelled one is `root1`, `root2`, ...). A root that is not
+mounted or missing is reported by `study list` and skipped, never an error.
+`roadie study` reads what the analyses left there as one record, so a tool that
+compares studies does not open their files one by one. It is read-only: it
+computes nothing, a part that is not on disk is reported with the command that
+would make it, and it never opens audio (listing reads directory entries and
+small JSON files only, so the slow pCloud mount stays cheap).
+
+```bash
+roadie study list                  # every study per root, analysed or not, with the layers each has
+roadie study show Flare            # one study: bpm, grid, sections, mix profile, what is missing
+roadie study show Flare --json     # the same record as JSON ({"kind": "study", "version": 1, ...})
+```
+
+`show` takes a title (an exact title, else a unique part of one), `Artist/Title`
+or a path. A title found in two roots is an error naming both; give the root to
+pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
+(`root`) and its absolute `path`. Names match across Unicode forms (pCloud keeps
+decomposed accents). `list` shows which layers a study has from file names alone, so it can
+differ from `show` for a profile nested deeper than `analysis/`. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
+`mix` (a `*.profile.json` of kind `reference_profile`, with a note saying whether
+its inputs are fresh, stale or could not be checked), and `activity` and `drums`,
+which no tool writes yet. A layer is returned with caveats rather than guessed
+at: a profile of a newer version than the reader knows is listed, not read, and
+an unparseable file is shown with its path, never as missing. Other JSON result
+files are listed under `extras`, not interpreted. A study whose stems sit in a
+folder not named `*_stems` has a `study.json` at its root,
+`{"kind": "study_marker", "stems": "truth", "bpm": 124, "t0": 0.0}`. The MCP tools
+`study_list` and `study_read` return the same JSON.
 
 ## Drum roles
 

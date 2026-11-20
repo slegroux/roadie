@@ -1,4 +1,4 @@
-"""Roadie's MCP server (roadie_mcp.py): four tools, the same output as Sideman main's tools.
+"""Roadie's MCP server (roadie_mcp.py): four analysis tools with the same output as Sideman main's tools, and two study readers.
 
 sample_analyze, sample_compare and reference_profile came from Sideman's server with their names,
 arguments, defaults and output; session_compare is Sideman's mix_report with a reference profile. The
@@ -30,7 +30,7 @@ import test_analysis_equivalence as E
 
 HERE = pathlib.Path(__file__).resolve().parent
 MCP_GOLDEN = HERE / "mcp_golden" / "sideman_main.json"
-TOOLS = {"sample_analyze", "sample_compare", "reference_profile", "session_compare"}
+TOOLS = {"sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read"}
 CLIP = "live_set tracks 2 clip_slots 0 clip"
 
 
@@ -64,14 +64,14 @@ def made(tmp_path_factory):
     return d, mix, stems, manifest, take
 
 
-def call(S, name, **args):
+def call(S, name, /, **args):
     """The tool's text, called the way a client's call arrives (arguments validated by the server)."""
     res = asyncio.run(S.mcp.call_tool(name, args))
     assert not res.is_error and len(res.content) == 1, res
     return res.content[0].text
 
 
-def failure(S, name, **args):
+def failure(S, name, /, **args):
     """The error a client gets: a ToolError carrying the diagnosis, never the SDK's crash wrapper."""
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     with pytest.raises(ToolError) as e:
@@ -84,7 +84,7 @@ def same(text, golden_name, d):
     assert json.loads(E._norm(text, d)) == json.loads((E.GOLDEN / golden_name).read_text()), golden_name
 
 
-def test_the_server_lists_exactly_four_tools_with_sidemans_arguments(S):
+def test_the_server_lists_exactly_its_tools_with_sidemans_arguments(S):
     tools = {t.name: t for t in asyncio.run(S.mcp.list_tools())}
     assert set(tools) == TOOLS
     assert all((t.description or "").strip() for t in tools.values())
@@ -239,3 +239,39 @@ if __name__ == "__main__":
     (dest / "sideman_main.json").write_text(json.dumps({"input_schemas": schemas, "reference_profile_summary": summary},
                                                        indent=2) + "\n")
     print("wrote", dest / "sideman_main.json", "from", SM.__file__)
+
+
+def study_tree(root):
+    """One analysed study (grid + sections) and one Ableton project with no stems."""
+    stems = root / "Einmusik" / "Flare" / "Flare_124bpm_stems"
+    stems.mkdir(parents=True)
+    (stems / "drums_kick.flac").write_bytes(b"")
+    (stems / "alignment.json").write_text(json.dumps({"result": {"bpm": 124.0}}))
+    (stems / "sections.json").write_text(json.dumps({"bpm": 124.0, "method": "stems", "sections": [
+        {"beat": 0, "bar": 1, "duration_beats": 96, "stems": ["kick"], "label": "Intro", "live_bar": 9.0}]}))
+    (root / "Anyma" / "Anyma Project").mkdir(parents=True)
+
+
+def test_study_list_is_the_cli_json(S, tmp_path, monkeypatch):
+    import study
+    study_tree(tmp_path)
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
+    got = json.loads(call(S, "study_list"))
+    assert got == study.list_to_json([study.Root("local", tmp_path)])
+    rows = {r["title"]: r for r in got["studies"]}
+    assert rows["Flare"]["layers"]["sections"] is True and rows["Flare"]["layers"]["mix"] is False
+    assert rows["Anyma Project"]["analysed"] is False
+
+
+def test_study_read_is_the_cli_json_and_filters_layers(S, tmp_path, monkeypatch):
+    import study
+    study_tree(tmp_path)
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
+    full = json.loads(call(S, "study_read", name="flare"))
+    assert full == json.loads(json.dumps(study.to_json(study.load_study("Flare", [study.Root("local", tmp_path)]))))
+    assert full["root"] == "local"
+    assert full["kind"] == "study" and sorted(full["layers"]) == ["activity", "drums", "grid", "mix", "sections"]
+    only = json.loads(call(S, "study_read", name="Flare", layers=["sections"]))
+    assert list(only["layers"]) == ["sections"] and only["layers"]["sections"]["data"]
+    assert "unknown layer" in failure(S, "study_read", name="Flare", layers=["nope"])
+    assert "no study named" in failure(S, "study_read", name="Nope")
