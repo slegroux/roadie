@@ -88,7 +88,7 @@ KEYWORDS = (
     ("hats", r"hat|(?<![a-z])hh"),
     ("perc", r"perc|conga|(?<![a-z])rim(?![a-z])|bongo|tambourine|cowbell"),
     ("bass", r"bass|(?<![a-z])sub(?![a-z])"),
-    ("lead", r"(?<![a-z])lead(?![a-z])|(?<![a-z])ld(?![a-z])|diva"),
+    ("lead", r"(?<![a-z])lead(?![a-z])|(?<![a-z])ld(?![a-z])"),
     ("arp", r"(?<![a-z])arp"),
     ("pad", r"(?<![a-z])pad(?![a-z])"),
     ("drone", r"drone"),
@@ -98,9 +98,12 @@ KEYWORDS = (
     ("synth", r"synth"),
 )
 ROLE_ORDER = [r for r, _ in KEYWORDS]
-# A clip named like this holds a device open (a filter, a sidechain) and makes no sound of its own:
-# counted as silent, whatever the track maps to. Audio content is not read, so a name is the only way.
-SILENT_CLIP = re.compile(r"silent carrier", re.I)
+# A clip whose name ends in "(silent carrier)" holds a device open (a filter, a sidechain) and makes
+# no sound of its own: counted as silent, whatever the track maps to and whatever it holds (audio
+# content is not read, so a name is the only way). A role-map entry {"<clip name>": "play"} makes
+# that one clip count again.
+SILENT_CLIP = re.compile(r"\(silent carrier\)\s*$", re.I)
+PLAY = "play"
 UNMAPPED = "unmapped"
 IGNORE = "ignore"
 
@@ -214,8 +217,10 @@ def midi_record(clip, notes, intervals, w0, w1):
 
     A clip in its steady loop, with a cycle no longer than an 8-bar step, is its cycle ("loop"):
     the same loop is the same wherever the step starts in it, so a 3-bar loop does not "vary"
-    from one step to the next. Anything else is its events ("ev"): those that start in the window,
-    relative to its start, the pitches held in from before it, and those still sounding at its end.
+    from one step to the next. It carries its cycle and the phase the step starts at, so a step
+    before the steady loop (a start marker inside the loop) can still be compared with it.
+    Anything else is its events ("ev"): those that start in the window, relative to its start, the
+    pitches held in from before it, and those still sounding at its end.
     """
     ivs = [i for i in intervals if i[0] < w1 - EPS and i[1] > w0 + EPS]
     if not ivs:
@@ -223,11 +228,15 @@ def midi_record(clip, notes, intervals, w0, w1):
     ls, le = clip["loop_start"], clip["loop_end"]
     if (clip["looping"] and MIN_LOOP_BEATS <= le - ls <= WINDOW_BEATS + EPS
             and w0 >= steady_from(clip) - EPS):
-        cycle = sorted((n["pitch"], round(float(n["start_time"] - ls), 3),
-                        round(float(min(n["start_time"] + n["duration"], le) - n["start_time"]), 3),
-                        int(n.get("velocity", 100.0) // 8))
-                       for n in notes if ls - EPS <= n["start_time"] < le - EPS)
-        return ("loop", round(float(le - ls), 3), _digest(cycle))
+        cycle = tuple(sorted((n["pitch"], round(float(n["start_time"] - ls), 3),
+                              round(float(min(n["start_time"] + n["duration"], le)
+                                          - n["start_time"]), 3),
+                              int(n.get("velocity", 100.0) // 8))
+                             for n in notes if ls - EPS <= n["start_time"] < le - EPS))
+        length = float(le - ls)
+        phase = (w0 - steady_from(clip)) % length
+        return ("loop", round(length, 3), _digest(cycle), cycle, round(phase, 3),
+                round(float(w1 - w0), 3))
     return ("ev", round(float(w1 - w0), 3),
             tuple(sorted((p, round(float(s - w0), 3), round(float(e - s), 3), int(v // 8))
                          for s, e, p, v in ivs if s >= w0 - EPS)),
@@ -245,18 +254,47 @@ def audio_record(clip, horizon, w0, w1):
     return None
 
 
+def _canon(rec):
+    """The record without what depends on where in the loop a step starts: what a signature, and
+    so "how many variants", is made of."""
+    return rec[:3] if rec[0] == "loop" else rec
+
+
+def _unrolled(rec, n):
+    """The events a "loop" record starts in its first n beats, the way an "ev" record lists them."""
+    _kind, length, _d, cycle, phase, _n = rec
+    out = []
+    for p, off, dur, vb in cycle:
+        t = off - phase
+        if t < -EPS:
+            t += length * math.ceil((-t - EPS) / length)
+        while t < n - EPS:
+            out.append((p, round(t, 3), dur, vb))
+            t += length
+    return sorted(out)
+
+
 def same_content(a, b):
     """Is record `b` (a step) what record `a` (the step before) was, compared like with like?
-    Events are compared over the length of the shorter step; a step with nothing new starting in
-    it, only notes held in from the step before, is the same as that step."""
-    if a[0] != b[0]:
-        return False
-    if a[0] != "ev":
-        return a == b
-    n = min(a[1], b[1])
-    sa = [e for e in a[2] if e[1] < n - EPS]
-    sb = [e for e in b[2] if e[1] < n - EPS]
-    return sa == sb or (not sb and bool(b[3]) and set(b[3]) <= set(a[4]))
+    Two loops are the same if their cycles are. Events are compared over the length of the shorter
+    step; a step with nothing new starting in it, only notes held in from the step before, is the
+    same as that step. A loop against events (a start marker inside the loop makes the first step
+    events) is compared by what starts: the loop unrolled from its phase against the events."""
+    if a[0] == b[0]:
+        if a[0] == "loop":
+            return a[1:3] == b[1:3]
+        if a[0] == "aud":
+            return a == b
+        n = min(a[1], b[1])
+        sa = [e for e in a[2] if e[1] < n - EPS]
+        sb = [e for e in b[2] if e[1] < n - EPS]
+        return sa == sb or (not sb and bool(b[3]) and set(b[3]) <= set(a[4]))
+    if {a[0], b[0]} == {"loop", "ev"}:
+        n = min(a[5] if a[0] == "loop" else a[1], b[5] if b[0] == "loop" else b[1])
+        starts = lambda r: (_unrolled(r, n) if r[0] == "loop"
+                            else [e for e in r[2] if e[1] < n - EPS])
+        return starts(a) == starts(b)
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +378,6 @@ def read_set(live, first, last):
             for p in ("loop_start", "loop_end", "start_marker", "end_marker"):
                 c[p] = c[p] * tempo / 60.0          # an unwarped clip's markers are seconds
         c["notes"] = []
-        c["silent"] = bool(SILENT_CLIP.search(c["name"] or ""))
         clips[(t, s)] = c
 
     for (t, s), c in clips.items():
@@ -435,10 +472,14 @@ def read_arrangement(first, last, role_map=None):
     role_map = _lower_map(role_map)
     with Live() as live:
         data = read_set(live, first, last)
+    for c in data["clips"].values():
+        name = (c["name"] or "").lower()
+        c["silent"] = bool(SILENT_CLIP.search(name)) and role_map.get(name) != PLAY
     voices, ignored = build_voices(data, role_map)
     roles = role_order({v["role"] for v in voices})
 
-    rows, prev, started = [], {}, False   # prev: role -> {voice label: record} of the step before
+    # prev: role -> {voice key: (record, scene, non-looping, clip beats)} of the step before
+    rows, prev, started, long_loops = [], {}, False, {}
     for s, scene_name in zip(data["scene_ids"], data["scene_names"]):
         here = {t: c for (t, sc), c in data["clips"].items()
                 if sc == s and not c["muted"] and not c["silent"]
@@ -460,6 +501,12 @@ def read_arrangement(first, last, role_map=None):
                 played[v["key"]] = (notes, sounding(c, notes, horizon))
             else:
                 played[v["key"]] = None
+        v_of = {v["key"]: v for v in voices}
+        for v in voices:                    # loops past 8 bars: a step is a slice of the loop
+            c = here.get(v["track"])
+            if (c is not None and c["is_midi_clip"] and c["looping"] and bars > WINDOW_BARS
+                    and c["loop_end"] - c["loop_start"] > WINDOW_BEATS + EPS):
+                long_loops.setdefault(data["tracks"][v["track"]]["name"], set()).add(s + 1)
         for role in roles:
             mine = [v for v in voices if v["role"] == role and v["track"] in here
                     and (v["pitch"] is None or v["key"] in played)]
@@ -472,10 +519,11 @@ def read_arrangement(first, last, role_map=None):
                     rec = (midi_record(c, played[v["key"]][0], played[v["key"]][1], w0, w1)
                            if c["is_midi_clip"] else audio_record(c, horizon, w0, w1))
                     if rec is not None:
-                        recs[v["label"]] = rec
+                        recs[v["key"]] = rec
                         voice_plays.add(v["track"])
                 playing = bool(recs)
-                sig = _digest(sorted((k, repr(r)) for k, r in recs.items())) if playing else None
+                sig = (_digest(sorted((repr(k), repr(_canon(r))) for k, r in recs.items()))
+                       if playing else None)
                 p_recs = prev.get(role, {})
                 if not started and w == 0:
                     change = None
@@ -483,11 +531,15 @@ def read_arrangement(first, last, role_map=None):
                     if not p_recs:
                         change = "enter"
                     else:
-                        # Only what is playing now can be new. A voice that stopped while
-                        # others play on (a one-shot that ran out) is not a change of the role.
-                        moved = any(k not in p_recs or not same_content(p_recs[k], recs[k])
+                        # What is playing now can be new; a voice that stopped is a removal,
+                        # unless it is a non-looping clip whose length ended inside this scene
+                        # (a one-shot that ran out).
+                        moved = any(k not in p_recs or not same_content(p_recs[k][0], recs[k])
                                     for k in recs)
-                        change = "vary" if moved else "same"
+                        removed = any(k not in recs and not (
+                            p_recs[k][1] == s and p_recs[k][2] and p_recs[k][3] <= w0 + EPS)
+                            for k in p_recs)
+                        change = "vary" if moved else "thin" if removed else "same"
                 else:
                     change = "leave" if p_recs else None
                 state = ("silent" if not playing
@@ -495,7 +547,9 @@ def read_arrangement(first, last, role_map=None):
                 cells.append({"bars": "%d-%d" % (w * WINDOW_BARS + 1,
                                                  min((w + 1) * WINDOW_BARS, bars)),
                               "state": state, "change": change, "sig": sig})
-                prev[role] = recs
+                prev[role] = {k: (r, s, not here[v_of[k]["track"]]["looping"],
+                                  extent_beats(here[v_of[k]["track"]]))
+                              for k, r in recs.items()}
             seen = set()
             for v in mine:
                 if v["track"] in seen:
@@ -521,6 +575,10 @@ def read_arrangement(first, last, role_map=None):
         if data["tracks"][t]["muted"]:
             warnings.append("muted track, counted as silent: %r (%s)"
                             % (data["tracks"][t]["name"], data["tracks"][t]["muted_why"]))
+    for name, scenes in sorted(long_loops.items()):
+        warnings.append("loop longer than 8 bars on %r in scenes %s: its 8-bar steps are different "
+                        "slices of the loop, so a step can read varied on a pure repeat"
+                        % (name, ", ".join(str(x) for x in sorted(scenes))))
     carriers = {}
     for (t, _s), c in data["clips"].items():
         if c["silent"]:
@@ -543,17 +601,23 @@ def read_arrangement(first, last, role_map=None):
 PITCHED = ("bass", "lead", "arp", "pad", "drone", "pluck", "synth")   # "pitched parts"
 HOOK_ROLE = "lead"            # the hook is the lead line, whatever track plays it (LD, LEAD, 27-Diva)
 
-# The base section labels, from the start of a scene name: "Drop 1A · impact" is Drop 1, part A;
-# "Outro B" is Outro, part B.
-SECTION = re.compile(r"\s*(Intro|Main|Build|Drop|Breakdown|Outro)\b\s*(\d+)?\s*((?-i:[A-Z])\b)?", re.I)
+# The base section labels, from the start of a name: "Drop 1A · impact" is Drop 1, part A; "Outro B"
+# is Outro, part B. `sections.py` names reference sections with the same labels (Intro, Main, Build,
+# Drop, Breakdown, Outro, numbered when repeated: "Drop 1 (bass in) · 64"), and `Break` from its
+# loudness method, which is read as Breakdown. Its other loudness labels ("Quiet", "Mid" and the
+# fallback "C full") say nothing about form: they stay unlabelled and are listed, never guessed.
+SECTION = re.compile(
+    r"\s*(Intro|Main|Build|Drop|Breakdown|Break|Outro)\b\s*(\d+)?\s*((?-i:[A-Z])\b)?", re.I)
 
 
 def section_of(scene_name):
-    """(label, part) from a scene name by the base labels, or None: "Drop 1A" -> ("Drop 1", "A")."""
+    """(label, part) from a scene or section name by the base labels, or None:
+    "Drop 1A" -> ("Drop 1", "A"), "Break 2" -> ("Breakdown 2", "")."""
     m = SECTION.match(scene_name or "")
     if not m:
         return None
     kind = m.group(1).capitalize()
+    kind = "Breakdown" if kind == "Break" else kind
     return ("%s %s" % (kind, m.group(2)) if m.group(2) else kind), (m.group(3) or "")
 
 
@@ -595,20 +659,139 @@ def _runs(steps, flags):
 
 def _span(steps, i, n):
     return {"bar": steps[i]["bar"], "bars": sum(x["bars"] for x in steps[i:i + n]),
-            "section": steps[i]["section"], "scene": steps[i]["scene"]}
+            "section": steps[i].get("section"), "scene": steps[i].get("scene")}
+
+
+def _internal_gaps(steps, play):
+    """(gaps, trailing bars): the stretches a role is out between two stretches it plays, and the
+    bars it is out after the last. What comes before its first stretch is not "out"."""
+    if True not in play:
+        return [], 0
+    first, last = play.index(True), len(play) - 1 - play[::-1].index(True)
+    gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
+            if first < i and i + k - 1 < last]
+    return gaps, sum(x["bars"] for x in steps[last + 1:])
+
+
+def metrics_from_steps(steps, sections, step_bars=WINDOW_BARS):
+    """The structure of a track from its steps and sections, with nothing in it that is Live's.
+
+    `steps`: in order, each {"bar": first bar (1-based), "bars": length, "cells": {role:
+    {"state": "silent" or not, "change": enter / vary / same / leave / thin / None, "sig": any}}},
+    optionally "scene", "name", "in_scene" (kept on the records that name a step). `change` may be
+    left out of every cell, then no step is flagged. `sections`: {"label": a base label or None,
+    "bar", "bars"}, optionally "name"/"scenes". `step_bars` is the resolution of `steps`: every bar
+    this reports (entry, kick-out, hat gaps) is a step boundary, so a reference's per-bar activity
+    gives bars and a Set's 8-bar steps give multiples of 8 plus 1. Roles the steps lack are None.
+    """
+    n = len(steps)
+    roles = {r for x in steps for r in x["cells"]}
+    out = {"bars": sum(x["bars"] for x in steps), "steps": n, "step_bars": step_bars}
+
+    secs = []
+    for sec in sections:
+        mine = [x for x in steps if sec["bar"] <= x["bar"] < sec["bar"] + sec["bars"]]
+        counts = [sum(1 for r in PITCHED if _playing(x, r)) for x in mine]
+        secs.append(dict(sec, pitched_parts={"max": max(counts or [0]), "per_step": counts}))
+    out["sections"] = secs
+    out["unlabelled"] = [{"bar": x["bar"], "bars": x["bars"], "name": x.get("name", "")}
+                         for x in sections if x["label"] is None]
+
+    # what each step adds, against the step before; the first step has no before
+    changes, flags = [], []
+    if any("change" in c for x in steps for c in x["cells"].values()):
+        for i, x in enumerate(steps):
+            if i == 0:
+                continue
+            kinds = {k: sorted(r for r, c in x["cells"].items() if c.get("change") == k)
+                     for k in ("enter", "vary", "leave", "thin")}
+            flag = (None if kinds["enter"] or kinds["vary"]
+                    else "only a removal" if kinds["leave"] or kinds["thin"] else "nothing new")
+            rec = {"scene": x.get("scene"), "name": x.get("name", ""), "bar": x["bar"],
+                   "bars": x["bars"], "in_scene": x.get("in_scene"), "flag": flag, **kinds}
+            changes.append(rec)
+            if flag:
+                flags.append(rec)
+    out["changes"], out["flags"] = changes, flags
+
+    def playing(role):
+        return [_playing(x, role) for x in steps]
+
+    # hook: how long the lead runs, and whether it varies while it does
+    if HOOK_ROLE in roles and n:
+        play = playing(HOOK_ROLE)
+        runs = _runs(steps, play)
+        sigs = [x["cells"][HOOK_ROLE].get("sig") for x, p in zip(steps, play) if p]
+        out["hook"] = {
+            "role": HOOK_ROLE, "steps_playing": sum(play),
+            "bars_playing": sum(x["bars"] for x, p in zip(steps, play) if p),
+            "first_bar": next((x["bar"] for x, p in zip(steps, play) if p), None),
+            "longest_run": max([_span(steps, i, k) for i, k in runs],
+                               key=lambda r: r["bars"], default=None),
+            "runs": [_span(steps, i, k) for i, k in runs],
+            "varies": sum(1 for x, p in zip(steps[1:], play[1:])
+                          if p and x["cells"][HOOK_ROLE].get("change") == "vary"),
+            "distinct_variants": len(set(sigs))}
+    else:
+        out["hook"] = None
+
+    # bass: the bar it enters, and whether that is before the first drop
+    if "bass" in roles and n:
+        play = playing("bass")
+        i = play.index(True) if True in play else None
+        drop = next((x["bar"] for x in sections if (x["label"] or "").startswith("Drop")), None)
+        out["bass"] = {"entry_bar": steps[i]["bar"] if i is not None else None,
+                       "entry_scene": steps[i].get("scene") if i is not None else None,
+                       "first_drop_bar": drop,
+                       "before_first_drop": (None if i is None or drop is None
+                                             else steps[i]["bar"] < drop)}
+    else:
+        out["bass"] = None
+
+    # kick: first bar, and every stretch it is out between two stretches it plays
+    if "kick" in roles and n:
+        play = playing("kick")
+        gaps, trailing = _internal_gaps(steps, play)
+        if True in play:
+            last = len(play) - 1 - play[::-1].index(True)
+            out["kick"] = {"first_bar": steps[play.index(True)]["bar"], "out": gaps,
+                           "longest_out_bars": max([g["bars"] for g in gaps], default=0),
+                           "last_bar": steps[last]["bar"] + steps[last]["bars"] - 1,
+                           "trailing_out_bars": trailing}
+        else:
+            out["kick"] = {"first_bar": None, "out": [], "longest_out_bars": 0, "last_bar": None,
+                           "trailing_out_bars": 0}
+    else:
+        out["kick"] = None
+
+    # Drop 2 against Drop 1: every section that carries the label, summed
+    d = {}
+    for x in sections:
+        if x["label"] in ("Drop 1", "Drop 2"):
+            d[x["label"]] = d.get(x["label"], 0) + x["bars"]
+    out["drop_ratio"] = ({"drop1_bars": d["Drop 1"], "drop2_bars": d["Drop 2"],
+                          "ratio": round(d["Drop 2"] / d["Drop 1"], 3)}
+                         if d.get("Drop 1") and "Drop 2" in d else None)
+
+    # hats: do they stay on between their first and last stretch (the outro may drop them)
+    if "hats" in roles and n:
+        play = playing("hats")
+        gaps, trailing = _internal_gaps(steps, play)
+        out["hats"] = {"first_bar": steps[play.index(True)]["bar"] if True in play else None,
+                       "steps_playing": sum(play), "of_steps": n,
+                       "constant": True in play and not gaps, "gaps": gaps,
+                       "trailing_out_bars": trailing}
+    else:
+        out["hats"] = None
+    return out
 
 
 def structure_metrics(result):
-    """Structure of the range, from its table: sections and lengths, what each 8-bar step adds,
-    and the numbers the reference studies are measured in. Bars count from the range's first
-    scene (bar 1). A role the Set does not have is None in every metric about it."""
+    """Structure of the range read from Live: sections from the scene names, 8-bar steps from the
+    table, the numbers from `metrics_from_steps`. Bars count from the range's first scene (bar 1)."""
     steps = _steps(result)
-    n = len(steps)
-    roles = set(result["roles"])
-    out = {"bars": sum(x["bars"] for x in steps), "steps": n}
-
-    # sections: consecutive scenes under one label; an unlabelled scene is a section of its own
     sections, unlabelled = [], []
+    bar = 1
     for row in result["rows"]:
         sec = section_of(row["name"])
         if sec is None:
@@ -619,102 +802,10 @@ def structure_metrics(result):
             sections[-1]["bars"] += row["bars"]
         else:
             sections.append({"label": label, "scenes": [row["scene"], row["scene"]],
-                             "bars": row["bars"]})
-    bar = 1
-    for sec in sections:
-        sec["bar"] = bar
-        bar += sec["bars"]
-        mine = [x for x in steps if sec["scenes"][0] <= x["scene"] <= sec["scenes"][1]]
-        counts = [sum(1 for r in PITCHED if _playing(x, r)) for x in mine]
-        sec["pitched_parts"] = {"max": max(counts or [0]), "per_step": counts}
-    out["sections"], out["unlabelled_scenes"] = sections, unlabelled
-
-    # what each step adds, against the step before; the first step of the range has no before
-    changes, flags = [], []
-    for i, x in enumerate(steps):
-        if i == 0:
-            continue
-        kinds = {k: sorted(r for r, c in x["cells"].items() if c["change"] == k)
-                 for k in ("enter", "vary", "leave")}
-        flag = (None if kinds["enter"] or kinds["vary"]
-                else "only a removal" if kinds["leave"] else "nothing new")
-        rec = {"scene": x["scene"], "name": x["name"], "bar": x["bar"], "bars": x["bars"],
-               "in_scene": x["in_scene"], "enter": kinds["enter"], "vary": kinds["vary"],
-               "leave": kinds["leave"], "flag": flag}
-        changes.append(rec)
-        if flag:
-            flags.append(rec)
-    out["changes"], out["flags"] = changes, flags
-
-    def role_runs(role):
-        play = [_playing(x, role) for x in steps]
-        return play, _runs(steps, play)
-
-    # hook: how long the lead runs, and whether it varies while it does
-    if HOOK_ROLE in roles and n:
-        play, runs = role_runs(HOOK_ROLE)
-        sigs = [x["cells"][HOOK_ROLE]["sig"] for x, p in zip(steps, play) if p]
-        out["hook"] = {
-            "role": HOOK_ROLE, "steps_playing": sum(play), "bars_playing": sum(
-                x["bars"] for x, p in zip(steps, play) if p),
-            "first_bar": next((x["bar"] for x, p in zip(steps, play) if p), None),
-            "longest_run": max([_span(steps, i, k) for i, k in runs],
-                               key=lambda r: r["bars"], default=None),
-            "runs": [_span(steps, i, k) for i, k in runs],
-            "varies": sum(1 for x, p in zip(steps[1:], play[1:])
-                          if p and x["cells"][HOOK_ROLE]["change"] == "vary"),
-            "distinct_variants": len(set(sigs))}
-    else:
-        out["hook"] = None
-
-    # bass: the bar it enters, and whether that is before the first drop
-    if "bass" in roles and n:
-        play, _ = role_runs("bass")
-        i = play.index(True) if True in play else None
-        drop = next((s["bar"] for s in sections if (s["label"] or "").startswith("Drop")), None)
-        out["bass"] = {"entry_bar": steps[i]["bar"] if i is not None else None,
-                       "entry_scene": steps[i]["scene"] if i is not None else None,
-                       "first_drop_bar": drop,
-                       "before_first_drop": (None if i is None or drop is None
-                                             else steps[i]["bar"] < drop)}
-    else:
-        out["bass"] = None
-
-    # kick: first bar, and every stretch it is out between two stretches it plays
-    if "kick" in roles and n:
-        play, _ = role_runs("kick")
-        if True in play:
-            first, last = play.index(True), n - 1 - play[::-1].index(True)
-            gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
-                    if first < i and i + k - 1 < last]
-            out["kick"] = {"first_bar": steps[first]["bar"], "out": gaps,
-                           "longest_out_bars": max([g["bars"] for g in gaps], default=0),
-                           "last_bar": steps[last]["bar"] + steps[last]["bars"] - 1}
-        else:
-            out["kick"] = {"first_bar": None, "out": [], "longest_out_bars": 0, "last_bar": None}
-    else:
-        out["kick"] = None
-
-    # Drop 2 against Drop 1
-    d = {s["label"]: s["bars"] for s in sections if s["label"] in ("Drop 1", "Drop 2")}
-    out["drop_ratio"] = ({"drop1_bars": d["Drop 1"], "drop2_bars": d["Drop 2"],
-                          "ratio": round(d["Drop 2"] / d["Drop 1"], 3)}
-                         if d.get("Drop 1") and "Drop 2" in d else None)
-
-    # hats: do they stay on from the step they enter
-    if "hats" in roles and n:
-        play, _ = role_runs("hats")
-        if True in play:
-            first = play.index(True)
-            gaps = [_span(steps, i, k) for i, k in _runs(steps, [not p for p in play])
-                    if i > first]
-            out["hats"] = {"first_bar": steps[first]["bar"], "steps_playing": sum(play),
-                           "of_steps": n, "constant": not gaps, "gaps": gaps}
-        else:
-            out["hats"] = {"first_bar": None, "steps_playing": 0, "of_steps": n,
-                           "constant": False, "gaps": []}
-    else:
-        out["hats"] = None
+                             "bars": row["bars"], "bar": bar, "name": row["name"]})
+        bar += row["bars"]
+    out = metrics_from_steps(steps, sections, WINDOW_BARS)
+    out["unlabelled_scenes"] = unlabelled
     return out
 
 
@@ -722,7 +813,7 @@ def structure_metrics(result):
 # output
 # --------------------------------------------------------------------------
 
-MARK = {"enter": "+", "vary": "~", "same": "=", "leave": "-", None: "."}
+MARK = {"enter": "+", "vary": "~", "same": "=", "leave": "-", "thin": "-", None: "."}
 
 
 def _cell_text(cell):
@@ -751,7 +842,7 @@ def format_table(result):
     lines = ["%s, scenes %d-%d, one character per %d bars"
              % (result["set"] or "Set", result["scenes"][0], result["scenes"][1],
                 result["window_bars"]),
-             "+ enters  ~ varies  = same  - leaves  . silent;  then loop bars, 1x = plays once",
+             "+ enters  ~ varies  = same  - leaves (or one part of the role stops)  . silent;  then loop bars, 1x = plays once",
              "", fmt(head)] + [fmt(b) for b in body]
     if result["unmapped"]:
         lines += ["", "unmapped (no role; map them with --roles): " + ", ".join(result["unmapped"])]
@@ -819,11 +910,13 @@ def format_metrics(m):
     ht = m["hats"]
     lines.append("hats: " + ("no hats role in this range" if ht is None else
                              "never play" if ht["first_bar"] is None else
-                             "in at bar %d, play %d of %d steps, %s" % (
+                             "in at bar %d, play %d of %d steps, %s%s" % (
                                  ht["first_bar"], ht["steps_playing"], ht["of_steps"],
-                                 "constant" if ht["constant"] else "out at " + ", ".join(
-                                     "bar %d (%d bars)" % (g["bar"], g["bars"])
-                                     for g in ht["gaps"]))))
+                                 "constant until the last one" if ht["constant"] else
+                                 "out at " + ", ".join("bar %d (%d bars)" % (g["bar"], g["bars"])
+                                                       for g in ht["gaps"]),
+                                 "; out for the last %d bars" % ht["trailing_out_bars"]
+                                 if ht["trailing_out_bars"] else "")))
     return "\n".join(lines)
 
 
