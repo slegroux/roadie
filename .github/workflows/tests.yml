@@ -28,10 +28,16 @@ jobs:
       # are hundreds of MB), so they skip here regardless — it is installed so
       # that a skip reason stays "no stems" rather than silently becoming "no
       # aubio too" if the fixtures are ever vendored.
+      #
+      # rclone is REQUIRED by test_studyrename.py and the study record tests:
+      # they run the real rclone with a temp folder as the remote, because the
+      # point is the server-side moveto / check / read-back behaviour. A fake
+      # would test the fake. Only lsf, moveto and copyto are used, all in the
+      # Ubuntu package.
       - name: System packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg aubio-tools libsndfile1
+          sudo apt-get install -y -qq ffmpeg aubio-tools libsndfile1 rclone
 
       # VERSIONS ARE PINNED in requirements.txt — see the note there. The same
       # files install.sh builds a user's .venv from, so CI tests what users get.
