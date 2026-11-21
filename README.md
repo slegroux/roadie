@@ -180,7 +180,14 @@ roadie study tag Flare --key Am --by-ear                     # settled by ear: b
 roadie study tag Flare --key "A minor" --source online --url https://www.beatport.com/track/flare/18146849
 ```
 
-`tag` is the only command that writes in a Studies folder, and it writes one file: it sets the fields it was
+`roadie study rename --dry-run` prints the folder names the records give (`<Title> [124 Cm 5A]`), with collisions
+and the paths a rename would leave stale. `rename --write --out-dir DIR` does it on the pCloud library with
+server-side `rclone moveto` only (no copy, no delete), one folder at a time: it saves the plan (`rename-map`, old
+to new) and a recursive listing first, counts files before and after each move, skips a target that exists, stops
+at the first failed check, and compares the listings at the end; `rename --undo MAP.json` plays a map backwards
+(an empty `pack/` folder from a merge can remain). Renames move whole folders and write nothing else.
+
+`tag` is the only command that writes `study.json`, and it writes one file: it sets the fields it was
 given in `study.json` and keeps the others (`stems`, `t0`). A study on the pCloud mount is read and written with
 rclone (`cat`, `copyto`, then a read-back), never through the mount, a local one directly. `roadie key` takes the key from the chroma of
 the bass and synths stems summed over the whole track (Krumhansl-Kessler profiles), and gives the key, its

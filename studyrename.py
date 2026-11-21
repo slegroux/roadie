@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""`roadie study rename --dry-run [--root pcloud]`: the folder name each analysed study would get,
-`<Title> [<bpm> <key> <camelot>]`, from its record, as one table. Nothing is renamed: `--write` does not
-exist yet (the real rename is built after the user has seen this table).
+"""`roadie study rename --dry-run | --write | --undo MAP.json`: the folder name each analysed study gets,
+`<Title> [<bpm> <key> <camelot>]`, from its record. `--dry-run` prints the table and renames nothing.
+`--write` renames on the pCloud library with server-side `rclone moveto` only (see `run_moves`), after saving
+the plan as a map (old -> new, the undo) and a recursive listing; `--undo` plays a map backwards.
 
 The new name takes the key's short form (`Cm`, `Bbm`, `F#`, `Ab`) and a `?` after a detected key and its code;
 a study with no key is `[<bpm>]`. The bpm is the listed one when within 1 of the measured one, else the
@@ -13,12 +14,14 @@ cases that are proposed here and not executed: the Synthwave merge.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
 
 import keyfill
 import study
+from roadie_analysis import key as keymod
 
 MERGE_PACK, MERGE_BENCH = ("Rodriguez Jr.", "Synthwave #1 (remix pack)"), ("Rodriguez Jr.", "Synthwave 1 benchmark")
 HERE = Path(__file__).resolve().parent
@@ -141,12 +144,156 @@ def render(plan: dict, root_label: str) -> str:
     return "\n".join(L) + "\n"
 
 
+# ---- the real thing: server-side moves on rclone, checked one at a time
+
+def _rclone(*args) -> str:
+    return subprocess.run(["rclone", *args], check=True, capture_output=True, text=True).stdout
+
+
+def r_files(path: str) -> list[tuple[int, str]]:
+    """(size, relative path) of every file under a folder (or the file itself), by rclone."""
+    out = []
+    for line in _rclone("lsf", "-R", "--files-only", "--format", "sp", path).splitlines():
+        size, _, rel = line.partition(";")
+        out.append((int(size), rel))
+    return out
+
+
+def r_exists(path: str) -> bool:
+    parent, _, name = path.rpartition("/")
+    try:
+        return name in {n.rstrip("/") for n in _rclone("lsf", parent).splitlines()}
+    except subprocess.CalledProcessError as e:
+        if "directory not found" in (e.stderr or ""):
+            return False
+        raise
+
+
+def r_names(path: str) -> list[str]:
+    """The names directly inside a folder (a folder's name without its trailing slash)."""
+    return sorted(n.rstrip("/") for n in _rclone("lsf", path).splitlines())
+
+
+def build_moves(plan: dict, root: str) -> list[dict]:
+    """The ordered moves of a rename plan on the remote `root`: each study's folder to its new name, then
+    the Synthwave merge (the pack folder renamed, its entries moved into `pack/`, the benchmark moved into
+    `benchmark/`). Each move is {old, new, group}, paths relative to `root`; names are checked against the
+    remote when the move runs."""
+    merge = plan["merge"]
+    in_merge = {MERGE_PACK, MERGE_BENCH} if merge else set()
+    moves = []
+    for e in plan["entries"]:
+        if (e["artist"], e["old"]) in in_merge or not e["new"] or e["new"] == e["old"]:
+            continue
+        moves.append({"old": "%s/%s" % (e["ref"].root.parent.name, e["old"]),
+                      "new": "%s/%s" % (e["ref"].root.parent.name, e["new"]), "group": None})
+    if merge:
+        artist = MERGE_PACK[0]
+        old_pack = "%s/%s" % (artist, merge["pack_dir"].name)
+        merged = "%s/%s" % (artist, merge["name"])
+        entries = [n for n in r_names("%s/%s" % (root, old_pack))
+                   if not (n.endswith("_stems") or n.lower().endswith(".wav") or n == "study.json")]
+        moves.append({"old": old_pack, "new": merged, "group": "synthwave"})
+        moves += [{"old": "%s/%s" % (merged, n), "new": "%s/pack/%s" % (merged, n), "group": "synthwave"} for n in entries]
+        moves.append({"old": "%s/%s" % (artist, merge["bench_dir"].name), "new": merged + "/benchmark", "group": "synthwave"})
+    return moves
+
+
+def run_moves(root: str, moves: list[dict], log=print, merge_check: tuple[list[str], str] | None = None) -> dict:
+    """Run moves one at a time with `rclone moveto` (server-side: no copy, no delete, never the FUSE mount).
+    Per move: the target must not exist (else it is SKIPPED, and the rest of its group with it: nothing is ever
+    merged into an existing folder), the source must; files are counted before at the old path and after at
+    the new one, and the old path must be gone. Any failed check stops the whole run. `merge_check` is
+    (old paths, new path): after the last move of the group their total file count must equal the new one's.
+    Returns {ok, skipped, failed, counts}."""
+    done, skipped, skipped_groups, failed = [], [], set(), None
+    total_before = {}
+    last = {m.get("group"): i for i, m in enumerate(moves) if m.get("group")}
+    for i, m in enumerate(moves):
+        old, new, group = m["old"], m["new"], m.get("group")
+        src, dst = "%s/%s" % (root, old), "%s/%s" % (root, new)
+        if group and group in skipped_groups:
+            skipped.append(m)
+            log("SKIPPED %s -> %s: an earlier step of the group was skipped" % (old, new))
+            continue
+        try:
+            if r_exists(dst):
+                skipped.append(m)
+                if group:
+                    skipped_groups.add(group)
+                log("SKIPPED %s -> %s: the target exists (nothing is merged into an existing folder)" % (old, new))
+                continue
+            if not r_exists(src):
+                raise RuntimeError("the source is not there")
+            before = len(r_files(src))
+            if group and merge_check and group not in total_before:
+                total_before[group] = sum(len(r_files("%s/%s" % (root, p))) for p in merge_check[0])
+            _rclone("moveto", src, dst)
+            after = len(r_files(dst))
+            if before != after:
+                raise RuntimeError("%d files before, %d after" % (before, after))
+            if r_exists(src):
+                raise RuntimeError("the old path is still there")
+        except (RuntimeError, subprocess.CalledProcessError, ValueError) as e:
+            why = (e.stderr or "").strip() if isinstance(e, subprocess.CalledProcessError) else e
+            failed = {"move": m, "why": str(why)}
+            log("FAILED %s -> %s: %s. STOPPED: nothing else was moved." % (old, new, why))
+            break
+        done.append(m)
+        log("OK %s -> %s (%d files)" % (old, new, before))
+        if group and merge_check and last[group] == i:
+            n_after = len(r_files("%s/%s" % (root, merge_check[1])))
+            if n_after != total_before.get(group):
+                failed = {"move": m, "why": "merged folder holds %d files, the two old folders held %d" % (n_after, total_before.get(group))}
+                log("FAILED merge total: %s" % failed["why"])
+                break
+            log("OK merge total: %d files under %s, the same as in the old folders" % (n_after, merge_check[1]))
+    return {"ok": done, "skipped": skipped, "failed": failed}
+
+
+def undo_moves(map_: dict, log=print) -> dict:
+    """The saved moves reversed, last first, checked the same way."""
+    back = [{"old": m["new"], "new": m["old"], "group": None} for m in reversed(map_["moves"])]
+    return run_moves(map_["root"], back, log)
+
+
+def compare_listings(before: list[tuple[int, str]], after: list[tuple[int, str]], moves: list[dict]) -> list[str]:
+    """Differences between two library listings across the moves: file counts, the multiset of
+    (base name, size), and each file's size at its expected new path. An empty result means identical."""
+    from collections import Counter
+    out = []
+    if len(before) != len(after):
+        out.append("file count %d before, %d after" % (len(before), len(after)))
+    base = lambda lst: Counter((rel.rpartition("/")[2], size) for size, rel in lst)
+    for k, v in ((base(before) - base(after)).items()):
+        out.append("missing after: %s (%d bytes) x%d" % (k[0], k[1], v))
+    for k, v in ((base(after) - base(before)).items()):
+        out.append("new after: %s (%d bytes) x%d" % (k[0], k[1], v))
+
+    def mapped(rel):
+        # apply the moves in order: a file inside a renamed folder, then inside an entry moved into pack/
+        for m in moves:
+            if rel == m["old"] or rel.startswith(m["old"] + "/"):
+                rel = m["new"] + rel[len(m["old"]):]
+        return rel
+    expect = Counter((mapped(rel), size) for size, rel in before)
+    got = Counter((rel, size) for size, rel in after)
+    for (rel, size), n in (expect - got).items():
+        out.append("expected at %s (%d bytes) but not there" % (rel, size))
+    for (rel, size), n in (got - expect).items():
+        out.append("unexpected at %s (%d bytes)" % (rel, size))
+    return out
+
+
 def main(args) -> int:
+    if args.undo:
+        map_ = json.loads(Path(args.undo).read_text())
+        res = undo_moves(map_)
+        return 1 if res["failed"] or res["skipped"] else 0
     if args.write:
-        print("study: rename: --write is not built yet; this is the dry run the real rename waits on", file=sys.stderr)
-        return 1
+        return main_write(args)
     if not args.dry_run:
-        print("study: rename: give --dry-run", file=sys.stderr)
+        print("study: rename: give --dry-run, --write or --undo MAP.json", file=sys.stderr)
         return 1
     roots = [r for r in study.STUDIES_ROOTS if r.label == args.root]
     if not roots:
@@ -165,3 +312,44 @@ def main(args) -> int:
         Path(args.out).write_text(text)
     print(text)
     return 0
+
+
+def main_write(args) -> int:
+    roots = [r for r in study.STUDIES_ROOTS if r.label == args.root]
+    root = keymod.pcloud_remote(roots[0].path) if roots else None
+    if not root or not args.out_dir:
+        print("study: rename: --write needs --root to be a pCloud library root, and --out-dir for the map, "
+              "listings and log", file=sys.stderr)
+        return 1
+    out = Path(args.out_dir)
+    if any(Path(r.path).resolve() in out.resolve().parents or Path(r.path).resolve() == out.resolve() for r in study.STUDIES_ROOTS):
+        print("study: rename: --out-dir is inside a Studies folder", file=sys.stderr)
+        return 1
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = args.stamp
+    lines = []
+
+    def log(line):
+        lines.append(line)
+        print(line, flush=True)
+
+    plan = plan_rename([r for r in study.find_studies(roots) if r.analysed], roots)
+    moves = build_moves(plan, root)
+    (out / ("rename-map-%s.json" % stamp)).write_text(json.dumps({"kind": "rename_map", "version": 1, "root": root, "moves": moves}, indent=1, ensure_ascii=False))
+    log("map: %d moves saved to rename-map-%s.json" % (len(moves), stamp))
+    before = r_files(root)
+    (out / ("listing-before-%s.txt" % stamp)).write_text("".join("%d;%s\n" % f for f in before))
+    log("listing before: %d files" % len(before))
+    merge = plan["merge"]
+    check = (["%s/%s" % (MERGE_PACK[0], merge["pack_dir"].name), "%s/%s" % (MERGE_BENCH[0], merge["bench_dir"].name)],
+             "%s/%s" % (MERGE_PACK[0], merge["name"])) if merge else None
+    res = run_moves(root, moves, log, check)
+    after = r_files(root)
+    (out / ("listing-after-%s.txt" % stamp)).write_text("".join("%d;%s\n" % f for f in after))
+    diffs = compare_listings(before, after, res["ok"])
+    log("listing after: %d files; before/after: %s" % (len(after), "identical (counts, names and sizes, and each file at its expected path)" if not diffs else "%d DIFFERENCES" % len(diffs)))
+    for d in diffs[:50]:
+        log("  " + d)
+    log("done: %d moved, %d skipped, %s" % (len(res["ok"]), len(res["skipped"]), "FAILED, stopped" if res["failed"] else "no failure"))
+    (out / ("rename-log-%s.txt" % stamp)).write_text("\n".join(lines) + "\n")
+    return 1 if res["failed"] else 0

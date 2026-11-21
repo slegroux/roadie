@@ -295,10 +295,14 @@ def two_roots(tmp_path):
     return [study.Root("local", a), study.Root("pcloud", b), study.Root("gone", tmp_path / "not-mounted")]
 
 
-def test_parse_roots_reads_labels_paths_and_defaults(monkeypatch):
+def test_parse_roots_reads_labels_paths_and_defaults(monkeypatch, tmp_path):
     got = study.parse_roots(os.pathsep.join(["pc=/x/y", "/plain"]))
     assert [(r.label, str(r.path)) for r in got] == [("pc", "/x/y"), ("root2", "/plain")]
+    monkeypatch.setenv("HOME", str(tmp_path))                     # no local folder: the library alone
+    assert [r.label for r in study.parse_roots(None)] == ["pcloud"]
+    (tmp_path / "Projects" / "Music" / "slgMusProd" / "Studies").mkdir(parents=True)
     assert [r.label for r in study.parse_roots(None)] == ["local", "pcloud"]
+    assert [r.label for r in study.parse_roots("a=/x")] == ["a"]    # the env override is taken as given
 
 
 def test_a_title_in_two_roots_is_an_error_naming_both_unless_the_root_is_given(tmp_path):
@@ -621,3 +625,21 @@ def test_a_key_with_no_recorded_source_counts_as_tagged_and_bad_numbers_are_refu
         with pytest.raises(ValueError, match="confidence"):
             study.tag_study(folder, key="Bm", source="by ear", confidence=bad)
     assert "NaN" not in (folder / "study.json").read_text()
+
+
+def test_a_nested_benchmark_with_a_marker_is_neither_a_study_nor_a_second_stems_folder(tmp_path):
+    folder = make_study(tmp_path, "Rodriguez Jr.", "Synthwave #1 [124 Cm 5A]")
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "key": "C minor", "key_source": "online"}))
+    bench = folder / "benchmark"
+    (bench / "truth").mkdir(parents=True)
+    (bench / "truth" / "bass.flac").write_bytes(b"")
+    (bench / "bsroformer_stems").mkdir()                       # a *_stems folder one level down: not the study's
+    (bench / "bsroformer_stems" / "bass.flac").write_bytes(b"")
+    (bench / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "truth", "bpm": 124}))
+    (bench / "scores.json").write_text("{}")
+    assert [(r.artist, r.title, r.analysed) for r in study.find_studies(tmp_path)] == [("Rodriguez Jr.", "Synthwave #1", True)]
+    s = load_study("Synthwave #1", tmp_path)
+    assert next(iter(s.stems["bass"])).parent.name == "Synthwave #1 [124 Cm 5A]_124bpm_stems"
+    assert s.key == "C minor" and s.bpm == 124.0
+    extras = [str(p.relative_to(s.root)) for p in s.extras]
+    assert extras == ["benchmark/scores.json"]                   # the nested marker is not an extra either

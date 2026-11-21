@@ -28,7 +28,10 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from roadie_analysis import key as keymod
 
-DEFAULT_ROOTS = "local=~/Projects/Music/slgMusProd/Studies%spcloud=~/pCloud Drive/Music/Production/Roadie/Studies" % os.pathsep
+# The library is always a default root (when unmounted, `list` says so). The local working set is one only while
+# the folder exists: it can be removed once everything is in the library.
+LOCAL_ROOT = "local=~/Projects/Music/slgMusProd/Studies"
+LIBRARY_ROOT = "pcloud=~/pCloud Drive/Music/Production/Roadie/Studies"
 
 
 class Root(NamedTuple):
@@ -39,7 +42,10 @@ class Root(NamedTuple):
 def parse_roots(spec: str | None) -> list[Root]:
     """`label=path` entries separated by os.pathsep; an entry without a label is `root<N>`."""
     roots = []
-    for i, entry in enumerate(e for e in (spec or DEFAULT_ROOTS).split(os.pathsep) if e.strip()):
+    if not spec:
+        local = Path(LOCAL_ROOT.partition("=")[2]).expanduser()
+        spec = (LOCAL_ROOT + os.pathsep if local.is_dir() else "") + LIBRARY_ROOT
+    for i, entry in enumerate(e for e in spec.split(os.pathsep) if e.strip()):
         label, sep, path = entry.partition("=")
         if not sep or "/" in label or not label.strip():
             label, path = "root%d" % (i + 1), entry
@@ -461,7 +467,7 @@ def load_study(name_or_path: str, roots=None) -> Study:
     known = {stems_dir / "alignment.json", stems_dir / "sections.json", folder / "study.json"}
     profiles, extras = [], []
     for p in _json_files(folder):
-        if p in known:
+        if p in known or p.name == "study.json":      # a nested study.json marks a nested folder, it is no extra
             continue
         d = _read_json(p) if p.name.endswith(".profile.json") else None
         if isinstance(d, dict) and d.get("kind") == PROFILE_KIND:
@@ -791,7 +797,10 @@ def main(argv=None) -> int:
     fill.add_argument("--cache", help="keep detection results in this JSON file, so a rerun does not repeat them")
     ren = sub.add_parser("rename", help="dry run: the `<Title> [<bpm> <key> <camelot>]` folder names, old -> new (nothing is renamed)")
     ren.add_argument("--dry-run", action="store_true", help="make the table only")
-    ren.add_argument("--write", action="store_true", help="not built yet: refused")
+    ren.add_argument("--write", action="store_true", help="rename on the pCloud library by server-side moves (needs --out-dir)")
+    ren.add_argument("--undo", metavar="MAP.json", help="play a saved rename map backwards")
+    ren.add_argument("--out-dir", help="--write saves the map, the listings before and after and the log here")
+    ren.add_argument("--stamp", default="run", help="a date or name for the --write file names")
     ren.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     ren.add_argument("--out", help="write the table (markdown) to this file")
     args = ap.parse_args(argv)
