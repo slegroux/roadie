@@ -130,10 +130,10 @@ def test_write_records_through_tag_study_keeps_the_marker_and_saves_what_it_repl
     lk["decisions"]["Sylvain/Live"] = {"no_key": True, "key_note": "whole-set recording: no single key"}
     lk["rows"].append({"row": "x", "study": "Rodriguez/Bench", "bpm": 124, "key": "C minor", "camelot": "5A",
                        "url": "https://x/b", "use_published": True})
-    plan = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)
+    plan = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0, rewrite_all=True)
     before = snapshot(lib)
     lines = []
-    ok, failed = keyfill.write_records(plan, tmp_path / "backup", lines.append)
+    ok, failed = keyfill.write_records(plan, tmp_path / "backup", lines.append, rewrite_all=True)
     assert (ok, failed) == (7, 0) and lines[-1] == "done: 7 OK, 0 FAILED"
     after = {p for p, _ in snapshot(lib)} - {p for p, _ in before}
     assert {os.path.basename(p) for p in after} == {"study.json"} and len(after) == 6     # only new study.json files
@@ -150,7 +150,8 @@ def test_write_records_through_tag_study_keeps_the_marker_and_saves_what_it_repl
     lk["rows"][0]["bpm"] = 125
     (lib / "Einmusik" / "Flare" / "study.json").write_text(json.dumps({"kind": "study_marker", "key": "A minor", "key_source": "by ear"}))
     lines.clear()
-    ok, failed = keyfill.write_records(keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0), tmp_path / "backup", lines.append)
+    ok, failed = keyfill.write_records(keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0, rewrite_all=True),
+                                       tmp_path / "backup", lines.append, rewrite_all=True)
     assert failed == 1 and any(l.startswith("FAILED Einmusik/Flare") and "outranks" in l for l in lines) and ok == 6
 
 
@@ -166,3 +167,42 @@ def test_cli_write_is_for_one_non_local_root_with_a_backup_dir(tmp_path):
     r = subprocess.run(base + ["--root", "local"], capture_output=True, text=True, env=env)
     assert r.returncode == 1
     assert not (lib / "Einmusik" / "Flare" / "study.json").exists()
+
+
+def test_a_rerun_writes_only_studies_without_a_key_and_keeps_what_the_user_set(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    refs = library(lib)
+    lk = lookup()
+    lk["decisions"]["Sylvain/Live"] = {"no_key": True, "key_note": "whole-set recording: no single key"}
+    lk["rows"].append({"row": "x", "study": "Rodriguez/Bench", "bpm": 124, "key": "C minor", "camelot": "5A",
+                       "url": "https://x/b", "use_published": True})
+    plan = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)
+    assert all(e["write"] for e in plan["entries"])
+    lines = []
+    assert keyfill.write_records(plan, tmp_path / "backup", lines.append) == (7, 0)
+    again = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)       # nothing is left to do
+    assert not any(e["write"] for e in again["entries"]) and "**Records to write: 0**" in keyfill.render(again, "lib")
+    lines.clear()
+    assert keyfill.write_records(again, tmp_path / "backup", lines.append) == (0, 0)
+    assert all(l.startswith("SKIPPED") for l in lines[:-1])
+    # the user's own bpm and note survive a run on a study that still has no key; --all rewrites the study
+    folder = lib / "Sylvain" / "Live"
+    study.tag_study(folder, bpm=99)
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "listed_bpm": 99}))
+    plan = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)
+    assert [e["study"] for e in plan["entries"] if e["write"]] == ["Sylvain/Live"]
+    keyfill.write_records(plan, tmp_path / "backup", lines.append)
+    assert json.loads((folder / "study.json").read_text()) == {"kind": "study_marker", "listed_bpm": 99, "key_note": "whole-set recording: no single key"}
+    assert sorted(p.name for p in (tmp_path / "backup").iterdir()) == ["Sylvain__Live.study.json"]
+    flare = lib / "Einmusik" / "Flare" / "study.json"                           # a tempo the user set, no key yet
+    flare.write_text(json.dumps({"kind": "study_marker", "listed_bpm": 99}))
+    keyfill.write_records(keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0), tmp_path / "backup", lines.append)
+    assert (json.loads(flare.read_text())["listed_bpm"], json.loads(flare.read_text())["key"]) == (99, "C minor")
+    mine = lib / "Vitalic" / "Alone" / "study.json"
+    mine.write_text(json.dumps({"kind": "study_marker", "key": "E minor", "key_source": "tagged", "key_note": "mine"}))
+    for _ in range(2):                                                          # --all twice: the same key keeps its note
+        keyfill.write_records(keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0, rewrite_all=True),
+                              tmp_path / "backup", lines.append, rewrite_all=True)
+    assert json.loads(mine.read_text())["key_note"] == "mine"
+    assert sorted(p.name for p in (tmp_path / "backup").glob("Vitalic__Alone*")) == ["Vitalic__Alone.study.json", "Vitalic__Alone.study.json.1"]

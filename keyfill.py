@@ -115,8 +115,28 @@ def decide(name: str, measured, row: dict | None, decision: dict | None, det: di
     return out
 
 
+def existing_marker(folder: Path) -> dict | None:
+    """The study.json marker on record for a study, read through rclone for a pCloud one (never the mount)."""
+    path = folder / "study.json"
+    remote = keymod.pcloud_remote(path)
+    text = study._remote_read(remote) if remote else (path.read_text() if path.exists() else None)
+    return study._parse_marker(text) if text else None
+
+
+def needs_write(entry: dict, existing: dict | None, rewrite_all: bool) -> bool:
+    """A study is written when its record has no key yet (or, for a whole set, not this note yet); a study that
+    has a key is left alone unless `rewrite_all`."""
+    if rewrite_all:
+        return True
+    if existing and existing.get("key"):
+        return False
+    if entry["key"] is None and entry["listed_bpm"] is None:
+        return (existing or {}).get("key_note") != entry["key_note"]
+    return True
+
+
 def run_plan(lookup: dict, refs, detector=keymod.key_of, cache: dict | None = None, save_cache=None,
-             min_free_gb: float = 3.0) -> dict:
+             min_free_gb: float = 3.0, rewrite_all: bool = False) -> dict:
     """Entries for every study in `refs` (analysed StudyRefs), plus the unmatched rows and decisions."""
     rows = {study._norm(r["study"]): r for r in lookup["rows"]}
     decisions = {study._norm(k): v for k, v in lookup.get("decisions", {}).items()}
@@ -138,6 +158,8 @@ def run_plan(lookup: dict, refs, detector=keymod.key_of, cache: dict | None = No
             measured = None
         e = decide(name, measured, rows.get(k), decisions.get(k), cache[name])
         e["path"] = str(ref.root)
+        e["existing"] = existing_marker(ref.root)
+        e["write"] = needs_write(e, e["existing"], rewrite_all)
         e["folder_name"] = folder_name(ref.title, name_bpm(measured, e["listed_bpm"]), e["key"], e["source"] == "detected")
         if e["folder_name"] is None:
             e["notes"].append(NOTES_NO_KEY)
@@ -157,6 +179,8 @@ def render(plan: dict, root_label: str) -> str:
          "key). The key note carries the old tag, or the detection that disagreed.\n",
          "**Counts:** online %d, tagged %d, detected %d, no key %d; disagreements %d.\n" % (
              count("online"), count("tagged"), count("detected"), sum(1 for e in es if e["source"] is None), len(dis)),
+         "**Records to write: %d** (a study whose record already has a key is left alone unless `--all`).\n" % sum(
+             1 for e in es if e["write"]),
          "| Study | Measured bpm | Listed bpm | Key to write | Camelot | Source | Detected (confidence) | Verdict | Folder name | Notes |",
          "|---|---|---|---|---|---|---|---|---|---|"]
     for e in es:
@@ -179,13 +203,26 @@ def render(plan: dict, root_label: str) -> str:
     return "\n".join(L) + "\n"
 
 
-def write_records(plan: dict, backup_dir: Path, log=print) -> tuple[int, int]:
-    """Record each entry in its study's `study.json` through `study.tag_study` (rclone read, write, read-back for
-    a pCloud study), one study at a time, saving the study.json it replaces first. One log line per study.
-    A study that fails is logged and the run goes on. Returns (ok, failed)."""
+def _free_name(directory: Path, name: str) -> Path:
+    """`name`, or `name.1`, `name.2`...: a backup that exists is never replaced."""
+    path, n = directory / name, 0
+    while path.exists():
+        n += 1
+        path = directory / ("%s.%d" % (name, n))
+    return path
+
+
+def write_records(plan: dict, backup_dir: Path, log=print, rewrite_all: bool = False) -> tuple[int, int]:
+    """Record each entry marked `write` in its study's `study.json` through `study.tag_study` (rclone read, write,
+    read-back for a pCloud study), one study at a time, saving the study.json it replaces first (under a free
+    name). Without `rewrite_all` an existing `listed_bpm` is kept. One log line per study. A study that fails is
+    logged and the run goes on. Returns (ok, failed)."""
     ok = failed = 0
     backup_dir.mkdir(parents=True, exist_ok=True)
     for e in plan["entries"]:
+        if not e["write"]:
+            log("SKIPPED %s: nothing to record (its record has a key; --all rewrites)" % e["study"])
+            continue
         folder = Path(e["path"])
         try:
             if e["key"] is None and e["listed_bpm"] is None and not e["key_note"]:
@@ -194,12 +231,14 @@ def write_records(plan: dict, backup_dir: Path, log=print) -> tuple[int, int]:
             remote = keymod.pcloud_remote(path)
             old = study._remote_read(remote) if remote else (path.read_text() if path.exists() else None)
             if old is not None:
-                (backup_dir / ("%s__%s.study.json" % (folder.parent.name, folder.name))).write_text(old)
-            study.tag_study(folder, key=e["key"], bpm=e["listed_bpm"], source=e["source"] or "tagged",
-                            confidence=e["key_confidence"], url=e["url"], bpm_url=e["bpm_url"], note=e["key_note"])
+                _free_name(backup_dir, "%s__%s.study.json" % (folder.parent.name, folder.name)).write_text(old)
+            kept_bpm = not rewrite_all and (e["existing"] or {}).get("listed_bpm") is not None
+            study.tag_study(folder, key=e["key"], bpm=None if kept_bpm else e["listed_bpm"], source=e["source"] or "tagged",
+                            confidence=e["key_confidence"], url=e["url"], bpm_url=None if kept_bpm else e["bpm_url"],
+                            note=e["key_note"])
             log("OK %s: %s%s%s%s" % (
                 e["study"], "key %s (%s)" % (e["key"], e["source"]) if e["key"] else "no key",
-                ", listed bpm %g" % e["listed_bpm"] if e["listed_bpm"] is not None else "",
+                ", listed bpm %g" % e["listed_bpm"] if e["listed_bpm"] is not None and not kept_bpm else "",
                 ", note: %s" % e["key_note"] if e["key_note"] else "",
                 " (replaced a study.json: saved)" if old is not None else ""))
             ok += 1
@@ -232,7 +271,7 @@ def main(args) -> int:
         cache = json.loads(Path(args.cache).read_text()) if args.cache and Path(args.cache).exists() else {}
         refs = [r for r in study.find_studies(roots) if r.analysed]
         save = (lambda c: Path(args.cache).write_text(json.dumps(c, indent=1))) if args.cache else None
-        plan = run_plan(lookup, refs, cache=cache, save_cache=save)
+        plan = run_plan(lookup, refs, cache=cache, save_cache=save, rewrite_all=args.all)
     except (ValueError, OSError, RuntimeError, KeyError) as e:
         print("study: fill-keys: %s" % e, file=sys.stderr)
         return 1
@@ -245,7 +284,7 @@ def main(args) -> int:
         def log(line):
             lines.append(line)
             print(line, flush=True)
-        _, failed = write_records(plan, Path(args.backup_dir), log)
+        _, failed = write_records(plan, Path(args.backup_dir), log, args.all)
         if args.log:
             Path(args.log).write_text("\n".join(lines) + "\n")
         return 1 if failed else 0

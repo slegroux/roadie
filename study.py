@@ -306,10 +306,17 @@ def _resolve(name_or_path: str, roots: list[Root]) -> tuple[Path, str]:
     return hits[0].root, hits[0].source
 
 
+def _nested(dirpath, name: str) -> bool:
+    """Is this sub-folder of a walk a nested study, one with its own study.json marker? It is read by its own
+    path, and is no part of the study around it."""
+    sub = Path(dirpath) / name
+    return (sub / "study.json").is_file() and _marker(sub) is not None
+
+
 def _json_files(folder: Path) -> list[Path]:
     out = []
     for dirpath, dirs, files in os.walk(folder):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not _nested(dirpath, d))
         out += [Path(dirpath) / f for f in sorted(files) if f.endswith(".json") and not f.startswith(".")]
     return out
 
@@ -318,7 +325,8 @@ def _check(folder: Path, prof: dict) -> tuple[str, str]:
     """(state, one line) for a profile's inputs against the disk. State is fresh, stale,
     ambiguous or unchecked; a wrong shape raises KeyError/TypeError/AttributeError."""
     by_name = {}
-    for dirpath, _dirs, files in os.walk(folder):
+    for dirpath, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not _nested(dirpath, d)]
         for f in files:
             by_name.setdefault(f, []).append(os.path.join(dirpath, f))
     inputs = list(prof["inputs"]["mix"]) + [i for items in prof["inputs"]["stems"].values() for i in items]
@@ -739,12 +747,20 @@ def tag_study(folder: Path, key: str | None = None, bpm: float | None = None, so
         if old["key"] and KEY_SOURCES.index(source) < KEY_SOURCES.index(old_source):
             raise ValueError("%s already has a key from source %r (%s), which outranks %r: not changed"
                              % (folder.name, old_source, old["key"], source))
-        for stale in ("key_confidence", "key_url", "key_note"):     # they described the old key
-            marker.pop(stale, None)
+        try:
+            same = bool(old["key"]) and keymod.parse_key(old["key"]) == (pc, mode) and old_source == source
+        except ValueError:
+            same = False
+        if not same:                                                # the old confidence, url and note described the old key
+            for stale in ("key_confidence", "key_url", "key_note"):
+                marker.pop(stale, None)
         marker.update(key=keymod.key_name(pc, mode), camelot=keymod.camelot(pc, mode), key_source=source)
         for name, value in (("key_confidence", confidence), ("key_url", url), ("key_note", note)):
             if value is not None:
-                marker[name] = value
+                if same:
+                    marker.setdefault(name, value)      # the same key again keeps what is already recorded
+                else:
+                    marker[name] = value
     text = json.dumps(marker, indent=2, ensure_ascii=False) + "\n"
     if remote:
         with tempfile.TemporaryDirectory(prefix="roadie-tag-") as tmp:
@@ -790,6 +806,7 @@ def main(argv=None) -> int:
     fill.add_argument("--from", dest="lookup", required=True, help="the published-lookup JSON")
     fill.add_argument("--dry-run", action="store_true", help="make the table only")
     fill.add_argument("--write", action="store_true", help="record the keys (needs --backup-dir; not for the local root)")
+    fill.add_argument("--all", action="store_true", help="--write: rewrite studies that already have a key too")
     fill.add_argument("--backup-dir", help="where --write saves each study.json it replaces")
     fill.add_argument("--log", help="write the --write log to this file")
     fill.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
@@ -800,7 +817,7 @@ def main(argv=None) -> int:
     ren.add_argument("--write", action="store_true", help="rename on the pCloud library by server-side moves (needs --out-dir)")
     ren.add_argument("--undo", metavar="MAP.json", help="play a saved rename map backwards")
     ren.add_argument("--out-dir", help="--write saves the map, the listings before and after and the log here")
-    ren.add_argument("--stamp", default="run", help="a date or name for the --write file names")
+    ren.add_argument("--stamp", help="a name for the --write files (default: the date and time); they are created exclusively")
     ren.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     ren.add_argument("--out", help="write the table (markdown) to this file")
     args = ap.parse_args(argv)

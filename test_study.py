@@ -641,5 +641,23 @@ def test_a_nested_benchmark_with_a_marker_is_neither_a_study_nor_a_second_stems_
     s = load_study("Synthwave #1", tmp_path)
     assert next(iter(s.stems["bass"])).parent.name == "Synthwave #1 [124 Cm 5A]_124bpm_stems"
     assert s.key == "C minor" and s.bpm == 124.0
-    extras = [str(p.relative_to(s.root)) for p in s.extras]
-    assert extras == ["benchmark/scores.json"]                   # the nested marker is not an extra either
+    assert s.extras == []                                        # the nested study's files are not this study's extras
+    (bench / "analysis").mkdir()                                 # a profile cut on the benchmark's own audio and sections
+    (bench / "analysis" / "mix.profile.json").write_text(json.dumps(
+        {"kind": "reference_profile", "version": 6, "inputs": {"mix": [], "stems": {}}, "sections": [{"name": "x"}]}))
+    s = load_study("Synthwave #1", tmp_path)
+    assert s.layers["mix"].source is None and s.layers["mix"].missing and s.extras == []
+    assert study.list_to_json(tmp_path)["studies"][0]["layers"]["mix"] is False          # list and show agree
+    nested = load_study(str(bench), tmp_path)                                             # still readable by its own path
+    assert nested.layers["mix"].source.name == "mix.profile.json" and list(nested.stems) == ["bass"]
+
+
+def test_tagging_the_same_key_again_keeps_its_note_url_and_confidence(tmp_path):
+    folder = tag_tree(tmp_path)
+    study.tag_study(folder, key="Am", source="online", url="https://x/y", note="old tag: Em", bpm=124)
+    study.tag_study(folder, key="A minor", source="online", url="https://x/other", note="another", confidence=0.3)
+    kept = json.loads((folder / "study.json").read_text())
+    assert (kept["key_url"], kept["key_note"], kept["listed_bpm"]) == ("https://x/y", "old tag: Em", 124)
+    assert kept["key_confidence"] == 0.3                        # a field that was not there yet is filled in
+    study.tag_study(folder, key="Bm", source="online", url="https://x/new")                  # another key: the old note goes
+    assert "key_note" not in json.loads((folder / "study.json").read_text())

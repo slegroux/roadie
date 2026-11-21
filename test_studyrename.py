@@ -47,7 +47,6 @@ def test_the_dry_run_names_every_study_from_its_record_and_changes_nothing(tmp_p
     assert any(l.startswith("analysis/x.profile.json: 5 recorded input paths") for l in flare)
     assert any(l.startswith("bench/x.json") for l in flare)
     assert plan["collisions"] == []                                           # "Back [125 Cm 5A]" is not "Back [124 G 9B]"
-    assert plan["merge"] is None
     assert snapshot(tmp_path) == before
 
 
@@ -66,29 +65,6 @@ def test_collisions_are_listed_and_cli_refuses_write_and_a_missing_dry_run(tmp_p
     r = run("--dry-run", "--out", str(tmp_path / "t.md"))
     assert r.returncode == 0 and "| A | Flare | Flare [124 Am 8A]" in (tmp_path / "t.md").read_text()
     assert run("--dry-run", "--out", str(lib / "t.md")).returncode == 1
-    assert snapshot(lib) == before
-
-
-def test_the_synthwave_merge_is_proposed_with_exact_files_and_not_done(tmp_path):
-    lib = tmp_path / "lib"
-    pack = make_study(lib, "Rodriguez Jr.", "Synthwave #1 (remix pack)")
-    (pack / "KICK.aif").write_bytes(b"")
-    (pack / "KICK.aif.asd").write_bytes(b"")
-    (pack / "Synthwave 1 multitrack.als").write_bytes(b"")
-    (pack / "mix_124bpm.wav").write_bytes(b"")
-    bench = make_study(lib, "Rodriguez Jr.", "Synthwave 1 benchmark")
-    (bench / "truth").mkdir()
-    study.tag_study(pack, key="Cm", bpm=124, source="online")
-    study.tag_study(bench, key="Cm", bpm=124, source="online")
-    before = snapshot(lib)
-    roots = [study.Root("pcloud", lib)]
-    plan = studyrename.plan_rename([r for r in study.find_studies(roots) if r.analysed], roots, tmp_path / "none")
-    m = plan["merge"]
-    assert m["name"] == "Synthwave #1 [124 Cm 5A]"
-    assert m["stay"] == ["Synthwave #1 (remix pack)_124bpm_stems", "mix_124bpm.wav", "study.json"]
-    assert m["into_pack"] == ["KICK.aif", "KICK.aif.asd", "Synthwave 1 multitrack.als"]
-    text = studyrename.render(plan, "pcloud")
-    assert "Rodriguez Jr./Synthwave #1 [124 Cm 5A]/`" in text and "benchmark/study.json" in text and "a `*_stems` folder" in text
     assert snapshot(lib) == before
 
 
@@ -117,7 +93,7 @@ def plan_for(lib):
 def test_renames_move_server_side_with_checks_and_the_undo_restores_the_tree(tmp_path):
     lib = write_tree(tmp_path)
     before = files(lib)
-    moves = studyrename.build_moves(plan_for(lib), str(lib))
+    moves = studyrename.build_moves(plan_for(lib))
     assert [(m["old"], m["new"]) for m in moves] == [("Einmusik/Flare", "Einmusik/Flare [124 Am 8A]"),
                                                      ("Einmusik/Nosara", "Einmusik/Nosara [124 C? 8B?]")]
     lines = []
@@ -140,7 +116,7 @@ def test_an_existing_target_is_skipped_never_merged_and_a_failed_check_stops_the
     (lib / "Einmusik" / "Flare [124 Am 8A]").mkdir()
     (lib / "Einmusik" / "Flare [124 Am 8A]" / "mine.txt").write_text("keep")
     before = files(lib)
-    moves = studyrename.build_moves(plan_for(lib), str(lib))
+    moves = studyrename.build_moves(plan_for(lib))
     lines = []
     res = studyrename.run_moves(str(lib), moves, lines.append)
     assert [m["old"] for m in res["skipped"]] == ["Einmusik/Flare"] and [m["old"] for m in res["ok"]] == ["Einmusik/Nosara"]
@@ -153,47 +129,76 @@ def test_an_existing_target_is_skipped_never_merged_and_a_failed_check_stops_the
     assert (lib / "Einmusik" / "Flare").exists() and not (lib / "Einmusik" / "Elsewhere").exists()
 
 
-def synthwave_tree(tmp_path):
-    lib = tmp_path / "lib"
-    pack = make_study(lib, "Rodriguez Jr.", "Synthwave #1 (remix pack)")
-    for n in ("KICK.aif", "KICK.aif.asd", "Synthwave 1 multitrack.als", "mix_124bpm.wav"):
-        (pack / n).write_bytes(b"x" * 7)
-    (pack / "Backup").mkdir()
-    (pack / "Backup" / "old.als").write_text("b")
-    bench = make_study(lib, "Rodriguez Jr.", "Synthwave 1 benchmark")
-    (bench / "truth").mkdir()
-    (bench / "truth" / "bass.flac").write_bytes(b"t")
-    (bench / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "truth", "bpm": 124}))
-    study.tag_study(pack, key="Cm", bpm=124, source="online", url="https://x/s")
-    return lib
+import types
+
+import pytest
 
 
-def test_the_synthwave_merge_runs_in_three_checked_steps_and_the_undo_reverses_it(tmp_path):
-    lib = synthwave_tree(tmp_path)
-    before = files(lib)
-    plan = plan_for(lib)
-    moves = studyrename.build_moves(plan, str(lib))
-    merged = "Rodriguez Jr./Synthwave #1 [124 Cm 5A]"
-    assert moves[0] == {"old": "Rodriguez Jr./Synthwave #1 (remix pack)", "new": merged, "group": "synthwave"}
-    assert [m["old"].split("/")[-1] for m in moves[1:-1]] == ["Backup", "KICK.aif", "KICK.aif.asd", "Synthwave 1 multitrack.als"]
-    assert moves[-1] == {"old": "Rodriguez Jr./Synthwave 1 benchmark", "new": merged + "/benchmark", "group": "synthwave"}
-    check = (["Rodriguez Jr./Synthwave #1 (remix pack)", "Rodriguez Jr./Synthwave 1 benchmark"], merged)
-    lines = []
-    res = studyrename.run_moves(str(lib), moves, lines.append, check)
-    assert res["failed"] is None and lines[-1].startswith("OK merge total: %d files" % len(before))
-    top = lib / "Rodriguez Jr." / "Synthwave #1 [124 Cm 5A]"
-    assert sorted(p.name for p in (lib / "Rodriguez Jr.").iterdir()) == ["Synthwave #1 [124 Cm 5A]"]
-    assert sorted(p.name for p in top.iterdir()) == ["Synthwave #1 (remix pack)_124bpm_stems", "benchmark", "mix_124bpm.wav", "pack", "study.json"]
-    assert (top / "pack" / "KICK.aif").exists() and (top / "pack" / "Backup" / "old.als").exists()
-    assert json.loads((top / "benchmark" / "study.json").read_text())["stems"] == "truth"
-    assert json.loads((top / "study.json").read_text())["key"] == "C minor"
-    assert [r.title for r in study.find_studies(lib)] == ["Synthwave #1"]
-    assert load_study("Synthwave #1", lib).key == "C minor"
-    assert studyrename.compare_listings([(s, r) for r, s in before], studyrename.r_files(str(lib)), res["ok"]) == []
-    undo = studyrename.undo_moves({"root": str(lib), "moves": res["ok"]}, lines.append)
-    assert undo["failed"] is None and files(lib) == before
-    # a merged folder that already exists stops the merge before anything moves
-    (lib / "Rodriguez Jr." / "Synthwave #1 [124 Cm 5A]").mkdir()
-    again = studyrename.run_moves(str(lib), moves, lines.append, check)
-    assert again["ok"] == [] and len(again["skipped"]) == len(moves)
-    assert (lib / "Rodriguez Jr." / "Synthwave #1 (remix pack)" / "KICK.aif").exists()
+def write_args(lib, out, stamp=None):
+    return types.SimpleNamespace(root="pcloud", out_dir=str(out), stamp=stamp)
+
+
+def as_library(monkeypatch, lib):
+    """Treat the temp folder as the pCloud library: rclone takes the local path as its remote."""
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("pcloud", lib)])
+    monkeypatch.setattr(studyrename.keymod, "pcloud_remote", lambda p: str(p))
+
+
+def test_a_second_run_never_replaces_the_first_runs_map_and_the_log_is_written_as_it_goes(tmp_path, monkeypatch):
+    lib = write_tree(tmp_path)
+    as_library(monkeypatch, lib)
+    out = tmp_path / "out"
+    assert studyrename.main_write(write_args(lib, out, "first")) == 0
+    first = (out / "rename-map-first.json").read_text()
+    assert len(json.loads(first)["moves"]) == 2 and "OK Einmusik/Flare" in (out / "rename-log-first.txt").read_text()
+    assert studyrename.main_write(write_args(lib, out, "first")) == 1        # same stamp: refused before anything moves
+    assert (out / "rename-map-first.json").read_text() == first
+    assert studyrename.main_write(write_args(lib, out)) == 0                 # the default stamp is a timestamp: a new set of files
+    stamped = sorted(p.name for p in out.glob("rename-map-*.json") if p.name != "rename-map-first.json")
+    assert len(stamped) == 1 and stamped[0] != "rename-map-run.json" and json.loads((out / stamped[0]).read_text())["moves"] == []
+    # a run that dies part-way still has its log
+    (lib / "Einmusik" / "Nosara [124 C? 8B?]").rename(lib / "Einmusik" / "Nosara")
+    calls = []
+    real = studyrename.r_files
+
+    def dies(path):
+        calls.append(path)
+        if len(calls) == 2:
+            raise KeyboardInterrupt()
+        return real(path)
+
+    monkeypatch.setattr(studyrename, "r_files", dies)
+    with pytest.raises(KeyboardInterrupt):
+        studyrename.main_write(write_args(lib, out, "dies"))
+    assert (out / "rename-log-dies.txt").read_text().startswith("map: 1 moves saved to rename-map-dies.json")
+
+
+def test_write_reads_the_records_through_rclone_and_refuses_collisions(tmp_path, monkeypatch):
+    lib = write_tree(tmp_path)
+    as_library(monkeypatch, lib)
+    monkeypatch.setattr(study, "_marker", lambda folder: None)               # the mount serves a stale view: no records
+    refs = [r for r in study.find_studies([study.Root("pcloud", lib)]) if r.analysed]
+    roots = [study.Root("pcloud", lib)]
+    stale = {e["old"]: e["new"] for e in studyrename.plan_rename(refs, roots, tmp_path / "none")["entries"]}
+    assert stale["Flare"] == "Flare [124]"
+    fresh = {e["old"]: e["new"] for e in studyrename.plan_rename(refs, roots, tmp_path / "none", remote_records=True)["entries"]}
+    assert fresh["Flare"] == "Flare [124 Am 8A]" and fresh["Nosara"] == "Nosara [124 C? 8B?]"
+    (lib / "Einmusik" / "Flare [124 Am 8A]").mkdir()
+    out = tmp_path / "out"
+    assert studyrename.main_write(write_args(lib, out, "c")) == 1
+    assert not out.exists() or not list(out.iterdir())                       # refused before any file or move
+    assert (lib / "Einmusik" / "Flare").exists()
+
+
+def test_a_target_differing_only_by_case_or_unicode_form_counts_as_existing_and_no_name_is_refused_silently(tmp_path):
+    import unicodedata
+    lib = write_tree(tmp_path)
+    (lib / "Einmusik" / "FLARE [124 AM 8A]").mkdir()
+    (lib / "Einmusik" / unicodedata.normalize("NFD", "Café")).mkdir()
+    assert studyrename.r_exists(str(lib / "Einmusik" / "flare [124 am 8a]"), fold=True)
+    assert not studyrename.r_exists(str(lib / "Einmusik" / "flare [124 am 8a]"))
+    assert studyrename.r_exists(str(lib / "Einmusik" / unicodedata.normalize("NFC", "Café")), fold=True)
+    res = studyrename.run_moves(str(lib), studyrename.build_moves(plan_for(lib)), lambda l: None)
+    assert [m["old"] for m in res["skipped"]] == ["Einmusik/Flare"] and (lib / "Einmusik" / "Flare" / "analysis" / "x.txt").exists()
+    with pytest.raises(ValueError, match="has no bpm"):
+        studyrename.build_moves({"entries": [{"artist": "A", "old": "X", "new": None}]})
