@@ -129,3 +129,17 @@ def test_the_study_reader_shows_the_drums_layer_and_flags_it(made, capsys):
     assert d / "drums.json" not in s.extras
     study._show(s)
     assert "x... x... x... x..." in capsys.readouterr().out
+
+
+def test_a_section_where_the_stem_is_near_silent_has_no_hits_it_is_judged_against_the_whole_stem(tmp_path):
+    """A kick in bars 0-7, then only a noise bed 50 dB under it: against its own loudest moment the bed would be hits."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    x = stem([(at(i * 4), kick_hit()) for i in range(32)], 16)
+    bed = np.random.default_rng(3).standard_normal(len(x)) * 10 ** (-50 / 20) * 0.3
+    x[int((T0 + 8 * BAR_S) * SR):] += bed[int((T0 + 8 * BAR_S) * SR):]
+    sf.write(str(d / "drums_kick.flac"), x.astype(np.float32), SR)
+    secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    kick = rec["stems"]["kick"]
+    assert kick["hits"] == 32 and [v["section"] for r in kick["roles"] for v in r["per_section"]] == ["A"]

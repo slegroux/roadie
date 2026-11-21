@@ -568,14 +568,14 @@ def _assign_overlapped(x: np.ndarray, sr: int, hits: list, found: list, threshol
 def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: int | None = None,
                beats_per_bar: int = 4, threshold: float = THRESHOLD, max_cut_s: float = MAX_CUT_S,
                sample: int = SAMPLE_HITS, max_groups: int = MAX_GROUPS, grid_onsets: bool = False,
-               stability_runs: int = STABILITY_RUNS) -> dict:
+               stability_runs: int = STABILITY_RUNS, ref_power: float | None = None) -> dict:
     """Every hit in one drum stem, with its place on the grid, grouped by how alike the hits sound (see the module
     docstring for the choices). `stem` is a path or an array [n] / [n, channels] with its rate in `sr`; bar 0 starts
     at `t0` seconds, 16ths are a quarter of a beat of `tempo` (4 * beats_per_bar to a bar); `sections` are
     {name, start_bar, bars} (as reference_profile takes them). `grid_onsets` (off by default) also looks for hits at
     16th lines that `oneshot._segments` cannot see, and is meant for hat-like stems (see `hat_like`): on a kick, snare or
     toms stem it reports bleed and tails as hits (118-355 of them on the Flare stems). `stability_runs` is the number of
-    regroupings with a shifted sample that `stability` is measured against (0: not measured).
+    regroupings with a shifted sample that `stability` is measured against (0: not measured). `ref_power` is for a slice of a longer stem: the peak power of the whole stem's envelope (`oneshot.envelope_peak`), so that hits are found against the stem's loudest 5 ms and not the slice's own (a slice with nothing within 40 dB of it has no hits).
 
     Returns {"sample_rate", "tempo", "t0", "threshold", "linkage": "average", "max_cut_s", "grid_onsets", "hat_like"
     (the share of the stem's energy above 4 kHz), "grid_hits" (hits found by `grid_onsets`), "hits", "groups",
@@ -657,7 +657,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
         out["notes"].append("the stem is silent: no hits")
         return out
     out["hat_like"] = round(_hat_like(x, sr), 4)
-    segs = oneshot._segments(x, sr)
+    segs = oneshot._segments(x, sr, ref_power)
     onsets = [(oneshot._hit_onset(x[s:e], sr) if s == 0 else _onset_after_tail(x, sr, s), "segment") for s, e in segs]
     step_s, steps = 60.0 / tempo / 4.0, 4 * beats_per_bar
     if grid_onsets:

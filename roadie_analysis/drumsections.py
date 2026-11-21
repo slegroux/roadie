@@ -10,6 +10,8 @@ Choices:
 
 - A section shorter than MIN_SECTION_BARS joins the next one (the last joins the one before): too few hits to group.
   The first section starts at bar 0 and the last runs to the end of the file, so no hit is outside every section.
+- A section is judged against the whole stem's loudest 5 ms (`stem_peak`, passed to `hit_groups` as `ref_power`), with the
+  core's dB figures unchanged: a section where the stem is near silent has no hits, as in the whole-track run.
 - A section's slice runs from PRE_S before its first bar line to POST_S after its last, so a hit on the line has a lead
   and a hit just before the line is whole. A hit belongs to the section whose bar lines enclose it after moving them OWN_S
   (the grid tolerance, 20 ms) earlier: a hit 8 ms early on the first beat of a section is that section's. Hits in the
@@ -60,7 +62,14 @@ def plan_sections(sections: list | None) -> list[dict]:
     return secs
 
 
-def section_job(path, tempo: float, t0: float, sec: dict) -> dict:
+def stem_peak(path) -> float:
+    """The peak power of the whole stem's 5 ms envelope (what hit detection measures levels against), so a section is judged
+    against the stem's loudest moment and not its own."""
+    x, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    return oneshot.envelope_peak(oneshot._undc(np.asarray(x, dtype=np.float64), sr), sr)
+
+
+def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | None = None) -> dict:
     """hit_groups on one section of one stem file. Returns {"res", "offset_s" (where the slice starts in the file), "sr",
     "reps" (group id -> the audio that stands for the group when sections are matched)}, or {"res": None} when the
     section holds no audio."""
@@ -72,7 +81,7 @@ def section_job(path, tempo: float, t0: float, sec: dict) -> dict:
     if b <= a:
         return {"res": None, "sr": sr}
     x, _ = sf.read(str(path), start=a, stop=b, dtype="float32", always_2d=True)
-    res = drumroles.hit_groups(x, tempo, start_t - a / sr, None, sr=sr)
+    res = drumroles.hit_groups(x, tempo, start_t - a / sr, None, sr=sr, ref_power=ref_power)
     xu = oneshot._undc(np.asarray(x, dtype=np.float64), sr)
     reps = {}
     for g in res["groups"]:

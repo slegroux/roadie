@@ -141,8 +141,11 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     stages = {}
     try:
         t = time.monotonic()
+        peaks = dict(zip(stems, _run(drumsections.stem_peak, [(f,) for f in stems.values()], pool, deadline)))
+        stages["levels"] = time.monotonic() - t
+        t = time.monotonic()
         keys = [(k, si) for k in stems for si in range(len(plan))]
-        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si]) for k, si in keys], pool, deadline)
+        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k]) for k, si in keys], pool, deadline)
         stages["sections"] = time.monotonic() - t
         t = time.monotonic()
         merged = _run(drumsections.merge_stem, [([outs[i] for i, (k2, _) in enumerate(keys) if k2 == k], plan, tempo, t0) for k in stems],

@@ -27,7 +27,7 @@ a process pool (`--jobs N`, default the cores).
 1. The sections are `sections.json`'s. One shorter than 8 bars joins the next (the last joins the one before): too few
    hits to group. No `sections.json`: the whole track is one section. The first section starts at bar 0 and the last runs
    to the end of the file.
-2. Each section's slice runs 40 ms before its first bar line to 60 ms after its last. A hit belongs to the section whose
+2. Each stem's loudest 5 ms is measured once over the whole file (`ref_power`), so a section is judged against that and not against its own loudest moment. Each section's slice runs 40 ms before its first bar line to 60 ms after its last. A hit belongs to the section whose
    bar lines, moved 20 ms earlier, enclose it, so a hit 8 ms early on the first beat is that section's and none is counted
    twice.
 3. The groups of all the sections are matched by sound: each group's clean hit (else the cut of its member nearest the
@@ -88,9 +88,7 @@ rate); no clean hit, no file. A run removes the clips the folder's earlier `drum
 `roadie study show` prints each stem's roles with their pattern line when `drums.json` exists, and `study list` flags the
 `drums` layer.
 
-**Known limits.** A section is analysed relative to its own loudest moment, so a section where a stem is nearly silent
-reports its background as hits, and the matching can file them under a real role by sound (Glacier's kick stem in
-Breakdown 2: 10 hits between -20 and -52 dB against the kick's -3 dB). Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
+**Known limits.** Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
 section are one role, and one sound that changes between sections (a filter sweep, a different sample) is two. A section
 is grouped on what is in it: a hit more than 40 dB under the section's loudest moment is not found, and the hits at the
 two ends of a slice have less context than in the whole stem. Hat stems are judged without `grid_onsets`: a hat under an

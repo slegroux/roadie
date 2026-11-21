@@ -424,16 +424,19 @@ def _ms(samples: float, sr: int) -> float:
     return round(1000.0 * samples / sr, 1)
 
 
-def _segments(x: np.ndarray, sr: int) -> list[tuple[int, int]]:
+def _segments(x: np.ndarray, sr: int, ref_power: float | None = None) -> list[tuple[int, int]]:
     """[start, end) sample ranges of the hits in a take. A new hit is a rise of
     RISE_DB that comes within FAST_DB of its peak inside RISE_S and tops the
     CEILING_S before it by JUMP_DB, at least MIN_GAP_S after the last one, so a
     tremolo, a tom's beating or a slow swell does not split a hit. A hit that
     starts before the last one has fallen 15 dB (a fast roll) is not split
-    off either."""
+    off either. Levels are against the take's loudest 5 ms, or against `ref_power` (that envelope's peak power, from
+    `envelope_peak`) when the take is a slice of a longer one: then a slice with nothing within ONSET_DB of it has no hits."""
     hop = max(1, int(round(0.001 * sr)))                     # the envelope on a 1 ms grid
     env = _boxcar((x ** 2).mean(axis=1), max(1, int(0.005 * sr)))[::hop]
-    e = 10.0 * np.log10(env / env.max() + 1e-30)
+    if ref_power is not None and env.max() < ref_power * 10 ** (-ONSET_DB / 10):
+        return []
+    e = 10.0 * np.log10(env / (env.max() if ref_power is None else max(env.max(), ref_power)) + 1e-30)
     rise, gap, ahead, ceil = (int(round(v * 1000)) for v in (RISE_S, MIN_GAP_S, PEAK_S, CEILING_S))
     first = int(np.argmax(e >= -ONSET_DB))
     starts, last = [0], first
@@ -449,6 +452,12 @@ def _segments(x: np.ndarray, sr: int) -> list[tuple[int, int]]:
         starts.append(jm * hop)
         last = jm
     return list(zip(starts, starts[1:] + [x.shape[0]]))
+
+
+def envelope_peak(x: np.ndarray, sr: int) -> float:
+    """The peak of the 5 ms power envelope of x [n, channels] that `_segments` measures levels against."""
+    hop = max(1, int(round(0.001 * sr)))
+    return float(_boxcar((x ** 2).mean(axis=1), max(1, int(0.005 * sr)))[::hop].max())
 
 
 def _dc(x: np.ndarray, sr: int) -> np.ndarray:
