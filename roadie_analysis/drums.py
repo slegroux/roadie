@@ -2,8 +2,8 @@
 `drums_<kind>` stem, and writes `drums.json` and one clip per role. The rules are drumroles.py's (docs/DRUMROLES.md).
 
 The grid comes from the folder's `alignment.json` (tempo `bpm`, bar line `downbeat_sec`) and `sections.json` unless
-given. A default bar line is moved back by whole bars until it is the first one in the file (so no hit has a negative
-bar): the 16ths are still counted from the downbeat. A `t0` that is passed is used as it is. Needs numpy and
+given. A default bar line is moved back by whole bars to the first one at or after the start of the file; the 16ths are
+still counted from the downbeat. A hit before that line (a pickup, a hit in the first partial bar) has bar -1. A `t0` that is passed is used as it is. Needs numpy and
 soundfile (requirements.txt).
 """
 
@@ -122,8 +122,8 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         t0 = down - math.floor(down / bar_s) * bar_s
         shifted = round((down - t0) / bar_s)
         if shifted:
-            notes.append("bar 0 is the downbeat %.3f s moved back %d whole bars to %.3f s, so that no hit has a negative bar; "
-                         "the 16ths are counted from the same bar line" % (down, shifted, t0))
+            notes.append("bar 0 is the downbeat %.3f s moved back %d whole bars to %.3f s, the first bar line in the file (a hit before "
+                         "it, a pickup, has bar -1); the 16ths are counted from the same bar line" % (down, shifted, t0))
         default_t0 = True
     else:
         default_t0 = False

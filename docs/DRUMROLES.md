@@ -44,8 +44,8 @@ a process pool (`--jobs N`, default the cores).
 
 **The grid.** Tempo is `alignment.json`'s `result.bpm`, the bar line its `result.downbeat_sec`, the sections
 `sections.json`'s (`label`, `time_sec`, `duration_beats`). Without `alignment.json` the first section's start is the bar
-line. A default bar line is moved back by whole bars until it is the first one in the file, so no hit gets a negative
-bar; the 16ths are still counted from the downbeat (step 0). A `t0` passed in is used as given. A downbeat the aligner
+line. A default bar line is moved back by whole bars to the first one at or after the start of the file; the 16ths
+are still counted from the downbeat (step 0). A hit before that line (a pickup, a hit in the first partial bar) has bar -1. A `t0` passed in is used as given. A downbeat the aligner
 calls chance-level is repeated in the output's `notes`: the whole table is then counted from a bar line that may be the
 wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late, and a hit more than
 20 ms from a line is off the grid and counts in no pattern.
