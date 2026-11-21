@@ -710,3 +710,25 @@ def test_stems_from_an_older_separation_model_are_noted_flagged_and_in_the_json(
     assert "(htdemucs_6s; current is bs-roformer-sw)" in notes["Other"]
     rows = {r["title"]: r for r in study.list_to_json([study.Root("l", tmp_path)])["studies"]}
     assert [rows[t]["stem_model_current"] for t in ("Old", "New", "Other")] == [False, True, False]
+
+
+def test_an_unreadable_stem_model_marker_is_unknown_not_old(tmp_path, monkeypatch, capsys):
+    folder = make_study(tmp_path, "A", "Flaky")
+    marker = folder / "Flaky_124bpm_stems" / ".stem-model"
+    marker.write_text("bs-roformer-sw\n")
+    real = study.Path.read_text
+
+    def flaky(self, *a, **k):
+        if self.name == ".stem-model":
+            raise OSError(5, "Input/output error")
+        return real(self, *a, **k)
+    monkeypatch.setattr(study.Path, "read_text", flaky)
+    monkeypatch.setenv("ROADIE_STUDIES", str(tmp_path))
+    s = load_study("A/Flaky", [study.Root("l", tmp_path)])
+    assert study.stem_model_note(s.stem_model) == "stems: stem model unknown (marker unreadable)"
+    assert to_json(s)["stem_model_current"] is None
+    row = study.list_to_json([study.Root("l", tmp_path)])["studies"][0]
+    assert row["stem_model_current"] is None
+    study._list(False)
+    out = capsys.readouterr().out
+    assert "older separation model" not in out and not any(l.rstrip().endswith("old-stems") for l in out.splitlines())

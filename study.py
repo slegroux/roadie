@@ -104,6 +104,7 @@ MISSING = {
 }
 # The model yt2stems.sh splits with unless -m says otherwise (its MODEL default); change both together.
 STEM_MODEL_CURRENT = "bs-roformer-sw"
+STEM_MODEL_UNREADABLE = "unreadable"     # the marker is there but could not be read (a lagging mount, an I/O error): unknown, not old
 LAYER_NAMES = ("grid", "sections", "activity", "mix", "drums")
 
 
@@ -190,15 +191,21 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _stem_model(stems_dir: Path) -> str | None:
-    """The model yt2stems.sh recorded in the stems folder's `.stem-model`, None when there is no usable marker."""
+    """The model yt2stems.sh recorded in the stems folder's `.stem-model`; None when there is no marker (or it is empty);
+    STEM_MODEL_UNREADABLE when it exists but cannot be read."""
     try:
         return (Path(stems_dir) / ".stem-model").read_text().strip() or None
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError):
+        return STEM_MODEL_UNREADABLE
 
 
 def stem_model_note(model: str | None) -> str | None:
-    """One line saying the stems came from an older separation model, None when they match the current one."""
+    """One line saying the stems came from an older separation model (or that the marker could not be read), None when
+    they match the current one."""
+    if model == STEM_MODEL_UNREADABLE:
+        return "stems: stem model unknown (marker unreadable)"
     if model == STEM_MODEL_CURRENT:
         return None
     return "stems: made with an older separation model (%s; current is %s): re-split planned in studies/08" % (
@@ -563,7 +570,8 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
         "root": study.source, "path": str(study.root.absolute()), "artist": study.artist, "title": study.title,
         "bpm": study.bpm, "key": study.key, "camelot": study.camelot, "key_source": study.key_source,
         "key_confidence": study.key_confidence, "key_url": study.key_url, "key_note": study.key_note,
-        "stem_model": study.stem_model, "stem_model_current": study.stem_model == STEM_MODEL_CURRENT,
+        "stem_model": study.stem_model,
+        "stem_model_current": None if study.stem_model == STEM_MODEL_UNREADABLE else study.stem_model == STEM_MODEL_CURRENT,
         "listed_bpm": study.listed_bpm, "bpm_url": study.bpm_url, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
@@ -684,7 +692,7 @@ def _list_row(r: StudyRef) -> dict:
     if r.analysed:
         row["layers"], sections_bpm = _layer_flags(r)
         row["stem_model"] = _stem_model(r.stems_dir)
-        row["stem_model_current"] = row["stem_model"] == STEM_MODEL_CURRENT
+        row["stem_model_current"] = None if row["stem_model"] == STEM_MODEL_UNREADABLE else row["stem_model"] == STEM_MODEL_CURRENT
         marker = _marker(r.root) or {}
         align = _read_json(r.stems_dir / "alignment.json") if row["layers"]["grid"] else None
         res = align.get("result") if isinstance(align, dict) else None
@@ -740,11 +748,11 @@ def _list(as_json: bool) -> int:
                 "%s/%s" % (r["artist"], r["title"]),
                 _bpm_cell(r["bpm"], r["listed_bpm"]), short, cam, r["key_source"] or "-",
                 " ".join(have) or "-", " ".join(n for n in r["layers"] if n not in have) or "-")
-                  + ("  old-stems" if not r["stem_model_current"] else ""))
+                  + ("  old-stems" if r["stem_model_current"] is False else ""))
         print("  not analysed (%d)" % root["not_analysed"])
         for r in (s for s in rows if not s["analysed"]):
             print("    %s/%s" % (r["artist"], r["title"]))
-    old = sum(1 for s in data["studies"] if s["analysed"] and not s["stem_model_current"])
+    old = sum(1 for s in data["studies"] if s["analysed"] and s["stem_model_current"] is False)
     if old:
         print("old-stems: %d studies whose stems came from an older separation model (current is %s)" % (old, STEM_MODEL_CURRENT))
     print("note: %s" % data["note"])
