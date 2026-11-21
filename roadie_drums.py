@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """roadie drums: the roles inside each drum stem of a study (roadie_analysis/drums.py, docs/DRUMROLES.md).
 
-    roadie drums <study name | stems_dir> [--json] [--no-write]
+    roadie drums <study name | stems_dir> [--jobs N] [--json] [--no-write]
 
 Reads the grid from alignment.json and sections.json beside the stems, writes drums.json and
 drum_roles/<stem>-<role>.wav there (nothing with --no-write), prints a table per stem.
@@ -36,19 +36,21 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roadie drums", description="Drum roles of a study's drum stems")
     ap.add_argument("target", help="a study (title or path) or a stems folder")
     ap.add_argument("--json", action="store_true", help="print the drums.json record instead of the table")
+    ap.add_argument("--jobs", type=int, default=None, metavar="N", help="processes for the (stem, section) jobs (default: the cores; 1: one process)")
     ap.add_argument("--no-write", action="store_true", help="write no drums.json and no clips")
     args = ap.parse_args(argv)
     try:
         sd = stems_dir_of(args.target)
         t = time.monotonic()
-        rec = drums.drum_roles(sd, write=not args.no_write)
+        rec = drums.drum_roles(sd, write=not args.no_write, jobs=args.jobs)
     except (ValueError, OSError, KeyError, TypeError) as e:
         print("drums: %s" % e, file=sys.stderr)
         return 1
     secs = time.monotonic() - t
     print(json.dumps(rec, indent=2) if args.json else drums.format_table(rec))
     if not args.json:
-        print("\n%s in %.0f s" % ("written to %s" % rec["written"] if "written" in rec else "nothing written (--no-write)", secs))
+        print("\n%s: %.0f s with %d jobs (%s)" % ("written to %s" % rec["written"] if "written" in rec else "nothing written (--no-write)",
+                                              secs, rec["jobs"], ", ".join("%s %.0f s" % kv for kv in rec["stage_seconds"].items())))
     return 0
 
 

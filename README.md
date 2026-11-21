@@ -69,7 +69,7 @@ claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clo
 | `sample_analyze(source, hit=None)` | a drum one-shot in synth terms: envelope, pitch and its drop, harmonics, noise, click, bands, width |
 | `sample_compare(a, b, hit_a=None, hit_b=None)` | two hits compared, with one plain `readings` line per difference past its threshold |
 | `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
-| `drum_roles(stems, tempo=None, t0=None, sections=None, out=None, timeout_s=1800)` | the roles inside each drum stem of a folder or study (pattern, level, bleed); writes `drums.json` and one clip per role; the JSON of `roadie drums --json` |
+| `drum_roles(stems, tempo=None, t0=None, sections=None, out=None, jobs=None, timeout_s=1800)` | the roles inside each drum stem of a folder or study (pattern, level, bleed); writes `drums.json` and one clip per role; the JSON of `roadie drums --json` |
 | `study_list()` | every study under the Studies folder and which analysis layers each has; the JSON of `roadie study list --json` |
 | `study_read(name, layers=None)` | one study as a record, the JSON of `roadie study show <name> --json`; `layers` keeps only some |
 | `arrangement_compare(scenes=None, ref="all", roles=None, read=None, out=None)` | the Set's Session scenes against reference studies, in numbers: the JSON of `roadie arrangement compare`, and with `out` the Markdown report too; `read` is a saved `roadie arrangement read --json` instead of Live |
@@ -209,15 +209,18 @@ The MCP tool `arrangement_compare` takes the same arguments.
 ## Drum roles
 
 ```bash
-roadie drums Glacier               # a study or a stems folder: table per stem, writes drums.json and drum_roles/*.wav
+roadie drums Glacier               # a study or a stems folder: table per stem and section, writes drums.json and drum_roles/*.wav
+roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the cores)
 roadie drums Glacier --no-write    # the table only
 roadie drums Glacier --json        # the drums.json record
 ```
 
 Tempo, the downbeat and the sections come from the folder's `alignment.json` and
-`sections.json`. Each role has its name, hit count, a 16-step pattern line from the
-downbeat (`x...x...x...x...`: `x` = most bars, `o` = some, `.` = fewer), its level,
-and a clip of one clean hit in `drum_roles/`. A whole track takes minutes. See
+`sections.json`. Each stem is analysed section by section, in parallel, and the
+sections' groups are matched by sound. Each role has its name, hit count, a 16-step
+pattern line from the downbeat (`x...x...x...x...`: `x` = most of the bars it plays
+in, `o` = some, `.` = fewer) over the track and in each section, its level, and a
+clip of one clean hit in `drum_roles/`. See
 `docs/DRUMROLES.md` for the file format, how to read the table and the limits.
 
 `roadie drums <study | stems_dir>` (and the MCP tool `drum_roles`) lists the sounds

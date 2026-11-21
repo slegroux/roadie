@@ -11,15 +11,18 @@ from __future__ import annotations
 
 import json
 import math
+import multiprocessing
 import os
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from roadie_analysis import drumroles
+from roadie_analysis import drumroles, drumsections
 
 KIND, VERSION = "drum_roles", 1
 AUDIO = (".flac", ".wav")
@@ -84,17 +87,24 @@ def _file_record(p: Path) -> dict:
 
 
 def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, sections: list | None = None,
-               out=None, write: bool = True, deadline: float | None = None) -> dict:
-    """The roles of every drum stem in `stems_dir`, as the `drums.json` record. `tempo` (BPM), `t0` (seconds from the start of the
-    files to bar 0) and `sections` ([{name, start_bar, bars}], bars counted from t0) default to the folder's alignment.json
-    and sections.json. With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
-    `<out or stems_dir>/drum_roles/<stem>-<role>.wav`. `deadline` is a time.monotonic() value checked between stems; passing it
-    raises TimeoutError (nothing is written). Raises ValueError when there are no drum stems or no grid.
+               out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None) -> dict:
+    """The roles of every drum stem in `stems_dir`, as the `drums.json` record. Each stem is analysed section by section
+    (drumsections.py: sections shorter than 8 bars join their neighbour, no sections means the whole track as one) and the
+    groups of the sections are matched by sound, so one role keeps one identity and name over the track; `mark_bleed` and
+    `name_roles` then run on the merged roles' hits. `tempo` (BPM), `t0` (seconds from the start of the files to bar 0) and
+    `sections` ([{name, start_bar, bars}], bars counted from t0) default to the folder's alignment.json and sections.json.
+    `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
+    With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
+    `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (the clips the folder's earlier drums.json listed are removed first).
+    `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
+    already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
-    "rule", "reason" (why neutral), "hits" (measured + assigned), "measured", "pattern" (share of bars at each 16th), "line",
-    "level_db", "stability", "separation", "groups", "note", "variants", "clip" (path relative to the folder, or None),
-    "clip_note" (why none), "per_section" {section: hits}}. "bleed" lists the groups marked bleed (left out of the roles)."""
+    "rule", "reason" (why neutral), "hits" (measured + assigned), "measured", "pattern" (share of all the track's bars at each
+    16th), "own_pattern" (share of the bars the role plays in), "line", "level_db", "stability", "separation", "groups", "note",
+    "variants", "clip" (path relative to the folder, or None), "clip_note" (why none), "per_section" [{section, start_bar,
+    bars, hits, bars_with, pattern, line}] (the sections the role plays in)}. "bleed" lists the roles marked bleed (left out)."""
+    t_start = time.monotonic()
     stems_dir = Path(stems_dir)
     stems = find_stems(stems_dir)
     if not stems:
@@ -122,39 +132,92 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         for s in g["sections"]:
             a = max(0, int(round((s["time_s"] - t0) / bar_s)))
             sections.append({"name": s["name"], "start_bar": a, "bars": s["bars"]})
-        sections = sections or None
-    elif not sections:
-        sections = None
-    results = {}
-    for kind, f in stems.items():
-        if deadline is not None and time.monotonic() > deadline:
-            raise TimeoutError("passed the deadline before %s (done: %s)" % (kind, ", ".join(results) or "none"))
-        results[kind] = drumroles.hit_groups(f, tempo, t0, sections)
-    bleed = drumroles.mark_bleed(results)
+    plan = drumsections.plan_sections(sections or None)
+    if len(plan) != len(sections or [None]):
+        notes.append("sections shorter than %d bars were joined to their neighbour: %s" % (
+            drumsections.MIN_SECTION_BARS, ", ".join(p["name"] for p in plan if "+" in str(p["name"]))))
+    workers = min(max(1, jobs if jobs else (os.cpu_count() or 1)), len(stems) * len(plan))
+    pool = None if workers == 1 else ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+    stages = {}
+    try:
+        t = time.monotonic()
+        keys = [(k, si) for k in stems for si in range(len(plan))]
+        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si]) for k, si in keys], pool, deadline)
+        stages["sections"] = time.monotonic() - t
+        t = time.monotonic()
+        merged = _run(drumsections.merge_stem, [([outs[i] for i, (k2, _) in enumerate(keys) if k2 == k], plan, tempo, t0) for k in stems],
+                      pool, deadline)
+        results = dict(zip(stems, merged))
+        stages["matching"] = time.monotonic() - t
+        t = time.monotonic()
+        bleed = drumroles.mark_bleed(results)
+        stages["bleed"] = time.monotonic() - t
+        t = time.monotonic()
+        named = _run(drumroles.name_roles, [(results[k], k, bleed[k]) for k in stems], pool, deadline)
+        stages["naming"] = time.monotonic() - t
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
     record = {"kind": KIND, "version": VERSION, "made": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "grid": {"tempo": tempo, "t0": round(t0, 4), "beats_per_bar": BEATS_PER_BAR,
                        "from": "alignment.json and sections.json" if default_t0 else "given",
-                       "downbeat_s": g["downbeat_s"] if default_t0 else None, "sections": sections},
-              "inputs": [_file_record(p) for p in list(stems.values()) + g["files"]],
+                       "downbeat_s": g["downbeat_s"] if default_t0 else None,
+                       "sections": [{k: p[k] for k in ("name", "start_bar", "bars")} for p in plan]},
+              "by": "section", "inputs": [_file_record(p) for p in list(stems.values()) + g["files"]],
               "legend": LEGEND, "notes": notes, "stems": {}}
     clips = []
-    for kind, res in results.items():
-        named = drumroles.name_roles(res, kind, bleed[kind])
-        record["stems"][kind], more = _stem_record(kind, stems[kind], res, named, bleed[kind], sections)
+    for kind, nm in zip(stems, named):
+        record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s)
         clips += more
     if write:
         base = Path(out) if out else stems_dir
+        _remove_old_clips(base)
         (base / "drum_roles").mkdir(parents=True, exist_ok=True)
         for kind, role, audio, sr in clips:
             rel = "drum_roles/%s.wav" % _slug(kind, role["name"])
             sf.write(str(base / rel), audio, sr, subtype="PCM_24")
             role["clip"] = rel
+        record["seconds"], record["jobs"], record["stage_seconds"] = round(time.monotonic() - t_start, 1), workers, {
+            k: round(v, 1) for k, v in stages.items()}
         (base / "drums.json").write_text(json.dumps(record, indent=2) + "\n")
         record["written"] = str(base / "drums.json")
     else:
         for _kind, role, _a, _s in clips:
             role["clip_note"] = "not written (write=False)"
+        record["seconds"], record["jobs"], record["stage_seconds"] = round(time.monotonic() - t_start, 1), workers, {
+            k: round(v, 1) for k, v in stages.items()}
     return record
+
+
+def _run(fn, argsets: list, pool, deadline: float | None) -> list:
+    """fn(*args) for each argument set, in order, in the pool (or here when there is none); TimeoutError past `deadline`."""
+    if pool is None:
+        out = []
+        for a in argsets:
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("passed the deadline after %d of %d jobs" % (len(out), len(argsets)))
+            out.append(fn(*a))
+        return out
+    futs = [pool.submit(fn, *a) for a in argsets]
+    out = []
+    try:
+        for f in futs:
+            out.append(f.result(timeout=None if deadline is None else max(0.0, deadline - time.monotonic())))
+    except FutureTimeout:
+        raise TimeoutError("passed the deadline after %d of %d jobs" % (len(out), len(argsets)))
+    return out
+
+
+def _remove_old_clips(base: Path) -> None:
+    """The clips the folder's earlier drums.json lists, which this run replaces."""
+    old = _read_json(base / "drums.json")
+    if not isinstance(old, dict) or old.get("kind") != KIND:
+        return
+    for s in (old.get("stems") or {}).values():
+        for r in s.get("roles", []):
+            clip = r.get("clip")
+            if isinstance(clip, str) and clip.startswith("drum_roles/") and ".." not in clip:
+                (base / clip).unlink(missing_ok=True)
 
 
 def _slug(kind: str, name: str) -> str:
@@ -162,46 +225,67 @@ def _slug(kind: str, name: str) -> str:
     return s if s.startswith(kind) else "%s-%s" % (kind, s)
 
 
-def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, sections: list | None):
+def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
+    """(share of the bars the hits are in that have an on-grid hit at each 16th, number of those bars)."""
+    own = {h["bar"] for h in hits}
+    on = [h for h in hits if h["on_grid"]]
+    return [len({h["bar"] for h in on if h["step"] == s}) / len(own) if own else 0.0 for s in range(16)], len(own)
+
+
+def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, plan: list, t0: float, bar_s: float):
     by_id = {g["id"]: g for g in res["groups"]}
     info = {g["id"]: g for g in named["groups"]}
+    hits = res["hits"]
+
+    def in_section(h, p):
+        return (p["first"] or h["bar"] >= p["start_bar"]) and (p["to_end"] or h["bar"] < p["start_bar"] + p["bars"])
+
+    def section_view(ids):
+        mine = [hits[i] for i in ids]
+        rows = []
+        for p in plan:
+            hs = [h for h in mine if in_section(h, p)]
+            if hs:
+                pat, nb = _own_line(hs)
+                rows.append({"section": p["name"], "start_bar": p["start_bar"], "bars": p["bars"], "hits": len(hs), "bars_with": nb,
+                             "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat)})
+        return rows
+
     roles, clips = [], []
     for r in named["roles"]:
         big = by_id[max(r["groups"], key=lambda i: by_id[i]["count"])]
         e = info[big["id"]]
         clip = big["clean_hit"]
-        bars_with = max(by_id[i]["bars_with"] for i in r["groups"])
-        own = [min(1.0, v * res["bars"] / bars_with) if bars_with else 0.0 for v in r["pattern"]]   # share of the bars the role plays in
+        ids = [i for gid in r["groups"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]]
+        own, nb = _own_line([hits[i] for i in ids])
         rec = {"name": r["name"], "named": r["named"], "rule": r["rule"], "reason": None if r["named"] else e["reason"],
                "hits": r["count"] + r["assigned"], "measured": r["count"], "assigned": r["assigned"],
-               "bars_with": bars_with, "pattern": [round(float(v), 3) for v in r["pattern"]],
+               "bars_with": nb, "pattern": [round(float(v), 3) for v in r["pattern"]],
                "own_pattern": [round(float(v), 3) for v in own], "line": pattern_line(own),
                "off_grid": sum(by_id[i]["off_grid"] for i in r["groups"]),
                "level_db": None if r["level_db"] is None else round(float(r["level_db"]), 1),
-               "stability": big["stability"], "stability_status": big["stability_status"],
+               "stability": None if big["stability"] is None else round(float(big["stability"]), 2),
+               "stability_status": big["stability_status"],
                "separation": None if big["separation"] is None else round(float(big["separation"]), 2),
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
-               "clip_note": None if clip else big["clean_note"], "per_section": {}}
-        for sec in res["sections"]:
-            n = sum(g["count"] + g["assigned"] for g in sec["groups"] if g["id"] in r["groups"])
-            if n:
-                rec["per_section"][sec["name"]] = n
+               "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
         roles.append(rec)
         if clip:
             clips.append((kind, rec, np.asarray(clip["audio"], dtype=np.float32), res["sample_rate"]))
     marked = []
     for g in res["groups"]:
         if bleed.get(g["id"], {}).get("bleed"):
-            marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"],
-                           "line": pattern_line([min(1.0, v * res["bars"] / g["bars_with"]) if g["bars_with"] else 0.0 for v in g["pattern"]]), "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
+            pat, _ = _own_line([hits[i] for i in g["members"] + g["assigned_members"]])
+            marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"], "line": pattern_line(pat),
+                           "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
                            "why": bleed[g["id"]]["why"]})
-    per_section = [{"name": s["name"], "start_bar": s["start_bar"], "bars": s["bars"],
-                    "roles": {r["name"]: r["per_section"][s["name"]] for r in roles if s["name"] in r["per_section"]}}
-                   for s in res["sections"]]
-    rec = {"file": path.name, "sample_rate": res["sample_rate"], "hits": len(res["hits"]), "hat_like": res["hat_like"],
-           "bars": res["bars"], "first_bar": res["first_bar"], "roles": roles, "bleed": marked, "per_section": per_section,
-           "notes": res["notes"] + named["notes"]}
+    per_section = [{"name": p["name"], "start_bar": p["start_bar"], "bars": p["bars"],
+                    "roles": {r["name"]: v["hits"] for r in roles for v in r["per_section"] if v["section"] == p["name"]}}
+                   for p in plan]
+    rec = {"file": path.name, "sample_rate": res["sample_rate"], "hits": sum(h["owned"] for h in hits),
+           "hat_like": res["hat_like"], "bars": res["bars"], "first_bar": res["first_bar"], "roles": roles, "bleed": marked,
+           "per_section": per_section, "notes": res["notes"] + named["notes"]}
     return rec, clips
 
 
@@ -210,6 +294,7 @@ def format_table(record: dict) -> str:
     g = record["grid"]
     lines = ["grid: %.3f bpm, bar 0 at %.3f s (%s)" % (g["tempo"], g["t0"], g["from"]),
              "pattern: 16 steps from the downbeat, one per 16th; %s" % record["legend"],
+             "each role has its pattern over the whole track, then one line per section it plays in (hits, pattern)",
              "no clip: no member of the group is complete (cut off by the next hit, or by 0.5 s, before it falls 40 dB)"]
     lines += ["note: " + n for n in record["notes"]]
     for kind, s in record["stems"].items():
@@ -234,6 +319,8 @@ def format_table(record: dict) -> str:
                 lines.append("      why neutral: %s" % r["reason"])
             if r["note"]:
                 lines.append("      note: %s" % r["note"])
+            for v in r["per_section"] if len(r["per_section"]) > 1 else []:
+                lines.append("      %-22s %4d  %s" % (v["section"][:22], v["hits"], " ".join(v["line"][i:i + 4] for i in range(0, 16, 4))))
             if r["clip"]:
                 lines.append("      clip: %s" % r["clip"])
         if small:

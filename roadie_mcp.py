@@ -122,27 +122,30 @@ def _profile(source: str, hit: int | str | None) -> dict:
 @mcp.tool()
 def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
                sections: list[dict[str, Any]] | None = None, out: str | None = None,
-               timeout_s: float = 1800.0) -> str:
+               jobs: int | None = None, timeout_s: float = 1800.0) -> str:
     """The sounds inside each drum stem of a track, as roles: which 16ths each plays at, how often, how
     loud, one clean hit to listen to. `stems` is the stems folder (the `drums_<kind>` files in it: kick,
     hh, snare, toms, ride, crash) or a study's name. `tempo` (BPM), `t0` (seconds from the start of the
     files to bar 0, a bar line) and `sections` ({"name", "start_bar", "bars"}, bars counted from t0) default
-    to the folder's alignment.json and sections.json. A role name is a rule over pattern and measurements,
+    to the folder's alignment.json and sections.json. Each stem is analysed section by section (a section under 8 bars
+    joins its neighbour; no sections: the whole track) and the sections' groups are matched by sound, so a role keeps
+    one name over the track and has a pattern per section (`per_section`); `jobs` processes run it (default: the cores).
+    A role name is a rule over pattern and measurements,
     never recognition: a group no rule fits keeps a neutral name (`hh 2`) with the reason; a group that is
     another stem's sound leaking in is listed under `bleed` and is not a role (docs/DRUMROLES.md).
     Per stem: each role's `name`, `hits`, `line` (16 characters from the downbeat: x = most bars, o = some,
-    . = fewer), `pattern` (the share of bars at each 16th), `level_db`, `stability`, `separation`, `reason` (why
-    neutral), `clip` and `per_section`. Writes `drums.json` and `drum_roles/<stem>-<role>.wav` (one clean hit
+    . = fewer, over the bars the role plays in), `pattern` (the share of all bars at each 16th), `level_db`, `stability`,
+    `separation`, `reason` (why neutral), `clip` and `per_section` (its hits and `line` in each section it plays in). Writes `drums.json` and `drum_roles/<stem>-<role>.wav` (one clean hit
     per role; none when no hit is clean, and `clip_note` says why) into the stems folder, or `out`. It reads
-    whole stems and takes minutes (about 1.5 minutes for a five-minute kick stem): `timeout_s` is a deadline
-    checked between stems, and passing it is a tool error that writes nothing. Local only."""
+    audio and takes minutes: `timeout_s` is a deadline checked as jobs finish, and passing it is a tool error that
+    writes nothing (jobs already started run on in the background). Local only."""
     try:
         folder = os.path.abspath(os.path.expanduser(stems.strip()))
         if not os.path.isdir(folder):
             folder = str(roadie_drums.stems_dir_of(stems))
         rec = drums.drum_roles(folder, tempo, t0, sections,
                                os.path.abspath(os.path.expanduser(out)) if out else None,
-                               deadline=time.monotonic() + timeout_s)
+                               deadline=time.monotonic() + timeout_s, jobs=jobs)
     except TimeoutError as e:
         raise AnalysisError("drum_roles ran out of time (%g s): %s; nothing was written" % (timeout_s, e))
     except MemoryError:
