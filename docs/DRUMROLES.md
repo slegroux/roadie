@@ -3,10 +3,62 @@
 Moved from Sideman's `docs/CONVENTIONS.md` (branch `feat/sideman-drum-roles`, `f877340`) with the code, unchanged
 but for the module name. The README's "Drum roles" section is the short version.
 
-`roadie_analysis.drumroles` (numpy and soundfile; no tool or command yet) lists the sounds
+`roadie_analysis.drumroles` (numpy and soundfile) lists the sounds
 inside one drum stem. `hit_groups` finds the hits, puts them on the 16th grid
 and groups the ones that sound alike. `name_roles` then gives each group a name
 and `mark_bleed` marks the groups that are another stem's sound leaking in.
+
+## Running it: `roadie drums`
+
+    roadie drums <study name | stems_dir> [--json] [--no-write]
+
+`roadie_analysis.drums.drum_roles` runs `hit_groups`, `mark_bleed` and `name_roles` over every
+`drums_<kind>` stem of a stems folder (`drums.flac`, the sum, is not one). The MCP tool `drum_roles(stems, tempo,
+t0, sections, out, timeout_s)` does the same and returns the record. Nothing is tuned: the thresholds are the ones below.
+
+**The grid.** Tempo is `alignment.json`'s `result.bpm`, the bar line its `result.downbeat_sec`, the sections
+`sections.json`'s (`label`, `time_sec`, `duration_beats`). Without `alignment.json` the first section's start is the bar
+line. A default bar line is moved back by whole bars until it is the first one in the file, so no hit gets a negative
+bar; the 16ths are still counted from the downbeat (step 0). A `t0` passed in is used as given. A downbeat the aligner
+calls chance-level is repeated in the output's `notes`: the whole table is then counted from a bar line that may be the
+wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late, and a hit more than
+20 ms from a line is off the grid and counts in no pattern.
+
+**The table**, one block per stem:
+
+    role          hits  pattern               level   flags
+    hh offbeat      32  ..x. ..x. ..x. ..x.  -6.5 dB  stability 1.00, separation 3.00
+    hh 2            40  xx.x xx.x xx.x xx.x  -8.2 dB  neutral, no clip
+
+- `pattern` is 16 characters, one per 16th of the bar from the downbeat, in groups of four (one beat each): `x` = the
+  role plays there in at least half of its bars, `o` in 10 to 50 %, `.` in fewer. The exact shares are `pattern` in
+  the JSON.
+- `hits` counts measured hits and the ones assigned under another hit's tail. `level` is the median loudest-ms level of
+  the measured hits (dBFS).
+- `stability` and `separation` are the numbers `name_roles` judged (see above); none printed means stable by
+  construction or no rival.
+- **A neutral name (`hh 2`, `kick 1`) means no rule named the group**; the line under it says why (too few hits, not
+  stable, not apart from its neighbour, no rule of that stem fits, members disagree). It is still a real group of hits that
+  sound alike: listen to its clip. Stems with no rules (`ride`, `crash`) are always neutral.
+- `BLEED` lines are groups marked as another stem's sound leaking in; they are not roles and have no clip.
+- `variants`: one role made of several groups that may be one sound (see "Two groups that may be one sound").
+- `no clip`: no member of the group is complete (cut off by the next hit or the 0.5 s limit before it falls 40 dB); the
+  reason is printed.
+
+**Files.** `drums.json` beside the stems (`kind: "drum_roles"`, `version: 1`): `grid` (tempo, `t0`, the downbeat it came
+from, the sections as bar ranges), `inputs` (each stem and grid file read, with name, size and mtime: `roadie study show`
+says fresh or stale by name and size), `legend`, `notes`, and per stem `roles`, `bleed`, `per_section` (hits per role
+in each section) and `notes`. Each role has `name`, `named`, `rule`, `reason`, `hits`, `pattern`, `line`, `level_db`,
+`stability`, `separation`, `groups`, `variants`, `clip`, `clip_note` and `per_section`. `drum_roles/<stem>-<role>.wav` is
+the role's clean hit (24-bit, the stem's rate); no clean hit, no file. `roadie study show` prints each stem's roles with
+their pattern line when `drums.json` exists, and `study list` flags the `drums` layer.
+
+**Known limits.** A whole track takes minutes (one stem of five minutes: about a minute and a half for a
+kick stem, more for hats); the MCP tool's `timeout_s` is checked between stems. Hat stems are judged without
+`grid_onsets`: a hat under an open hat's tail is placed only when it can be compared. One constant grid for the
+whole file. The kind of stem decides which rules apply, and the separator's classes are all it has: congas
+and claps land in toms and snare and keep neutral names or the nearest rule's. A role is as good as the sample the
+grouping drew: groups near the threshold can change with the stem's length (`stability` says which).
 
 **The names are rules over a group's stem, its pattern and the readings of its
 clean hit. They are not recognition.** A group no rule fits keeps a neutral
