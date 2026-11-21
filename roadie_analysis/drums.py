@@ -95,7 +95,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     `sections` ([{name, start_bar, bars}], bars counted from t0) default to the folder's alignment.json and sections.json.
     `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
-    `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (the clips the folder's earlier drums.json listed are removed first).
+    `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
     `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
     already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
@@ -174,15 +174,18 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         clips += more
     if write:
         base = Path(out) if out else stems_dir
-        _remove_old_clips(base)
+        old = _read_json(base / "drums.json")
         (base / "drum_roles").mkdir(parents=True, exist_ok=True)
-        for kind, role, audio, sr in clips:
+        for kind, role, audio, sr in clips:                       # the new clips first, the new record next, the old clips last
             rel = "drum_roles/%s.wav" % _slug(kind, role["name"])
             sf.write(str(base / rel), audio, sr, subtype="PCM_24")
             role["clip"] = rel
         record["seconds"], record["jobs"], record["stage_seconds"] = round(time.monotonic() - t_start, 1), workers, {
             k: round(v, 1) for k, v in stages.items()}
-        (base / "drums.json").write_text(json.dumps(record, indent=2) + "\n")
+        tmp = base / ".drums.json.tmp"
+        tmp.write_text(json.dumps(record, indent=2) + "\n")
+        os.replace(tmp, base / "drums.json")                      # a reader never sees half a drums.json
+        _remove_old_clips(base, old, {r["clip"] for s in record["stems"].values() for r in s["roles"] if r["clip"]})
         record["written"] = str(base / "drums.json")
     else:
         for _kind, role, _a, _s in clips:
@@ -211,16 +214,18 @@ def _run(fn, argsets: list, pool, deadline: float | None) -> list:
     return out
 
 
-def _remove_old_clips(base: Path) -> None:
-    """The clips the folder's earlier drums.json lists, which this run replaces."""
-    old = _read_json(base / "drums.json")
+def _old_clips(old) -> set[str]:
+    """The clips an earlier drums.json record lists (paths under drum_roles/)."""
     if not isinstance(old, dict) or old.get("kind") != KIND:
-        return
-    for s in (old.get("stems") or {}).values():
-        for r in s.get("roles", []):
-            clip = r.get("clip")
-            if isinstance(clip, str) and clip.startswith("drum_roles/") and ".." not in clip:
-                (base / clip).unlink(missing_ok=True)
+        return set()
+    return {r["clip"] for s in (old.get("stems") or {}).values() for r in s.get("roles", [])
+            if isinstance(r.get("clip"), str) and r["clip"].startswith("drum_roles/") and ".." not in r["clip"]}
+
+
+def _remove_old_clips(base: Path, old, keep: set) -> None:
+    """The clips the earlier drums.json listed and the new one does not."""
+    for clip in _old_clips(old) - keep:
+        (base / clip).unlink(missing_ok=True)
 
 
 def _slug(kind: str, name: str) -> str:
