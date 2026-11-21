@@ -31,10 +31,14 @@ wrong beat. The grid is one constant tempo: a track with drift reads hits a litt
     hh 2            40  xx.x xx.x xx.x xx.x  -8.2 dB  neutral, no clip
 
 - `pattern` is 16 characters, one per 16th of the bar from the downbeat, in groups of four (one beat each): `x` = the
-  role plays there in at least half of its bars, `o` in 10 to 50 %, `.` in fewer. The exact shares are `pattern` in
-  the JSON.
+  role plays there in at least half of the bars it plays in, `o` in 10 to 50 % of them, `.` in fewer. A role that
+  lives in one section is judged over that section's bars, not the whole track's. The JSON has both readings:
+  `pattern` (the share of all the stem's bars, `name_roles`' own) and `own_pattern` (the share of the role's
+  `bars_with`, which the line is made from).
+- A group of fewer than 4 measured hits is one summary line in the table (and in `study show`); it is a role entry in the
+  JSON with its reason, like the others.
 - `hits` counts measured hits and the ones assigned under another hit's tail. `level` is the median loudest-ms level of
-  the measured hits (dBFS).
+  the measured hits (dBFS). `off_grid` counts hits more than 20 ms from a 16th line (in no pattern).
 - `stability` and `separation` are the numbers `name_roles` judged (see above); none printed means stable by
   construction or no rival.
 - **A neutral name (`hh 2`, `kick 1`) means no rule named the group**; the line under it says why (too few hits, not
@@ -48,7 +52,7 @@ wrong beat. The grid is one constant tempo: a track with drift reads hits a litt
 **Files.** `drums.json` beside the stems (`kind: "drum_roles"`, `version: 1`): `grid` (tempo, `t0`, the downbeat it came
 from, the sections as bar ranges), `inputs` (each stem and grid file read, with name, size and mtime: `roadie study show`
 says fresh or stale by name and size), `legend`, `notes`, and per stem `roles`, `bleed`, `per_section` (hits per role
-in each section) and `notes`. Each role has `name`, `named`, `rule`, `reason`, `hits`, `pattern`, `line`, `level_db`,
+in each section) and `notes`. Each role has `name`, `named`, `rule`, `reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `level_db`,
 `stability`, `separation`, `groups`, `variants`, `clip`, `clip_note` and `per_section`. `drum_roles/<stem>-<role>.wav` is
 the role's clean hit (24-bit, the stem's rate); no clean hit, no file. `roadie study show` prints each stem's roles with
 their pattern line when `drums.json` exists, and `study list` flags the `drums` layer.

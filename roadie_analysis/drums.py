@@ -25,11 +25,12 @@ KIND, VERSION = "drum_roles", 1
 AUDIO = (".flac", ".wav")
 BEATS_PER_BAR = 4
 X_SHARE, O_SHARE = 0.5, 0.10   # pattern line: x = the role plays at that 16th in at least half of its bars, o = at least a tenth
-LEGEND = "x = most bars (50 % or more), o = some bars (10 to 50 %), . = fewer"
+LEGEND = "x = most of the bars the role plays in (50 % or more), o = some of them (10 to 50 %), . = fewer"
+MIN_SHOWN = 4              # the table and `study show` list a role of fewer measured hits as one line (all stay in drums.json)
 
 
 def pattern_line(pattern: list) -> str:
-    """16 characters, one per 16th from the downbeat, in groups of four: `x...x...x...x...`."""
+    """16 characters, one per 16th from the downbeat: `x...x...x...x...`. `pattern` is the share of the role's own bars."""
     return "".join("x" if v >= X_SHARE else "o" if v >= O_SHARE else "." for v in pattern)
 
 
@@ -169,9 +170,13 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, sec
         big = by_id[max(r["groups"], key=lambda i: by_id[i]["count"])]
         e = info[big["id"]]
         clip = big["clean_hit"]
+        bars_with = max(by_id[i]["bars_with"] for i in r["groups"])
+        own = [min(1.0, v * res["bars"] / bars_with) if bars_with else 0.0 for v in r["pattern"]]   # share of the bars the role plays in
         rec = {"name": r["name"], "named": r["named"], "rule": r["rule"], "reason": None if r["named"] else e["reason"],
                "hits": r["count"] + r["assigned"], "measured": r["count"], "assigned": r["assigned"],
-               "pattern": [round(float(v), 3) for v in r["pattern"]], "line": pattern_line(r["pattern"]),
+               "bars_with": bars_with, "pattern": [round(float(v), 3) for v in r["pattern"]],
+               "own_pattern": [round(float(v), 3) for v in own], "line": pattern_line(own),
+               "off_grid": sum(by_id[i]["off_grid"] for i in r["groups"]),
                "level_db": None if r["level_db"] is None else round(float(r["level_db"]), 1),
                "stability": big["stability"], "stability_status": big["stability_status"],
                "separation": None if big["separation"] is None else round(float(big["separation"]), 2),
@@ -189,7 +194,7 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, sec
     for g in res["groups"]:
         if bleed.get(g["id"], {}).get("bleed"):
             marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"],
-                           "line": pattern_line(g["pattern"]), "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
+                           "line": pattern_line([min(1.0, v * res["bars"] / g["bars_with"]) if g["bars_with"] else 0.0 for v in g["pattern"]]), "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
                            "why": bleed[g["id"]]["why"]})
     per_section = [{"name": s["name"], "start_bar": s["start_bar"], "bars": s["bars"],
                     "roles": {r["name"]: r["per_section"][s["name"]] for r in roles if s["name"] in r["per_section"]}}
@@ -204,12 +209,15 @@ def format_table(record: dict) -> str:
     """The record as one readable table per stem."""
     g = record["grid"]
     lines = ["grid: %.3f bpm, bar 0 at %.3f s (%s)" % (g["tempo"], g["t0"], g["from"]),
-             "pattern: 16 steps from the downbeat, one per 16th; %s" % record["legend"]]
+             "pattern: 16 steps from the downbeat, one per 16th; %s" % record["legend"],
+             "no clip: no member of the group is complete (cut off by the next hit, or by 0.5 s, before it falls 40 dB)"]
     lines += ["note: " + n for n in record["notes"]]
     for kind, s in record["stems"].items():
         lines += ["", "%s  (%s, %d hits found, %d bars)" % (kind, s["file"], s["hits"], s["bars"]),
                   "  %-14s %5s  %-19s %7s  %s" % ("role", "hits", "pattern", "level", "flags")]
-        for r in s["roles"]:
+        shown = [r for r in s["roles"] if r["measured"] >= MIN_SHOWN]
+        small = [r for r in s["roles"] if r["measured"] < MIN_SHOWN]
+        for r in shown:
             flags = [] if r["named"] else ["neutral"]
             if r["clip"] is None and not str(r["clip_note"]).startswith("not written"):
                 flags.append("no clip")
@@ -228,8 +236,9 @@ def format_table(record: dict) -> str:
                 lines.append("      note: %s" % r["note"])
             if r["clip"]:
                 lines.append("      clip: %s" % r["clip"])
-            elif r["clip_note"]:
-                lines.append("      no clip: %s" % r["clip_note"])
+        if small:
+            lines.append("  + %d groups of fewer than %d measured hits (%d hits in all): in drums.json" % (
+                len(small), MIN_SHOWN, sum(r["hits"] for r in small)))
         for b in s["bleed"]:
             lines.append("  BLEED %-8s %5d  %-19s %7s  %s" % (b["name"], b["hits"], " ".join(b["line"][i:i + 4] for i in range(0, 16, 4)),
                                                               "%.1f dB" % b["level_db"] if b["level_db"] is not None else "-", b["why"]))

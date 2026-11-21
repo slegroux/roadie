@@ -499,8 +499,10 @@ def _show(study: Study) -> None:
             print("            %d sections" % len(study.mix()))
         if name == "drums" and layer.data:
             for stem, st in layer.data["stems"].items():
-                print("    %s: %d roles%s" % (stem, len(st["roles"]), ", %d bleed" % len(st["bleed"]) if st.get("bleed") else ""))
-                for r in st["roles"]:
+                big = [r for r in st["roles"] if r["measured"] >= 4]
+                print("    %s: %d roles of 4+ hits, %d smaller%s" % (stem, len(big), len(st["roles"]) - len(big),
+                                                                  ", %d bleed" % len(st["bleed"]) if st.get("bleed") else ""))
+                for r in big:
                     print("      %-14s %5d  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4))))
         if name == "sections":
             for s in study.sections():
