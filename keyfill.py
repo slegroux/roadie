@@ -90,7 +90,7 @@ def decide(name: str, measured, row: dict | None, decision: dict | None, det: di
         out["verdict"] = "detected only"
     else:
         out["verdict"] = "no listing, no key (%s)" % det.get("reason", "?")
-    if out["source"] is None and not row:
+    if not row:
         out["notes"].append("no lookup row")
     return out
 

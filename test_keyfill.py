@@ -76,6 +76,8 @@ def test_the_plan_applies_the_rules_and_writes_nothing(tmp_path):
     assert (bench["source"], bench["key"], bench["folder_name"]) == (None, None, None)
     assert "no synths stem" in bench["verdict"]
     assert plan["unmatched_rows"] == ["Gone/Missing"] and plan["unmatched_decisions"] == []
+    text = keyfill.render(plan, "lib")
+    assert "studies with no lookup row: Rodriguez/Bench, Sylvain/Live" in text
     assert snapshot(tmp_path) == before
 
 
