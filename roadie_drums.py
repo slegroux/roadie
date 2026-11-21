@@ -47,7 +47,8 @@ def main(argv=None) -> int:
         print("drums: %s" % e, file=sys.stderr)
         return 1
     secs = time.monotonic() - t
-    print(json.dumps(rec, indent=2) if args.json else drums.format_table(rec))
+    note = None if args.json else study.stem_model_note(study._stem_model(sd))
+    print(json.dumps(rec, indent=2) if args.json else (note + "\n" if note else "") + drums.format_table(rec))
     if not args.json:
         print("\n%s: %.0f s with %d jobs (%s)" % ("written to %s" % rec["written"] if "written" in rec else "nothing written (--no-write)",
                                               secs, rec["jobs"], ", ".join("%s %.0f s" % kv for kv in rec["stage_seconds"].items())))

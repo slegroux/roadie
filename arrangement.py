@@ -1593,10 +1593,12 @@ def main(argv=None):
     if args.cmd == "ref":
         try:
             import study as study_reader
-            ref = reference_metrics(study_reader.load_study(args.study))
+            loaded = study_reader.load_study(args.study)
+            ref = reference_metrics(loaded)
         except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
             sys.exit("arrangement: %s" % e)
-        print(json.dumps(ref, indent=1, ensure_ascii=False) if args.json else format_reference(ref))
+        note = None if args.json else study_reader.stem_model_note(loaded.stem_model)
+        print(json.dumps(ref, indent=1, ensure_ascii=False) if args.json else (note + "\n" if note else "") + format_reference(ref))
         return
     try:
         first, last = parse_scenes(args.scenes)

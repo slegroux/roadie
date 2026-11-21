@@ -102,6 +102,8 @@ MISSING = {
     "mix": "reference_profile (roadie MCP tool) on the mix and stems, per section",
     "drums": "roadie drums <study>: the roles inside each drum stem",
 }
+# The model yt2stems.sh splits with unless -m says otherwise (its MODEL default); change both together.
+STEM_MODEL_CURRENT = "bs-roformer-sw"
 LAYER_NAMES = ("grid", "sections", "activity", "mix", "drums")
 
 
@@ -145,6 +147,7 @@ class Study:
     key_note: str | None = None
     listed_bpm: float | None = None       # the published or tagged tempo, from study.json: for display, never computed with
     bpm_url: str | None = None
+    stem_model: str | None = None         # the model named by the stems folder's .stem-model; None: no marker
 
     def sections(self) -> list[Section]:
         data = self.layers["sections"].data
@@ -184,6 +187,22 @@ def _read_json(path: Path) -> dict | None:
         return json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+
+
+def _stem_model(stems_dir: Path) -> str | None:
+    """The model yt2stems.sh recorded in the stems folder's `.stem-model`, None when there is no usable marker."""
+    try:
+        return (Path(stems_dir) / ".stem-model").read_text().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def stem_model_note(model: str | None) -> str | None:
+    """One line saying the stems came from an older separation model, None when they match the current one."""
+    if model == STEM_MODEL_CURRENT:
+        return None
+    return "stems: made with an older separation model (%s; current is %s): re-split planned in studies/08" % (
+        "no .stem-model marker" if model is None else model, STEM_MODEL_CURRENT)
 
 
 def _marker(folder: Path) -> dict | None:
@@ -527,7 +546,7 @@ def load_study(name_or_path: str, roots=None) -> Study:
 
     return Study(folder.parent.name, _strip_suffix(folder.name), folder,
                  bpm, BEATS_PER_BAR, bar_offset,
-                 stems, layers, sorted(extras), source, **_key_fields(marker))
+                 stems, layers, sorted(extras), source, stem_model=_stem_model(stems_dir), **_key_fields(marker))
 
 
 def to_json(study: Study, layers: list[str] | None = None) -> dict:
@@ -544,6 +563,7 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
         "root": study.source, "path": str(study.root.absolute()), "artist": study.artist, "title": study.title,
         "bpm": study.bpm, "key": study.key, "camelot": study.camelot, "key_source": study.key_source,
         "key_confidence": study.key_confidence, "key_url": study.key_url, "key_note": study.key_note,
+        "stem_model": study.stem_model, "stem_model_current": study.stem_model == STEM_MODEL_CURRENT,
         "listed_bpm": study.listed_bpm, "bpm_url": study.bpm_url, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
@@ -595,6 +615,9 @@ def _show(study: Study) -> None:
         "%g" % study.bpm if study.bpm is not None else "unknown", _listed_note(study.bpm, study.listed_bpm),
         study.beats_per_bar, "file bar + %d" % study.bar_offset if study.bar_offset is not None else "unknown"))
     print("  key: %s" % _key_line(study))
+    note = stem_model_note(study.stem_model)
+    if note:
+        print("  " + note)
     print("  stems: %s" % ", ".join(study.stems))
     for name, layer in study.layers.items():
         if layer.source is None:
@@ -651,14 +674,17 @@ def _layer_flags(ref: StudyRef) -> tuple[dict[str, bool], float | None]:
 
 LAYERS_NOTE = ("layer flags come from file names only, except that sections.json is opened to look for "
                "its bar_activity key (the activity layer); `roadie study show <name>` reads the files "
-               "and is the check")
+               "and is the check; the stems folder's .stem-model marker is read too (old-stems)")
 
 
 def _list_row(r: StudyRef) -> dict:
     row = {"root": r.source, "path": str(r.root.absolute()), "artist": r.artist, "title": r.title,
-           "analysed": r.analysed, "layers": None, "bpm": None, **_key_fields(None)}
+           "analysed": r.analysed, "layers": None, "bpm": None, "stem_model": None, "stem_model_current": None,
+           **_key_fields(None)}
     if r.analysed:
         row["layers"], sections_bpm = _layer_flags(r)
+        row["stem_model"] = _stem_model(r.stems_dir)
+        row["stem_model_current"] = row["stem_model"] == STEM_MODEL_CURRENT
         marker = _marker(r.root) or {}
         align = _read_json(r.stems_dir / "alignment.json") if row["layers"]["grid"] else None
         res = align.get("result") if isinstance(align, dict) else None
@@ -713,10 +739,14 @@ def _list(as_json: bool) -> int:
             print("    %-40s %-13s %-6s %-5s %-9s has: %-22s missing: %s" % (
                 "%s/%s" % (r["artist"], r["title"]),
                 _bpm_cell(r["bpm"], r["listed_bpm"]), short, cam, r["key_source"] or "-",
-                " ".join(have) or "-", " ".join(n for n in r["layers"] if n not in have) or "-"))
+                " ".join(have) or "-", " ".join(n for n in r["layers"] if n not in have) or "-")
+                  + ("  old-stems" if not r["stem_model_current"] else ""))
         print("  not analysed (%d)" % root["not_analysed"])
         for r in (s for s in rows if not s["analysed"]):
             print("    %s/%s" % (r["artist"], r["title"]))
+    old = sum(1 for s in data["studies"] if s["analysed"] and not s["stem_model_current"])
+    if old:
+        print("old-stems: %d studies whose stems came from an older separation model (current is %s)" % (old, STEM_MODEL_CURRENT))
     print("note: %s" % data["note"])
     return 0
 

@@ -143,6 +143,8 @@ roadie study show Flare            # one study: bpm, grid, sections, mix profile
 roadie study show Flare --json     # the same record as JSON ({"kind": "study", "version": 1, ...})
 ```
 
+A study whose stems folder has no `.stem-model` marker, or names a model other than the current one (`bs-roformer-sw`, the `yt2stems.sh` default), gets a one-line note in `show` (and at the top of `roadie drums` and `roadie arrangement ref`), an `old-stems` flag in `list`, and `stem_model` / `stem_model_current` in the JSON.
+
 `show` takes a title (an exact title, else a unique part of one), `Artist/Title`
 or a path. A title found in two roots is an error naming both; give the root to
 pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from

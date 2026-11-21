@@ -687,3 +687,26 @@ def test_an_exact_title_beats_a_longer_title_that_contains_it(tmp_path):
     assert load_study("earthlife", tmp_path).title == "Carry On (EarthLife Remix)"       # a unique part of a title
     with pytest.raises(ValueError, match="ambiguous"):
         load_study("Carry", tmp_path)                                                    # a part shared by both
+
+
+def test_stems_from_an_older_separation_model_are_noted_flagged_and_in_the_json(tmp_path, capsys):
+    """No .stem-model marker: noted and flagged; the current model: nothing; another model: named."""
+    for title, marker in (("Old", None), ("New", study.STEM_MODEL_CURRENT), ("Other", "htdemucs_6s")):
+        folder = make_study(tmp_path, "A", title)
+        if marker:
+            (folder / ("%s_124bpm_stems" % title) / ".stem-model").write_text(marker + "\n")
+    notes = {}
+    for title in ("Old", "New", "Other"):
+        s = load_study("A/%s" % title, [study.Root("l", tmp_path)])
+        notes[title] = study.stem_model_note(s.stem_model)
+        j = to_json(s)
+        assert j["stem_model_current"] == (title == "New") and j["stem_model"] == {"Old": None, "New": "bs-roformer-sw", "Other": "htdemucs_6s"}[title]
+        study._show(s)
+        shown = capsys.readouterr().out
+        assert ("older separation model" in shown) == (title != "New")
+        assert notes[title] is None or notes[title] in shown
+    assert notes["New"] is None
+    assert "no .stem-model marker; current is bs-roformer-sw" in notes["Old"]
+    assert "(htdemucs_6s; current is bs-roformer-sw)" in notes["Other"]
+    rows = {r["title"]: r for r in study.list_to_json([study.Root("l", tmp_path)])["studies"]}
+    assert [rows[t]["stem_model_current"] for t in ("Old", "New", "Other")] == [False, True, False]
