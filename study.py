@@ -662,13 +662,13 @@ def _list(as_json: bool) -> int:
             print("  could not list %s" % e)
         print("  analysed (%d)" % root["analysed"])
         if root["analysed"]:
-            print("    %-40s %-13s %-6s %-5s" % ("", "bpm (listed)", "key", "camelot"))
+            print("    %-40s %-13s %-6s %-5s %-9s" % ("", "bpm (listed)", "key", "camelot", "source"))
         for r in (s for s in rows if s["analysed"]):
             have = [n for n, ok in r["layers"].items() if ok]
             short, cam = _key_cells(r)
-            print("    %-40s %-13s %-6s %-5s has: %-22s missing: %s" % (
+            print("    %-40s %-13s %-6s %-5s %-9s has: %-22s missing: %s" % (
                 "%s/%s" % (r["artist"], r["title"]),
-                _bpm_cell(r["bpm"], r["listed_bpm"]), short, cam,
+                _bpm_cell(r["bpm"], r["listed_bpm"]), short, cam, r["key_source"] or "-",
                 " ".join(have) or "-", " ".join(n for n in r["layers"] if n not in have) or "-"))
         print("  not analysed (%d)" % root["not_analysed"])
         for r in (s for s in rows if not s["analysed"]):
@@ -789,7 +789,15 @@ def main(argv=None) -> int:
     fill.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     fill.add_argument("--out", help="write the table (markdown) to this file")
     fill.add_argument("--cache", help="keep detection results in this JSON file, so a rerun does not repeat them")
+    ren = sub.add_parser("rename", help="dry run: the `<Title> [<bpm> <key> <camelot>]` folder names, old -> new (nothing is renamed)")
+    ren.add_argument("--dry-run", action="store_true", help="make the table only")
+    ren.add_argument("--write", action="store_true", help="not built yet: refused")
+    ren.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
+    ren.add_argument("--out", help="write the table (markdown) to this file")
     args = ap.parse_args(argv)
+    if args.cmd == "rename":
+        import studyrename
+        return studyrename.main(args)
     if args.cmd == "fill-keys":
         import keyfill
         return keyfill.main(args)

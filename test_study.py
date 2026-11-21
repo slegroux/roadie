@@ -512,9 +512,9 @@ def test_cli_tag_then_list_and_show_print_bpm_key_and_camelot(tmp_path):
     assert run("tag", "Earth", "--key", "Em", "--source", "detected", "--confidence", "0.1").returncode == 0
     out = run("list").stdout
     flare = [l for l in out.splitlines() if "Einmusik/Flare" in l][0].split("has:")[0].split()
-    assert flare[1:] == ["124", "Am", "8A"]
+    assert flare[1:4] == ["124", "Am", "8A"] and flare[4:] == ["by", "ear"]
     earth = [l for l in out.splitlines() if "Bodzin/Earth" in l][0].split("has:")[0].split()
-    assert earth[1:] == ["124", "Em?", "9A?"]                      # a detected key is marked as an estimate
+    assert earth[1:] == ["124", "Em?", "9A?", "detected"]                      # a detected key is marked as an estimate
     assert "key: A minor (Am, 8A), source by ear" in run("show", "Flare").stdout
     assert "key: E minor? (Em?, 9A?), source detected, confidence 0.1" in run("show", "Earth").stdout
     weaker = run("tag", "Flare", "--key", "C", "--source", "online")
