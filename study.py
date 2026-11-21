@@ -774,7 +774,16 @@ def main(argv=None) -> int:
     tag.add_argument("--source", choices=KEY_SOURCES[:3], help="where the key came from (default tagged: the user's own)")
     tag.add_argument("--url", help="the listing an online key came from")
     tag.add_argument("--confidence", type=float, help="a detected key's margin over the runner-up")
+    fill = sub.add_parser("fill-keys", help="dry run: the keys and listed bpm the records would get, as one table (writes nothing here)")
+    fill.add_argument("--from", dest="lookup", required=True, help="the published-lookup JSON")
+    fill.add_argument("--dry-run", action="store_true", help="required: only the table is made")
+    fill.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
+    fill.add_argument("--out", help="write the table (markdown) to this file")
+    fill.add_argument("--cache", help="keep detection results in this JSON file, so a rerun does not repeat them")
     args = ap.parse_args(argv)
+    if args.cmd == "fill-keys":
+        import keyfill
+        return keyfill.main(args)
     if args.cmd == "list":
         return _list(args.json)
     if args.cmd == "tag":
