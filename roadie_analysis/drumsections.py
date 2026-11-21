@@ -62,11 +62,61 @@ def plan_sections(sections: list | None) -> list[dict]:
     return secs
 
 
-def stem_peak(path) -> float:
+def stem_peak(path, block_s: float = 10.0) -> float:
     """The peak power of the whole stem's 5 ms envelope (what hit detection measures levels against), so a section is judged
-    against the stem's loudest moment and not its own."""
-    x, sr = sf.read(str(path), dtype="float32", always_2d=True)
-    return oneshot.envelope_peak(oneshot._undc(np.asarray(x, dtype=np.float64), sr), sr)
+    against the stem's loudest moment and not its own. The same number as `oneshot.envelope_peak(oneshot._undc(x, sr), sr)`
+    on the whole stem, read in blocks (two passes: the DC offset from the 10 ms blocks' statistics, then the envelope with a
+    5 ms overlap), so a stem is never held whole in memory."""
+    with sf.SoundFile(str(path)) as f:
+        sr, ch, total = f.samplerate, f.channels, f.frames
+        n10 = max(1, int(round(0.010 * sr)))
+        step = n10 * max(1, int(block_s / 0.010))
+        peak, nz_lo, nz_hi, live, var, mean = 0.0, None, None, [], [], []
+        for start in range(0, total, step):                  # pass 1: what oneshot._dc reads
+            f.seek(start)
+            x = f.read(min(step, total - start), dtype="float64", always_2d=True)
+            if not len(x):
+                break
+            mag = np.abs(x)
+            peak = max(peak, float(mag.max()))
+            nz = np.nonzero(mag.max(axis=1) > 0)[0]
+            if len(nz):
+                nz_lo = start + int(nz[0]) if nz_lo is None else nz_lo
+                nz_hi = start + int(nz[-1])
+            m = len(x) // n10
+            if m:
+                blocks = x[:m * n10].reshape(m, n10, ch)
+                live.append(np.abs(blocks).max(axis=(1, 2)) > 0)
+                var.append(blocks.var(axis=1))
+                mean.append(blocks.mean(axis=1))
+        dc = np.zeros(ch)
+        live = np.concatenate(live) if live else np.zeros(0, dtype=bool)
+        if len(live) >= 3 and live.sum() >= 3:
+            var, mean = np.concatenate(var)[live], np.concatenate(mean)[live]
+            quiet = np.argsort(var.sum(axis=1))[:max(3, len(var) // 10)]
+            q = mean[quiet]
+            dcm = q.mean(axis=0)
+            spread = np.sqrt(var[quiet]).max(axis=0)
+            real = ((spread < np.abs(dcm)) | (spread < 0.01 * peak)) & (q.std(axis=0) < 0.2 * np.abs(dcm))
+            dc = np.where(real, dcm, 0.0)
+        use_dc = nz_lo is not None and np.abs(dc).max() > oneshot.DC_REL * peak
+        L, hop = max(1, int(0.005 * sr)), max(1, int(round(0.001 * sr)))
+        out, own = 0.0, hop * 1000
+        for start in range(0, total, own):                   # pass 2: the 5 ms envelope on a 1 ms grid, with L samples of context
+            lo, hi = max(0, start - L), min(total, start + own + L)
+            f.seek(lo)
+            x = f.read(hi - lo, dtype="float64", always_2d=True)
+            if use_dc:
+                a, b = max(nz_lo, lo), min(nz_hi + 1, hi)
+                if b > a:
+                    x[a - lo:b - lo] -= dc
+            c = np.concatenate([[0.0], np.cumsum((x ** 2).mean(axis=1))])
+            i = np.arange(start, min(total, start + own), 1)
+            i = i[i % hop == 0]
+            a = np.clip(i - L // 2, 0, total)
+            b = np.clip(i - L // 2 + L, 0, total)
+            out = max(out, float(((c[b - lo] - c[a - lo]) / np.maximum(b - a, 1)).max()))
+    return out
 
 
 def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | None = None) -> dict:

@@ -156,3 +156,18 @@ def test_two_sections_with_the_same_label_keep_their_own_hit_counts(tmp_path):
     kick = rec["stems"]["kick"]
     assert [s["roles"] for s in kick["per_section"]] == [{"kick": 16}, {"kick": 8}]
     assert [(v["index"], v["hits"]) for v in kick["roles"][0]["per_section"]] == [(0, 16), (1, 8)]
+
+
+def test_the_stem_peak_read_in_blocks_is_the_whole_stem_envelope_peak(tmp_path):
+    """Same number as oneshot's on the whole stem, with a DC offset and digital silence around the audio, block sizes that split hits."""
+    from roadie_analysis import drumsections, oneshot
+    rng = np.random.default_rng(2)
+    x = stem([(at(i * 4), kick_hit(i % 3 - 1)) for i in range(8)] + [(at(40), noise_hit(1, 0.01, 6.0))], 4)[:, None]
+    x = np.hstack([x, 0.5 * x + 0.01 * rng.standard_normal(x.shape)]) * 0.5 + 0.02       # stereo, DC offset
+    x[: SR // 4] = 0.0                                                                      # digital silence before the audio
+    x[-SR // 2:] = 0.0
+    sf.write(str(tmp_path / "s.wav"), x.astype(np.float32), SR, subtype="FLOAT")
+    y, sr = sf.read(str(tmp_path / "s.wav"), dtype="float32", always_2d=True)
+    want = oneshot.envelope_peak(oneshot._undc(np.asarray(y, dtype=np.float64), sr), sr)
+    for block_s in (10.0, 0.37):
+        assert drumsections.stem_peak(tmp_path / "s.wav", block_s) == pytest.approx(want, rel=1e-6)
