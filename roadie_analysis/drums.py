@@ -102,8 +102,8 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
     "rule", "reason" (why neutral), "hits" (measured + assigned), "measured", "pattern" (share of all the track's bars at each
     16th), "own_pattern" (share of the bars the role plays in), "line", "level_db", "stability", "separation", "groups", "note",
-    "variants", "clip" (path relative to the folder, or None), "clip_note" (why none), "per_section" [{section, start_bar,
-    bars, hits, bars_with, pattern, line}] (the sections the role plays in)}. "bleed" lists the roles marked bleed (left out)."""
+    "variants", "clip" (path relative to the folder, or None), "clip_note" (why none), "per_section" [{index, section, start_bar,
+    bars, hits, bars_with, pattern, line}] (the sections the role plays in; "index" is the section's place in the grid's list)}. "bleed" lists the roles marked bleed (left out)."""
     t_start = time.monotonic()
     stems_dir = Path(stems_dir)
     stems = find_stems(stems_dir)
@@ -246,11 +246,11 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
     def section_view(ids):
         mine = [hits[i] for i in ids]
         rows = []
-        for p in plan:
+        for i, p in enumerate(plan):
             hs = [h for h in mine if in_section(h, p)]
             if hs:
                 pat, nb = _own_line(hs)
-                rows.append({"section": p["name"], "start_bar": p["start_bar"], "bars": p["bars"], "hits": len(hs), "bars_with": nb,
+                rows.append({"index": i, "section": p["name"], "start_bar": p["start_bar"], "bars": p["bars"], "hits": len(hs), "bars_with": nb,
                              "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat)})
         return rows
 
@@ -283,9 +283,9 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"], "line": pattern_line(pat),
                            "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
                            "why": bleed[g["id"]]["why"]})
-    per_section = [{"name": p["name"], "start_bar": p["start_bar"], "bars": p["bars"],
-                    "roles": {r["name"]: v["hits"] for r in roles for v in r["per_section"] if v["section"] == p["name"]}}
-                   for p in plan]
+    per_section = [{"name": p["name"], "start_bar": p["start_bar"], "bars": p["bars"],      # by index: labels repeat (two "Drop")
+                    "roles": {r["name"]: v["hits"] for r in roles for v in r["per_section"] if v["index"] == i}}
+                   for i, p in enumerate(plan)]
     rec = {"file": path.name, "sample_rate": res["sample_rate"], "hits": sum(h["owned"] for h in hits),
            "hat_like": res["hat_like"], "bars": res["bars"], "first_bar": res["first_bar"], "roles": roles, "bleed": marked,
            "per_section": per_section, "notes": res["notes"] + named["notes"]}

@@ -143,3 +143,16 @@ def test_a_section_where_the_stem_is_near_silent_has_no_hits_it_is_judged_agains
     rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
     kick = rec["stems"]["kick"]
     assert kick["hits"] == 32 and [v["section"] for r in kick["roles"] for v in r["per_section"]] == ["A"]
+
+
+def test_two_sections_with_the_same_label_keep_their_own_hit_counts(tmp_path):
+    """sections.json labels repeat (Drop, Drop): the counts are by section place, not by name."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    x = stem([(at(i * 4), kick_hit()) for i in range(16)] + [(at(128 + i * 16), kick_hit()) for i in range(8)], 16)
+    sf.write(str(d / "drums_kick.flac"), x.astype(np.float32), SR)
+    secs = [{"name": "Drop", "start_bar": 0, "bars": 8}, {"name": "Drop", "start_bar": 8, "bars": 8}]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    kick = rec["stems"]["kick"]
+    assert [s["roles"] for s in kick["per_section"]] == [{"kick": 16}, {"kick": 8}]
+    assert [(v["index"], v["hits"]) for v in kick["roles"][0]["per_section"]] == [(0, 16), (1, 8)]
