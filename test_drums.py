@@ -1,0 +1,236 @@
+"""roadie_analysis.drums, `roadie drums` and the study reader's drums layer, on synthetic stems at 124 BPM.
+
+Four-on-the-floor kick, open-ish hats on the offbeats and closed hats on every other 16th, built the way
+test_analysis_drumroles.py builds its stems, with the downbeat two bars into the file so that the default grid has to be
+moved back by whole bars. Each test is one behaviour; the stems are made and analysed once.
+"""
+import json
+import pathlib
+import sys
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import roadie_drums  # noqa: E402
+import study  # noqa: E402
+from roadie_analysis import drums  # noqa: E402
+from test_analysis_drumroles import BPM, SR, STEP, T0, at, noise_hit, stem, tom_hit  # noqa: E402
+
+BARS = 24
+BAR_S = 16 * STEP
+
+
+def kick_hit(db=0.0, seconds=0.6):
+    t = np.arange(int(seconds * SR)) / SR
+    return np.sin(2 * np.pi * 50 * t) * np.exp(-t / 0.05) * 10 ** (db / 20)
+
+
+def hat_pattern(bar):
+    """Offbeats in sections A and C (bars 0-7, 16-23), the odd 16ths in B (bars 8-15): one hat sound, two patterns."""
+    return [2, 6, 10, 14] if not 8 <= bar < 16 else [1, 3, 5, 7, 9, 11, 13, 15]
+
+
+def make_stems(root):
+    """<root>/Test/Song/Song_124bpm_stems: drums_kick (four on the floor), drums_hh (one closed hat whose pattern changes
+    in section B), drums_toms (one tom per section), alignment.json with the downbeat two bars in, sections.json (3 x 8 bars)."""
+    d = root / "Test" / "Song" / "Song_124bpm_stems"
+    d.mkdir(parents=True)
+    wr = lambda name, ev: sf.write(str(d / name), stem(ev, BARS).astype(np.float32) * (0.3 if "hh" in name else 1.0), SR)  # noqa: E731
+    wr("drums_kick.flac", [(at(i * 4), kick_hit(i % 3 - 1)) for i in range(BARS * 4)])
+    wr("drums_hh.flac", [(at(b * 16 + s), noise_hit(b * 16 + s, 0.005, (s % 3 - 1))) for b in range(BARS) for s in hat_pattern(b)])
+    wr("drums_toms.flac", [(at(b * 16), tom_hit()) for b in (1, 9, 17)])
+    (d / "alignment.json").write_text(json.dumps({"result": {"bpm": BPM, "downbeat_sec": T0 + 2 * BAR_S, "downbeat_verdict": "ok"}}))
+    (d / "sections.json").write_text(json.dumps({"bpm": BPM, "method": "stems", "sections": [
+        {"beat": 32 * k, "bar": 8 * k + 1, "time_sec": T0 + 8 * k * BAR_S, "duration_beats": 32, "stems": [], "label": "ABC"[k],
+         "live_bar": 8.0 * k + 1} for k in range(3)]}))
+    return d
+
+
+@pytest.fixture(scope="module")
+def made(tmp_path_factory):
+    d = make_stems(tmp_path_factory.mktemp("drums"))
+    return d, drums.drum_roles(d, jobs=1)
+
+
+def role(rec, stem_name, name):
+    return next(r for r in rec["stems"][stem_name]["roles"] if r["name"] == name)
+
+
+def test_a_hat_whose_pattern_changes_between_sections_is_one_role_with_a_pattern_per_section(made):
+    d, rec = made
+    hh = rec["stems"]["hh"]["roles"]
+    assert len(hh) == 1 and hh[0]["hits"] == 8 * 4 * 2 + 8 * 8
+    lines = {v["section"]: v["line"] for v in hh[0]["per_section"]}
+    assert lines == {"A": "..x...x...x...x.", "B": ".x.x.x.x.x.x.x.x", "C": "..x...x...x...x."}
+
+
+def test_a_sound_heard_once_in_each_section_is_one_role(made):
+    d, rec = made
+    toms = rec["stems"]["toms"]["roles"]
+    assert len(toms) == 1 and toms[0]["hits"] == 3 and [v["hits"] for v in toms[0]["per_section"]] == [1, 1, 1]
+    assert toms[0]["line"] == "x..............."
+
+
+def test_the_kick_is_named_over_all_sections_and_its_grid_is_counted_from_the_downbeat(made):
+    d, rec = made
+    assert rec["grid"]["t0"] == pytest.approx(T0, abs=1e-3)           # the downbeat two bars in, moved back to the first bar line
+    k = role(rec, "kick", "kick")
+    assert (k["line"], k["hits"]) == ("x...x...x...x...", BARS * 4)
+    assert [v["hits"] for v in k["per_section"]] == [32, 32, 32]
+
+
+def test_drums_json_and_one_clip_per_role_are_written_with_the_inputs_for_staleness(made):
+    d, rec = made
+    saved = json.loads((d / "drums.json").read_text())
+    assert (saved["kind"], saved["version"]) == ("drum_roles", 1)
+    assert {i["name"]: i["size"] for i in saved["inputs"]} == {
+        n: (d / n).stat().st_size for n in ("drums_kick.flac", "drums_hh.flac", "drums_toms.flac", "alignment.json", "sections.json")}
+    for stem_name, s in saved["stems"].items():
+        for r in s["roles"]:
+            assert r["clip"] is None or (d / r["clip"]).is_file()
+            if r["clip"]:
+                audio, sr = sf.read(str(d / r["clip"]))
+                assert sr == SR and len(audio) > 0
+    assert saved["stems"]["kick"]["roles"][0]["clip"] == "drum_roles/kick.wav"
+    assert (d / "drum_roles" / "kick.wav").is_file()
+    assert saved["stems"]["kick"]["per_section"][0]["roles"] == {"kick": 32}
+
+
+def test_a_process_pool_gives_the_same_record_as_one_process(made):
+    d, serial = made
+    pooled = drums.drum_roles(d, write=False, jobs=2)
+    drop = ("made", "seconds", "jobs", "stage_seconds", "written")
+    clean = lambda r: json.loads(json.dumps({k: v for k, v in r.items() if k not in drop}))  # noqa: E731
+    for r in (serial, pooled):                                     # the serial record was written, the pooled one was not
+        for s in r["stems"].values():
+            for x in s["roles"]:
+                x["clip"], x["clip_note"] = None, None
+    assert clean(pooled) == clean(serial) and pooled["jobs"] == 2
+
+
+def test_no_write_prints_the_table_and_writes_nothing(tmp_path, capsys):
+    d = make_stems(tmp_path)
+    before = sorted(p.name for p in d.iterdir())
+    assert roadie_drums.main([str(d), "--no-write", "--jobs", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "kick" in out and "x... x... x... x..." in out
+    assert sorted(p.name for p in d.iterdir()) == before
+
+
+def test_the_study_reader_shows_the_drums_layer_and_flags_it(made, capsys):
+    d, _ = made
+    s = study.load_study(str(d.parent))
+    layer = s.layers["drums"]
+    assert layer.missing is None and layer.data["kind"] == "drum_roles"
+    assert any(c.startswith("fresh") for c in layer.caveats)
+    assert study.to_json(s)["layers"]["drums"]["data"]["stems"]["kick"]["roles"][0]["name"] == "kick"
+    assert d / "drums.json" not in s.extras
+    study._show(s)
+    assert "x... x... x... x..." in capsys.readouterr().out
+
+
+def test_a_section_where_the_stem_is_near_silent_has_no_hits_it_is_judged_against_the_whole_stem(tmp_path):
+    """A kick in bars 0-7, then only a noise bed 50 dB under it: against its own loudest moment the bed would be hits."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    x = stem([(at(i * 4), kick_hit()) for i in range(32)], 16)
+    bed = np.random.default_rng(3).standard_normal(len(x)) * 10 ** (-50 / 20) * 0.3
+    x[int((T0 + 8 * BAR_S) * SR):] += bed[int((T0 + 8 * BAR_S) * SR):]
+    sf.write(str(d / "drums_kick.flac"), x.astype(np.float32), SR)
+    secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    kick = rec["stems"]["kick"]
+    assert kick["hits"] == 32 and [v["section"] for r in kick["roles"] for v in r["per_section"]] == ["A"]
+
+
+def test_two_sections_with_the_same_label_keep_their_own_hit_counts(tmp_path):
+    """sections.json labels repeat (Drop, Drop): the counts are by section place, not by name."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    x = stem([(at(i * 4), kick_hit()) for i in range(16)] + [(at(128 + i * 16), kick_hit()) for i in range(8)], 16)
+    sf.write(str(d / "drums_kick.flac"), x.astype(np.float32), SR)
+    secs = [{"name": "Drop", "start_bar": 0, "bars": 8}, {"name": "Drop", "start_bar": 8, "bars": 8}]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    kick = rec["stems"]["kick"]
+    assert [s["roles"] for s in kick["per_section"]] == [{"kick": 16}, {"kick": 8}]
+    assert [(v["index"], v["hits"]) for v in kick["roles"][0]["per_section"]] == [(0, 16), (1, 8)]
+
+
+def test_the_stem_peak_read_in_blocks_is_the_whole_stem_envelope_peak(tmp_path):
+    """Same number as oneshot's on the whole stem, with a DC offset and digital silence around the audio, block sizes that split hits."""
+    from roadie_analysis import drumsections, oneshot
+    rng = np.random.default_rng(2)
+    x = stem([(at(i * 4), kick_hit(i % 3 - 1)) for i in range(8)] + [(at(40), noise_hit(1, 0.01, 6.0))], 4)[:, None]
+    x = np.hstack([x, 0.5 * x + 0.01 * rng.standard_normal(x.shape)]) * 0.5 + 0.02       # stereo, DC offset
+    x[: SR // 4] = 0.0                                                                      # digital silence before the audio
+    x[-SR // 2:] = 0.0
+    sf.write(str(tmp_path / "s.wav"), x.astype(np.float32), SR, subtype="FLOAT")
+    y, sr = sf.read(str(tmp_path / "s.wav"), dtype="float32", always_2d=True)
+    want = oneshot.envelope_peak(oneshot._undc(np.asarray(y, dtype=np.float64), sr), sr)
+    for block_s in (10.0, 0.37):
+        assert drumsections.stem_peak(tmp_path / "s.wav", block_s) == pytest.approx(want, rel=1e-6)
+
+
+class FakeRclone:
+    """rclone against a local folder standing in for the pCloud library (`pcloud:<path>` is <cloud>/<path>), in place of
+    `subprocess.run`: lsf, copyto, cat and deletefile, each call logged."""
+
+    def __init__(self, cloud):
+        self.cloud, self.calls = cloud, []
+
+    def path(self, arg):
+        return self.cloud / arg[len("pcloud:"):] if arg.startswith("pcloud:") else pathlib.Path(arg)
+
+    def __call__(self, cmd, **kw):
+        import shutil
+        import types
+        assert cmd[0] == "rclone"
+        self.calls.append(cmd[1:])
+        out = ""
+        if cmd[1] == "lsf":
+            out = "".join(p.name + "\n" for p in sorted(self.path(cmd[-1]).iterdir()) if p.is_file())
+        elif cmd[1] == "copyto":
+            dst = self.path(cmd[3])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.path(cmd[2]), dst)
+        elif cmd[1] == "cat":
+            out = self.path(cmd[2]).read_text()
+        elif cmd[1] == "deletefile":
+            self.path(cmd[2]).unlink()
+        else:
+            raise AssertionError(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+
+def test_a_pcloud_study_is_analysed_in_a_temp_folder_and_uploaded_by_rclone_never_through_the_mount(tmp_path, monkeypatch):
+    cloud = tmp_path / "cloud"
+    d = cloud / "Music" / "Studies" / "A" / "Song" / "Song_stems"
+    d.mkdir(parents=True)
+    sf.write(str(d / "drums_kick.flac"), stem([(at(i * 4), kick_hit()) for i in range(32)], 8).astype(np.float32), SR)
+    (d / "alignment.json").write_text(json.dumps({"result": {"bpm": BPM, "downbeat_sec": T0, "downbeat_verdict": "ok"}}))
+    (d / "drum_roles").mkdir()
+    for name in ("old-gone.wav", "kick.wav", "mine.wav"):
+        (d / "drum_roles" / name).write_bytes(b"old")
+    (d / "drums.json").write_text(json.dumps({"kind": "drum_roles", "version": 1, "stems": {"kick": {"roles": [
+        {"clip": "drum_roles/kick.wav"}, {"clip": "drum_roles/old-gone.wav"}]}}}))
+    fake = FakeRclone(cloud)
+    monkeypatch.setattr(drums.subprocess, "run", fake)
+    monkeypatch.setattr(drums.keymod, "pcloud_remote", lambda p: (
+        "pcloud:" + pathlib.Path(p).resolve().relative_to(cloud.resolve()).as_posix() if str(p).startswith(str(cloud)) else None))
+    rec = drums.drum_roles(d, jobs=1)
+    uses = [c for c in fake.calls]
+    assert rec["written"].endswith("Song_stems/drums.json") and rec["written"].startswith("pcloud:")
+    new = json.loads((d / "drums.json").read_text())
+    assert new["stems"]["kick"]["roles"][0]["name"] == "kick" and new["version"] == 1
+    lib = sorted(p.name for p in (d / "drum_roles").iterdir())
+    assert lib == ["kick.wav", "mine.wav"]                         # old-gone (listed before, not now) went; mine.wav was never listed
+    assert (d / "drum_roles" / "kick.wav").read_bytes() != b"old"
+    verbs = [(c[0], pathlib.Path(c[-1]).name) for c in uses]
+    assert verbs.index(("copyto", "kick.wav")) < verbs.index(("copyto", "drums.json")) < verbs.index(("deletefile", "old-gone.wav"))
+    stems_copied = [c for c in uses if c[0] == "copyto" and c[1].endswith("drums_kick.flac")]
+    assert stems_copied and not stems_copied[0][2].startswith(str(cloud))      # the audio went to a temp folder
+    tmp_used = pathlib.Path(stems_copied[0][2]).parent
+    assert not tmp_used.exists()                                                # and the temp folder is gone
+    assert sorted(p.name for p in d.iterdir()) == ["alignment.json", "drum_roles", "drums.json", "drums_kick.flac"]

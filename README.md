@@ -70,6 +70,7 @@ claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clo
 | `sample_analyze(source, hit=None)` | a drum one-shot in synth terms: envelope, pitch and its drop, harmonics, noise, click, bands, width |
 | `sample_compare(a, b, hit_a=None, hit_b=None)` | two hits compared, with one plain `readings` line per difference past its threshold |
 | `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
+| `drum_roles(stems, tempo=None, t0=None, sections=None, out=None, jobs=None, timeout_s=1800)` | the roles inside each drum stem of a folder or study (pattern, level, bleed); writes `drums.json` and one clip per role; the JSON of `roadie drums --json` |
 | `study_list()` | every study under the Studies folder and which analysis layers each has; the JSON of `roadie study list --json` |
 | `study_read(name, layers=None)` | one study as a record, the JSON of `roadie study show <name> --json`; `layers` keeps only some |
 | `arrangement_compare(scenes=None, ref="all", roles=None, read=None, out=None)` | the Set's Session scenes against reference studies, in numbers: the JSON of `roadie arrangement compare`, and with `out` the Markdown report too; `read` is a saved `roadie arrangement read --json` instead of Live |
@@ -142,6 +143,8 @@ roadie study show Flare            # one study: bpm, grid, sections, mix profile
 roadie study show Flare --json     # the same record as JSON ({"kind": "study", "version": 1, ...})
 ```
 
+A study whose stems folder has no `.stem-model` marker, or names a model other than the current one (`bs-roformer-sw`, the `yt2stems.sh` default), gets a one-line note in `show` (and at the top of `roadie drums` and `roadie arrangement ref`), an `old-stems` flag in `list`, and `stem_model` / `stem_model_current` in the JSON.
+
 `show` takes a title (an exact title, else a unique part of one), `Artist/Title`
 or a path. A title found in two roots is an error naming both; give the root to
 pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
@@ -149,8 +152,7 @@ pick one: `local:Flare`, `pcloud:Flare`. The record says which root it came from
 decomposed accents). `list` shows which layers a study has from file names alone (it opens `sections.json` only to look for `bar_activity`), so it can
 differ from `show` for a profile nested deeper than `analysis/`. The layers are `grid` (`alignment.json`), `sections` (`sections.json`),
 `mix` (a `*.profile.json` of kind `reference_profile`, with a note saying whether
-its inputs are fresh, stale or could not be checked), and `activity` (the `bar_activity` that `roadie sections` saves in `sections.json`) and `drums`,
-which no tool writes yet. A layer is returned with caveats rather than guessed
+its inputs are fresh, stale or could not be checked), and `activity` (the `bar_activity` that `roadie sections` saves in `sections.json`) and `drums` (the `drums.json` that `roadie drums` writes, with a fresh/stale note). A layer is returned with caveats rather than guessed
 at: a profile of a newer version than the reader knows is listed, not read, and
 an unparseable file is shown with its path, never as missing. Other JSON result
 files are listed under `extras`, not interpreted. A study whose stems sit in a
@@ -248,8 +250,23 @@ The MCP tool `arrangement_compare` takes the same arguments.
 
 ## Drum roles
 
-`roadie_analysis/drumroles.py` lists the sounds inside one drum stem (no tool or
-command yet). `hit_groups` finds the hits (oneshot's hit detection), puts each on
+```bash
+roadie drums Glacier               # a study or a stems folder: table per stem and section, writes drums.json and drum_roles/*.wav
+roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the cores)
+roadie drums Glacier --no-write    # the table only
+roadie drums Glacier --json        # the drums.json record
+```
+
+Tempo, the downbeat and the sections come from the folder's `alignment.json` and
+`sections.json`. Each stem is analysed section by section, in parallel, and the
+sections' groups are matched by sound. Each role has its name, hit count, a 16-step
+pattern line from the downbeat (`x...x...x...x...`: `x` = most of the bars it plays
+in, `o` = some, `.` = fewer) over the track and in each section, its level, and a
+clip of one clean hit in `drum_roles/`. See
+`docs/DRUMROLES.md` for the file format, how to read the table and the limits.
+
+`roadie drums <study | stems_dir>` (and the MCP tool `drum_roles`) lists the sounds
+inside each drum stem of a study; `roadie_analysis/drumroles.py` does it for one stem. `hit_groups` finds the hits (oneshot's hit detection), puts each on
 the 16th grid and groups the ones that sound alike (average linkage on
 `oneshot.spectral_distance`, threshold 1.5). `name_roles` names the groups and
 `mark_bleed` marks the ones that are another stem's sound leaking in.

@@ -4,7 +4,7 @@
     roadie mcp                      run it (stdio); an MCP client starts it, not you
     claude mcp add --scope user roadie -- /abs/path/to/roadie/roadie mcp
 
-Seven tools: sample_analyze, sample_compare, reference_profile, session_compare, study_list,
+Eight tools: drum_roles (the roles inside each drum stem of a folder: `roadie drums`), sample_analyze, sample_compare, reference_profile, session_compare, study_list,
 study_read (the Studies folder, read-only: `roadie study`) and arrangement_compare (the Set's scene
 order against reference studies: `roadie arrangement compare`). The first three
 have the names, arguments, defaults and output of Sideman's tools of the same name; session_compare
@@ -31,6 +31,7 @@ elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
     os.execv(_venv_py, [_venv_py] + sys.argv)
 
 import json
+import time
 from typing import Any
 
 MCP_HINT = ("roadie mcp needs the `mcp` package in .venv: run ./install.sh, or "
@@ -52,8 +53,9 @@ except ModuleNotFoundError as _e:
     sys.exit("sideman is not installed in .venv: run ./install.sh")
 
 import arrangement
+import roadie_drums
 import study
-from roadie_analysis import oneshot, profile
+from roadie_analysis import drums, oneshot, profile
 
 mcp = MCPServer(
     "roadie",
@@ -115,6 +117,44 @@ def _profile(source: str, hit: int | str | None) -> dict:
         raise AnalysisError("not enough memory to profile %s; trim it to the hits" % path)
     except (OSError, RuntimeError, ValueError) as e:   # LibsndfileError is a RuntimeError
         raise AnalysisError("cannot measure %s: %s" % (path, e))
+
+
+@mcp.tool()
+def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
+               sections: list[dict[str, Any]] | None = None, out: str | None = None,
+               jobs: int | None = None, write: bool = True, timeout_s: float = 1800.0) -> str:
+    """The sounds inside each drum stem of a track, as roles: which 16ths each plays at, how often, how
+    loud, one clean hit to listen to. `stems` is the stems folder (the `drums_<kind>` files in it: kick,
+    hh, snare, toms, ride, crash) or a study's name. `tempo` (BPM), `t0` (seconds from the start of the
+    files to bar 0, a bar line) and `sections` ({"name", "start_bar", "bars"}, bars counted from t0) default
+    to the folder's alignment.json and sections.json. Each stem is analysed section by section (a section under 8 bars
+    joins its neighbour; no sections: the whole track) and the sections' groups are matched by sound, so a role keeps
+    one name over the track and has a pattern per section (`per_section`); `jobs` processes run it (default: the cores).
+    A role name is a rule over pattern and measurements,
+    never recognition: a group no rule fits keeps a neutral name (`hh 2`) with the reason; a group that is
+    another stem's sound leaking in is listed under `bleed` and is not a role (docs/DRUMROLES.md).
+    Per stem: each role's `name`, `hits`, `line` (16 characters from the downbeat: x = most bars, o = some,
+    . = fewer, over the bars the role plays in), `pattern` (the share of all bars at each 16th), `level_db`, `stability`,
+    `separation`, `reason` (why neutral), `clip` and `per_section` (its hits and `line` in each section it plays in). Writes `drums.json` and `drum_roles/<stem>-<role>.wav` (one clean hit
+    per role; none when no hit is clean, and `clip_note` says why) into the stems folder, or `out`; `write=false` writes
+    nothing. A study on the pCloud library is copied to a temp folder with rclone, analysed there and its results uploaded
+    with rclone (never through the mount). It reads
+    audio and takes minutes: `timeout_s` is a deadline checked as jobs finish, and passing it is a tool error that
+    writes nothing (jobs already started run on in the background). Local, except rclone for the pCloud library."""
+    try:
+        folder = os.path.abspath(os.path.expanduser(stems.strip()))
+        if not os.path.isdir(folder):
+            folder = str(roadie_drums.stems_dir_of(stems))
+        rec = drums.drum_roles(folder, tempo, t0, sections,
+                               os.path.abspath(os.path.expanduser(out)) if out else None,
+                               write=write, deadline=time.monotonic() + timeout_s, jobs=jobs)
+    except TimeoutError as e:
+        raise AnalysisError("drum_roles ran out of time (%g s): %s; nothing was written" % (timeout_s, e))
+    except MemoryError:
+        raise AnalysisError("not enough memory for these stems")
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError, IndexError, ArithmeticError) as e:
+        raise AnalysisError("cannot find the drum roles: %s: %s" % (type(e).__name__, e))
+    return json.dumps(rec, indent=2)
 
 
 @mcp.tool()

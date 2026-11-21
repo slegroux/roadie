@@ -5,6 +5,7 @@
 #   roadie load <stems_dir> [opts]   load stems into the open Live set (stems2live.py)
 #   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
+#   roadie drums <study | stems_dir> [--jobs N] [--json] [--no-write]  drum roles per stem and section (roadie_drums.py)
 #   roadie study list | show <name> [--json] | tag <name> --key K  studies and their saved analyses (study.py)
 #   roadie key <study|stems> [--json]  estimate the key from the bass and synths stems (roadie_analysis/key.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
@@ -136,6 +137,10 @@ case "$cmd" in
     # Read-only except `tag`, which writes one study.json; not logged.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
     exec "$PY" "$REPO/study.py" "$@" ;;
+  drums)
+    # Writes drums.json and drum_roles/ into the stems folder; not logged.
+    PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
+    exec "$PY" "$REPO/roadie_drums.py" "$@" ;;
   key)
     # Read-only (a pCloud study's two stems are copied to a temp folder and deleted); not logged.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
