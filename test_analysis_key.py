@@ -100,3 +100,23 @@ def test_files_on_the_pcloud_mount_map_to_remote_paths():
     mount = os.path.expanduser("~/pCloud Drive")
     assert K.pcloud_remote(mount + "/Music/Studies/Ben Böhmer/Title/s/bass.flac") == "pcloud:Music/Studies/Ben Böhmer/Title/s/bass.flac"
     assert K.pcloud_remote("/tmp/x/bass.flac") is None
+
+
+def test_a_study_missing_a_stem_or_with_silent_stems_gives_no_key(tmp_path):
+    bass, chords = progression(9, K.MINOR)
+    sf.write(tmp_path / "bass.wav", bass, SR)
+    cli = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, "roadie_analysis", "key.py"), str(tmp_path), *a],
+                                    capture_output=True, text=True)
+    r = cli("--json")
+    assert r.returncode == 1 and "no synths stem" in r.stderr and "--allow-partial" in r.stderr
+    r = cli("--json", "--allow-partial")
+    got = json.loads(r.stdout)
+    assert r.returncode == 0 and got["complete"] is False and got["stems_used"] == ["bass"]
+    sf.write(tmp_path / "synths.wav", chords, SR)
+    got = json.loads(cli("--json").stdout)
+    assert got["complete"] is True and got["stems_used"] == ["bass", "synths"]
+    with pytest.raises(ValueError, match="no pitch content"):
+        K.key_from_chroma([0.0] * 12)
+    sf.write(tmp_path / "silent.wav", np.zeros(SR * 2), SR)
+    with pytest.raises(ValueError, match="silent"):
+        K.detect_key([tmp_path / "silent.wav"])

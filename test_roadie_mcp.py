@@ -285,10 +285,11 @@ def test_study_tools_carry_bpm_key_and_camelot_from_study_json(S, tmp_path, monk
     study.tag_study(tmp_path / "Einmusik" / "Flare [124 Am 8A]", key="Am", bpm=124, source="online", url="https://x/y")
     monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("local", tmp_path)])
     row = {r["title"]: r for r in json.loads(call(S, "study_list"))["studies"]}["Flare"]
-    assert (row["bpm"], row["key"], row["camelot"], row["key_source"]) == (124, "A minor", "8A", "online")
+    assert (row["bpm"], row["listed_bpm"], row["key"], row["camelot"], row["key_source"]) == (
+        124, 124, "A minor", "8A", "online")
     full = json.loads(call(S, "study_read", name="Flare"))
-    assert (full["title"], full["bpm"], full["key"], full["camelot"], full["key_url"]) == (
-        "Flare", 124, "A minor", "8A", "https://x/y")
+    assert (full["title"], full["bpm"], full["listed_bpm"], full["key"], full["camelot"], full["key_url"]) == (
+        "Flare", 124, 124, "A minor", "8A", "https://x/y")
 
 
 def test_arrangement_compare_is_the_cli_report_and_writes_the_markdown(S, tmp_path, monkeypatch):

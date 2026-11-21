@@ -160,11 +160,12 @@ folder not named `*_stems` has a `study.json` at its root,
 
 ### Bpm and key
 
-`list` has a column each for bpm, key and Camelot code; `show` and the JSON carry them as `bpm`, `key`, `camelot`,
-`key_source`, `key_confidence` and `key_url`. They live in the optional fields of the same `study.json`
-(`{"kind": "study_marker", "bpm": 124, "key": "A minor", "camelot": "8A", "key_source": "tagged"}`); a study
-without them still loads, with the key shown as `-` and the bpm taken from its analysis. A bpm in `study.json`
-is the record's own and wins over the measured one. `key_source` says where the key came from, weakest first:
+`list` has a column each for bpm, key and Camelot code; `show` and the JSON carry them as `bpm`, `listed_bpm`,
+`bpm_url`, `key`, `camelot`, `key_source`, `key_confidence`, `key_url` and `key_note`. They live in the optional
+fields of the same `study.json` (`{"kind": "study_marker", "listed_bpm": 124, "key": "A minor", "camelot": "8A",
+"key_source": "tagged"}`); a study without them still loads, with the key shown as `-`. `bpm` is always the
+measured grid tempo the sections were made with; the tempo a listing or the user gives is `listed_bpm`, shown
+beside it (`125.052 (92)`) when they differ by more than 1, and nothing is computed from it. `key_source` says where the key came from, weakest first:
 `detected` (a `roadie key` estimate, shown with a `?`: `Am?  8A?`), `online` (a published listing, with its
 `key_url`), `tagged` (the user's own tag) and `by ear`. A key never replaces one from a stronger source.
 
@@ -174,18 +175,19 @@ record's `title` is `Flare`.
 
 ```bash
 roadie key Flare                   # estimate the key from the bass and synths stems; --json for the record
-roadie study tag Flare --key Am --bpm 124                    # the user's own tag (source "tagged")
+roadie study tag Flare --key Am --bpm 124                    # the user's own tag (source "tagged"); the bpm is the listed one
 roadie study tag Flare --key Am --by-ear                     # settled by ear: beats every other source
 roadie study tag Flare --key "A minor" --source online --url https://www.beatport.com/track/flare/18146849
 ```
 
 `tag` is the only command that writes in a Studies folder, and it writes one file: it sets the fields it was
-given in `study.json` and keeps the others (`stems`, `t0`). A study on the pCloud mount is written with
-`rclone copyto` of that one small file, a local one directly. `roadie key` takes the key from the chroma of
+given in `study.json` and keeps the others (`stems`, `t0`). A study on the pCloud mount is read and written with
+rclone (`cat`, `copyto`, then a read-back), never through the mount, a local one directly. `roadie key` takes the key from the chroma of
 the bass and synths stems summed over the whole track (Krumhansl-Kessler profiles), and gives the key, its
 short form and Camelot code, a confidence (the margin over the runner-up, which is printed too) and the
 runner-up. A small margin usually means a relative major/minor or a fifth apart: use it to cross-check a
-published key, not to overrule one. For a study on the pCloud mount it copies the two stems to a temporary
+published key, not to overrule one. It needs both stems (`--allow-partial` estimates from one and says `complete: false`), and
+refuses silent stems. For a study on the pCloud mount it copies the two stems to a temporary
 folder with `rclone copyto` instead of reading them through the mount, and deletes them afterwards.
 
 ## Arrangement: the Set's scenes against reference studies

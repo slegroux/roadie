@@ -88,7 +88,10 @@ def _pearson(a, b) -> float:
 
 def key_from_chroma(chroma) -> dict:
     """Rank the 24 keys for a 12-value chroma (index 0 = C). Returns the best key, its correlation,
-    the runner-up and `confidence` = best - runner-up."""
+    the runner-up and `confidence` = best - runner-up. Raises ValueError for an empty (all-zero) chroma:
+    every key would tie, and the tie-break would invent one."""
+    if not any(c > 0 for c in chroma):
+        raise ValueError("no pitch content in the audio (silent or unreadable stems): no key")
     scores = []
     for mode, prof in ((MAJOR, KK_MAJOR), (MINOR, KK_MINOR)):
         for pc in range(12):
@@ -111,7 +114,9 @@ def stem_chroma(path, sr: int = 22050) -> list[float]:
     y, _ = librosa.load(str(path), sr=sr, mono=True)
     c = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=2048).sum(axis=1)
     total = float(np.sum(c))
-    return [float(x) / total for x in c] if total > 0 else [0.0] * 12
+    if not total > 0:
+        raise ValueError("%s is silent: no key can be read from it" % Path(path).name)
+    return [float(x) / total for x in c]
 
 
 def detect_key(paths) -> dict:
@@ -136,46 +141,62 @@ def pcloud_remote(path) -> str | None:
     return "pcloud:" + rel.as_posix()
 
 
-def _stem_files(arg: str) -> list[Path]:
-    """The bass and synths stems of a study (a title or path) or of a stems folder with no study around it."""
+ROLES = ("bass", "synths")
+
+
+def _stem_files(arg: str) -> dict[str, list[Path]]:
+    """The bass and synths stems of a study (a title or path) or of a stems folder with no study around it,
+    one file per role (the first, so `bass.flac` and `bass.wav` do not count twice)."""
     here = str(Path(__file__).resolve().parent.parent)
     if here not in sys.path:
         sys.path.insert(0, here)
     import study
     try:
-        files = [f for role in ("bass", "synths") for f in study.load_study(arg).stems.get(role, [])]
+        found = study.load_study(arg).stems
+        files = {r: found[r][:1] for r in ROLES if found.get(r)}
     except ValueError:
         folder = Path(arg).expanduser()
         if not folder.is_dir():
             raise
-        files = [f for n in ("bass", "synths") for f in sorted(folder.glob(n + ".*"))
-                 if f.suffix in (".flac", ".wav")]
+        files = {r: [f for f in sorted(folder.glob(r + ".*")) if f.suffix in (".flac", ".wav")][:1] for r in ROLES}
+        files = {r: fs for r, fs in files.items() if fs}
     if not files:
         raise ValueError("%s has no bass or synths stem" % arg)
     return files
 
 
-def key_of(arg: str) -> dict:
-    files = _stem_files(arg)
+def key_of(arg: str, allow_partial: bool = False) -> dict:
+    """The key of a study or stems folder. Both stems are needed; with only one, ValueError unless
+    `allow_partial`. The result says which roles were used (`stems_used`) and whether that is both (`complete`)."""
+    by_role = _stem_files(arg)
+    missing = [r for r in ROLES if r not in by_role]
+    if missing and not allow_partial:
+        raise ValueError("%s has no %s stem: the estimate would rest on %s alone (--allow-partial to do it anyway)"
+                         % (arg, " or ".join(missing), " and ".join(by_role)))
+    files = [f for r in ROLES for f in by_role.get(r, [])]
     remotes = [pcloud_remote(f) for f in files]
     if not any(remotes):
-        return detect_key(files)
-    with tempfile.TemporaryDirectory(prefix="roadie-key-") as tmp:
-        local = []
-        for f, remote in zip(files, remotes):
-            dest = Path(tmp) / f.name
-            subprocess.run(["rclone", "copyto", remote, str(dest)], check=True, capture_output=True)
-            local.append(dest)
-        return detect_key(local)
+        result = detect_key(files)
+    else:
+        with tempfile.TemporaryDirectory(prefix="roadie-key-") as tmp:
+            local = []
+            for f, remote in zip(files, remotes):
+                dest = Path(tmp) / f.name
+                subprocess.run(["rclone", "copyto", remote, str(dest)], check=True, capture_output=True)
+                local.append(dest)
+            result = detect_key(local)
+    return dict(result, stems_used=list(by_role), complete=not missing)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roadie key", description="Estimate a study's key from its bass and synths stems")
     ap.add_argument("study", help="a study title or path, or a stems folder")
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="estimate from one stem when the study lacks the other (the result says complete: false)")
     args = ap.parse_args(argv)
     try:
-        r = key_of(args.study)
+        r = key_of(args.study, args.allow_partial)
     except (ValueError, OSError, subprocess.CalledProcessError) as e:
         print("key: %s" % (e.stderr.decode(errors="replace").strip() if isinstance(e, subprocess.CalledProcessError) and e.stderr else e),
               file=sys.stderr)
@@ -185,7 +206,8 @@ def main(argv=None) -> int:
     else:
         ru = r["runner_up"]
         print("%s (%s, %s)  confidence %.3f  runner-up %s (%s)  [%s]" % (
-            r["key"], r["short"], r["camelot"], r["confidence"], ru["key"], ru["camelot"], ", ".join(r["stems"])))
+            r["key"], r["short"], r["camelot"], r["confidence"], ru["key"], ru["camelot"],
+            ", ".join(r["stems"]) + ("" if r["complete"] else "; PARTIAL, only " + " and ".join(r["stems_used"]))))
     return 0
 
 

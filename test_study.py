@@ -450,10 +450,10 @@ def test_a_marker_without_the_new_fields_still_loads_and_the_record_carries_them
     (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "t0": 0.0}))
     s = load_study("Flare", tmp_path)
     assert (s.key, s.camelot, s.key_source, s.key_confidence, s.key_url) == (None, None, None, None, None)
-    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "bpm": 124, "key": "Am",
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "listed_bpm": 124, "key": "Am",
                                                    "key_source": "online", "key_url": "https://x/y"}))
     d = to_json(load_study("Flare", tmp_path))
-    assert (d["bpm"], d["key"], d["camelot"], d["key_source"], d["key_url"]) == (124.0, "Am", "8A", "online", "https://x/y")
+    assert (d["listed_bpm"], d["key"], d["camelot"], d["key_source"], d["key_url"]) == (124.0, "Am", "8A", "online", "https://x/y")
 
 
 def test_tag_writes_only_its_fields_and_keeps_the_others(tmp_path):
@@ -461,11 +461,12 @@ def test_tag_writes_only_its_fields_and_keeps_the_others(tmp_path):
     (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "stems": "Flare_124bpm_stems", "t0": 0.5}))
     study.tag_study(folder, key="Am", bpm=124)
     on_disk = json.loads((folder / "study.json").read_text())
-    assert on_disk == {"kind": "study_marker", "stems": "Flare_124bpm_stems", "t0": 0.5, "bpm": 124,
+    assert on_disk == {"kind": "study_marker", "stems": "Flare_124bpm_stems", "t0": 0.5, "listed_bpm": 124,
                        "key": "A minor", "camelot": "8A", "key_source": "tagged"}
     study.tag_study(folder, bpm=124.5)                            # a bpm alone leaves the key
     s = load_study("Flare", tmp_path)
-    assert (s.bpm, s.key, s.camelot, s.key_source) == (124.5, "A minor", "8A", "tagged")
+    assert (s.listed_bpm, s.key, s.camelot, s.key_source) == (124.5, "A minor", "8A", "tagged")
+    assert s.bpm == 124.0                                         # the grid bpm is the measured one, untouched
     assert json.loads((folder / "study.json").read_text())["t0"] == 0.5
 
 
@@ -522,19 +523,101 @@ def test_cli_tag_then_list_and_show_print_bpm_key_and_camelot(tmp_path):
     assert run("tag", "Flare", "--key", "Am", "--by-ear", "--source", "online").returncode == 1
 
 
-def test_a_pcloud_study_is_tagged_by_rclone_copyto_of_the_one_file(tmp_path, monkeypatch):
-    import types
+class FakePCloud:
+    """rclone against a dict of remote files, standing in for `subprocess.run`: lsf, cat and copyto."""
+
+    def __init__(self, files):
+        self.files, self.calls, self.drop_writes = dict(files), [], False
+
+    def __call__(self, cmd, **kw):
+        import types
+        assert cmd[0] == "rclone"
+        self.calls.append(cmd[1:])
+        if cmd[1] == "lsf":
+            parent = cmd[-1].rstrip("/") + "/"
+            out = "".join(k[len(parent):] + "\n" for k in self.files if k.startswith(parent) and "/" not in k[len(parent):])
+        elif cmd[1] == "cat":
+            out = self.files[cmd[2]]
+        else:
+            if not self.drop_writes:
+                self.files[cmd[3]] = open(cmd[2]).read()
+            out = ""
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+
+def test_a_pcloud_study_is_read_and_written_by_rclone_never_through_the_mount(tmp_path, monkeypatch):
+    folder = tag_tree(tmp_path)                     # the mount view of the study: no study.json at all (stale)
+    remote = "pcloud:Music/Studies/Einmusik/Flare/study.json"
+    held = json.dumps({"kind": "study_marker", "stems": "truth", "t0": 0.5, "listed_bpm": 124}) + "\n"
+    fake = FakePCloud({remote: held})
+    monkeypatch.setattr(study.keymod, "pcloud_remote", lambda p: remote)
+    monkeypatch.setattr(study.subprocess, "run", fake)
+    study.tag_study(folder, key="Am")
+    kept = json.loads(fake.files[remote])
+    assert kept["stems"] == "truth" and kept["t0"] == 0.5 and kept["listed_bpm"] == 124 and kept["key"] == "A minor"
+    assert not (folder / "study.json").exists()                 # nothing written or read through the mount
+    # a second tag straight after sees the first (read through the API), and a write that does not stick fails
+    study.tag_study(folder, bpm=125)
+    assert json.loads(fake.files[remote])["key"] == "A minor"
+    fake.files[remote] = "{}"
+    with pytest.raises(ValueError, match="not a study marker"):
+        study.tag_study(folder, bpm=125)
+    fake.files[remote], fake.drop_writes = held, True
+    with pytest.raises(OSError, match="read back"):
+        study.tag_study(folder, bpm=126)
+
+
+def test_only_the_bpm_key_camelot_suffix_is_stripped_from_a_folder_name(tmp_path):
+    for name, title in (("Flare [124 Am 8A]", "Flare"), ("Track [Live]", "Track [Live]"),
+                        ("Track [Live] [124 F#m 11A?]", "Track [Live]"), ("Mix [123.5 Bb 6B]", "Mix"),
+                        ("Cut [2024]", "Cut [2024]"), ("Breathing (Extended Mix)", "Breathing (Extended Mix)")):
+        assert study._strip_suffix(name) == title
+    make_study(tmp_path, "A", "Track [Live]")
+    make_study(tmp_path, "A", "Track")
+    assert load_study("Track [Live]", tmp_path).root.name == "Track [Live]"
+    assert load_study("Track", tmp_path).root.name == "Track"
+
+
+def test_the_listed_bpm_shows_beside_the_measured_one_and_never_replaces_it(tmp_path):
+    folder = make_study(tmp_path, "Matador", "Eternity")             # measured 124.0 (alignment.json)
+    study.tag_study(folder, bpm=92, bpm_url="https://x/y")
+    s = load_study("Eternity", tmp_path)
+    assert (s.bpm, s.listed_bpm, s.bpm_url) == (124.0, 92, "https://x/y")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Eternity"], capture_output=True,
+                       text=True, env=dict(os.environ, ROADIE_STUDIES=str(tmp_path)))
+    assert "124 bpm (listed 92)" in r.stdout
+    row = study.list_to_json(tmp_path)["studies"][0]
+    assert (row["bpm"], row["listed_bpm"]) == (124.0, 92)
+    out = subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "list"], capture_output=True, text=True,
+                         env=dict(os.environ, ROADIE_STUDIES=str(tmp_path))).stdout
+    assert "124 (92)" in out
+    study.tag_study(folder, bpm=124.4)                               # within 1 bpm: nothing extra to show
+    assert "(listed" not in subprocess.run([sys.executable, os.path.join(HERE, "study.py"), "show", "Eternity"],
+                                           capture_output=True, text=True,
+                                           env=dict(os.environ, ROADIE_STUDIES=str(tmp_path))).stdout
+
+
+def test_list_and_show_take_the_bpm_from_the_same_file(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")                      # alignment.json 124.0, sections.json 124.0
+    stems = next(folder.glob("*_stems"))
+    secs = json.loads((stems / "sections.json").read_text())
+    (stems / "sections.json").write_text(json.dumps(dict(secs, bpm=124.003)))
+    assert study.list_to_json(tmp_path)["studies"][0]["bpm"] == load_study("Flare", tmp_path).bpm == 124.0
+    (stems / "alignment.json").unlink()                              # no grid: both fall back to sections.json
+    assert study.list_to_json(tmp_path)["studies"][0]["bpm"] == load_study("Flare", tmp_path).bpm == 124.003
+
+
+def test_a_key_with_no_recorded_source_counts_as_tagged_and_bad_numbers_are_refused(tmp_path):
     folder = tag_tree(tmp_path)
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append((cmd, json.loads(open(cmd[2]).read())))
-        return types.SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(study.keymod, "pcloud_remote", lambda p: "pcloud:Music/Studies/Einmusik/Flare/study.json")
-    monkeypatch.setattr(study.subprocess, "run", fake_run)
-    study.tag_study(folder, key="Am", bpm=124)
-    (cmd, sent), = calls
-    assert cmd[:2] == ["rclone", "copyto"] and cmd[3] == "pcloud:Music/Studies/Einmusik/Flare/study.json"
-    assert sent["key"] == "A minor" and sent["bpm"] == 124
-    assert not (folder / "study.json").exists()                 # nothing written through the mount
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "key": "C"}))
+    with pytest.raises(ValueError, match="outranks"):
+        study.tag_study(folder, key="Am", source="detected")
+    assert json.loads((folder / "study.json").read_text()) == {"kind": "study_marker", "key": "C"}
+    study.tag_study(folder, key="Am", source="by ear")               # a stronger one still replaces it
+    for bad in (float("nan"), float("inf"), -1, 0, True, "124"):
+        with pytest.raises(ValueError, match="bpm"):
+            study.tag_study(folder, bpm=bad)
+    for bad in (float("nan"), float("inf"), True):
+        with pytest.raises(ValueError, match="confidence"):
+            study.tag_study(folder, key="Bm", source="by ear", confidence=bad)
+    assert "NaN" not in (folder / "study.json").read_text()
