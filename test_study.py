@@ -265,6 +265,22 @@ def test_fallback_by_name_with_two_files_of_that_name_is_ambiguous(tmp_path):
     assert line.startswith("ambiguous") and name in line
 
 
+def test_a_second_file_of_the_same_name_with_another_size_does_not_make_the_check_ambiguous(tmp_path):
+    folder = make_study(tmp_path, "A", "Flare")
+    path, prof = add_profile(folder)
+    for i in prof["inputs"]["mix"] + [x for v in prof["inputs"]["stems"].values() for x in v]:
+        i["path"] = "/elsewhere/" + os.path.basename(i["path"])
+    path.write_text(json.dumps(prof))
+    other = folder / "older run"                                  # a duplicate run: same stem names, other sizes
+    other.mkdir()
+    for f in next(folder.glob("*_stems")).glob("*.flac"):
+        (other / f.name).write_bytes(b"y" * 7)
+    layer = load_study("Flare", tmp_path).layers["mix"]
+    assert layer.caveats[-1].startswith("fresh") and "file name and size" in layer.caveats[-1]
+    (other / "bass.flac").write_bytes(b"x" * 10)                  # the same size too: now it cannot tell
+    assert load_study("Flare", tmp_path).layers["mix"].caveats[-1].startswith("ambiguous")
+
+
 def test_malformed_profile_inputs_do_not_take_the_study_down(tmp_path):
     folder = make_study(tmp_path, "A", "Flare")
     path, prof = add_profile(folder)

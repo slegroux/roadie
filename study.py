@@ -350,7 +350,11 @@ def _check(folder: Path, prof: dict) -> tuple[str, str]:
             what = [w for w, bad in (("size", st.st_size != item["size"]),
                                      ("mtime", abs(st.st_mtime - item["mtime"]) > 2.0)) if bad]
         elif len(by_name.get(name, [])) > 1:
-            ambiguous.append(name)
+            same = [c for c in by_name[name] if os.path.getsize(c) == item["size"]]
+            if len(same) == 1:          # a second run's stem of the same name is another size: that one is it
+                by_size += 1
+            else:
+                ambiguous.append(name)
         elif name in by_name:
             by_size += 1
             what = ["size"] if os.path.getsize(by_name[name][0]) != item["size"] else []
