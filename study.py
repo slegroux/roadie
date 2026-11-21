@@ -77,7 +77,7 @@ MISSING = {
     "sections": "roadie sections <stems>",
     "activity": "bar_activity: re-run the sections command on the stems folder (a sections.json made before it has none)",
     "mix": "reference_profile (roadie MCP tool) on the mix and stems, per section",
-    "drums": "not made yet: drum roles per stem (studies/04 item 4)",
+    "drums": "roadie drums <study>: the roles inside each drum stem",
 }
 LAYER_NAMES = ("grid", "sections", "activity", "mix", "drums")
 
@@ -307,6 +307,14 @@ def _check(folder: Path, prof: dict) -> tuple[str, str]:
     return "fresh", "fresh: %d inputs unchanged (checked by %s)" % (len(inputs), check)
 
 
+def _drums_check(stems_dir: Path, d: dict) -> str:
+    """Whether the files drums.json was made from still have the size it recorded (by name)."""
+    changed = [i.get("name", "?") for i in d.get("inputs", [])
+               if not (stems_dir / str(i.get("name"))).exists() or (stems_dir / str(i["name"])).stat().st_size != i.get("size")]
+    return ("stale: %s changed since drums.json was made (checked by file name and size)" % ", ".join(changed) if changed
+            else "fresh: %d inputs unchanged (checked by file name and size)" % len(d.get("inputs", [])))
+
+
 def _mix_layer(folder: Path, path: Path, prof: dict) -> tuple[Layer, str]:
     """The mix layer for one profile, and its state (fresh, stale, ambiguous, unchecked, newer, unreadable)."""
     version = prof.get("version")
@@ -408,7 +416,17 @@ def load_study(name_or_path: str, roots=None) -> Study:
             layers["sections"] = unreadable("sections", path)
             layers["activity"].missing = "sections.json exists but could not be read"
 
-    known = {stems_dir / "alignment.json", stems_dir / "sections.json", folder / "study.json"}
+    path = stems_dir / "drums.json"
+    if path.exists():
+        d = _read_json(path)
+        if isinstance(d, dict) and d.get("kind") == "drum_roles" and isinstance(d.get("stems"), dict):
+            layers["drums"] = Layer("drums", path, "drum_roles v%s" % d.get("version"), d, None,
+                                    ["roles are rules over pattern and measurements, not recognition; listen to the clips"]
+                                    + [_drums_check(stems_dir, d)])
+        else:
+            layers["drums"] = unreadable("drums", path)
+
+    known = {stems_dir / "alignment.json", stems_dir / "sections.json", stems_dir / "drums.json", folder / "study.json"}
     profiles, extras = [], []
     for p in _json_files(folder):
         if p in known:
@@ -479,6 +497,11 @@ def _show(study: Study) -> None:
             print("            note: %s" % c)
         if name == "mix" and layer.data:
             print("            %d sections" % len(study.mix()))
+        if name == "drums" and layer.data:
+            for stem, st in layer.data["stems"].items():
+                print("    %s: %d roles%s" % (stem, len(st["roles"]), ", %d bleed" % len(st["bleed"]) if st.get("bleed") else ""))
+                for r in st["roles"]:
+                    print("      %-14s %5d  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4))))
         if name == "sections":
             for s in study.sections():
                 live = "Live bar %g" % s.live_bar if s.live_bar is not None else "-"
@@ -497,6 +520,7 @@ def _layer_flags(ref: StudyRef) -> dict[str, bool]:
     flags = {n: False for n in LAYER_NAMES}
     flags["grid"] = (ref.stems_dir / "alignment.json").exists()
     flags["sections"] = (ref.stems_dir / "sections.json").exists()
+    flags["drums"] = (ref.stems_dir / "drums.json").exists()
     if flags["sections"]:      # the one file opened here, only to look for the key
         try:
             flags["activity"] = '"bar_activity"' in (ref.stems_dir / "sections.json").read_text()
