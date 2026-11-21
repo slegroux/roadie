@@ -14,6 +14,9 @@ import math
 import multiprocessing
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -23,6 +26,7 @@ import numpy as np
 import soundfile as sf
 
 from roadie_analysis import drumroles, drumsections
+from roadie_analysis import key as keymod
 
 KIND, VERSION = "drum_roles", 1
 AUDIO = (".flac", ".wav")
@@ -96,7 +100,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
     `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
-    `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
+    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
     already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
@@ -106,6 +110,9 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     bars, hits, bars_with, pattern, line}] (the sections the role plays in; "index" is the section's place in the grid's list)}. "bleed" lists the roles marked bleed (left out)."""
     t_start = time.monotonic()
     stems_dir = Path(stems_dir)
+    remote = keymod.pcloud_remote(stems_dir)
+    if remote is not None:
+        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs)
     stems = find_stems(stems_dir)
     if not stems:
         raise ValueError("no drum stems (drums_<kind>.flac or .wav) in %s" % stems_dir)
@@ -193,6 +200,44 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         record["seconds"], record["jobs"], record["stage_seconds"] = round(time.monotonic() - t_start, 1), workers, {
             k: round(v, 1) for k, v in stages.items()}
     return record
+
+
+def _rclone(*args) -> str:
+    try:
+        return subprocess.run(["rclone", *args], check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as e:
+        raise OSError("rclone %s failed: %s" % (args[0], (e.stderr or "").strip() or "exit %s" % e.returncode))
+
+
+def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs) -> dict:
+    """`drum_roles` for a study on the pCloud mount, which is never read or written through the FUSE mount (that fills a local
+    cache with audio and writes into the archive through a mount): the drum stems, alignment.json and sections.json are copied
+    to a temp folder with rclone, analysed there, and the results go back with rclone: the new clips, then drums.json, then
+    the deletion of the clips the previous drums.json listed and the new one does not (nothing else is ever removed). The temp
+    folder is deleted. With `out` the results go to that local folder and nothing is uploaded; with `write=False`, nowhere."""
+    names = _rclone("lsf", "--files-only", remote).splitlines()
+    wanted = [n for n in names if (n.startswith("drums_") and Path(n).suffix in AUDIO and not n.startswith("."))
+              or n in ("alignment.json", "sections.json")]
+    with tempfile.TemporaryDirectory(prefix="roadie-drums-") as tmp:
+        tmp = Path(tmp)
+        for n in wanted:
+            _rclone("copyto", "%s/%s" % (remote, n), str(tmp / n))
+        old = None
+        if "drums.json" in names:
+            try:
+                old = json.loads(_rclone("cat", "%s/drums.json" % remote))
+            except ValueError:
+                old = None
+        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs)
+        if write and not out:
+            clips = sorted({r["clip"] for s in rec["stems"].values() for r in s["roles"] if r["clip"]})
+            for c in clips:
+                _rclone("copyto", str(tmp / c), "%s/%s" % (remote, c))
+            _rclone("copyto", str(tmp / "drums.json"), "%s/drums.json" % remote)
+            for c in sorted(_old_clips(old) - set(clips)):
+                _rclone("deletefile", "%s/%s" % (remote, c))
+            rec["written"] = "%s/drums.json" % remote
+    return rec
 
 
 def _run(fn, argsets: list, pool, deadline: float | None) -> list:

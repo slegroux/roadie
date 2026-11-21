@@ -122,7 +122,7 @@ def _profile(source: str, hit: int | str | None) -> dict:
 @mcp.tool()
 def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
                sections: list[dict[str, Any]] | None = None, out: str | None = None,
-               jobs: int | None = None, timeout_s: float = 1800.0) -> str:
+               jobs: int | None = None, write: bool = True, timeout_s: float = 1800.0) -> str:
     """The sounds inside each drum stem of a track, as roles: which 16ths each plays at, how often, how
     loud, one clean hit to listen to. `stems` is the stems folder (the `drums_<kind>` files in it: kick,
     hh, snare, toms, ride, crash) or a study's name. `tempo` (BPM), `t0` (seconds from the start of the
@@ -136,16 +136,18 @@ def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
     Per stem: each role's `name`, `hits`, `line` (16 characters from the downbeat: x = most bars, o = some,
     . = fewer, over the bars the role plays in), `pattern` (the share of all bars at each 16th), `level_db`, `stability`,
     `separation`, `reason` (why neutral), `clip` and `per_section` (its hits and `line` in each section it plays in). Writes `drums.json` and `drum_roles/<stem>-<role>.wav` (one clean hit
-    per role; none when no hit is clean, and `clip_note` says why) into the stems folder, or `out`. It reads
+    per role; none when no hit is clean, and `clip_note` says why) into the stems folder, or `out`; `write=false` writes
+    nothing. A study on the pCloud library is copied to a temp folder with rclone, analysed there and its results uploaded
+    with rclone (never through the mount). It reads
     audio and takes minutes: `timeout_s` is a deadline checked as jobs finish, and passing it is a tool error that
-    writes nothing (jobs already started run on in the background). Local only."""
+    writes nothing (jobs already started run on in the background). Local, except rclone for the pCloud library."""
     try:
         folder = os.path.abspath(os.path.expanduser(stems.strip()))
         if not os.path.isdir(folder):
             folder = str(roadie_drums.stems_dir_of(stems))
         rec = drums.drum_roles(folder, tempo, t0, sections,
                                os.path.abspath(os.path.expanduser(out)) if out else None,
-                               deadline=time.monotonic() + timeout_s, jobs=jobs)
+                               write=write, deadline=time.monotonic() + timeout_s, jobs=jobs)
     except TimeoutError as e:
         raise AnalysisError("drum_roles ran out of time (%g s): %s; nothing was written" % (timeout_s, e))
     except MemoryError:

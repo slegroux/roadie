@@ -42,6 +42,12 @@ a process pool (`--jobs N`, default the cores).
    with one hit in each of five sections is one role of five hits and can be named; a sound that only ever plays once has
    one hit and stays neutral.
 
+**Library studies.** A study on the pCloud mount is never read or written through the FUSE mount (that fills a local cache
+with audio and writes into the archive through a mount): `roadie drums` copies its drum stems, `alignment.json` and
+`sections.json` to a temp folder with rclone, analyses there, uploads the new clips, then `drums.json`, then deletes the
+clips the previous `drums.json` listed and the new one does not (nothing else is ever removed), and deletes the temp folder.
+`--no-write` (MCP: `write=false`) uploads nothing. A local stems folder is read and written in place.
+
 **The grid.** Tempo is `alignment.json`'s `result.bpm`, the bar line its `result.downbeat_sec`, the sections
 `sections.json`'s (`label`, `time_sec`, `duration_beats`). Without `alignment.json` the first section's start is the bar
 line. A default bar line is moved back by whole bars to the first one at or after the start of the file; the 16ths

@@ -171,3 +171,66 @@ def test_the_stem_peak_read_in_blocks_is_the_whole_stem_envelope_peak(tmp_path):
     want = oneshot.envelope_peak(oneshot._undc(np.asarray(y, dtype=np.float64), sr), sr)
     for block_s in (10.0, 0.37):
         assert drumsections.stem_peak(tmp_path / "s.wav", block_s) == pytest.approx(want, rel=1e-6)
+
+
+class FakeRclone:
+    """rclone against a local folder standing in for the pCloud library (`pcloud:<path>` is <cloud>/<path>), in place of
+    `subprocess.run`: lsf, copyto, cat and deletefile, each call logged."""
+
+    def __init__(self, cloud):
+        self.cloud, self.calls = cloud, []
+
+    def path(self, arg):
+        return self.cloud / arg[len("pcloud:"):] if arg.startswith("pcloud:") else pathlib.Path(arg)
+
+    def __call__(self, cmd, **kw):
+        import shutil
+        import types
+        assert cmd[0] == "rclone"
+        self.calls.append(cmd[1:])
+        out = ""
+        if cmd[1] == "lsf":
+            out = "".join(p.name + "\n" for p in sorted(self.path(cmd[-1]).iterdir()) if p.is_file())
+        elif cmd[1] == "copyto":
+            dst = self.path(cmd[3])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.path(cmd[2]), dst)
+        elif cmd[1] == "cat":
+            out = self.path(cmd[2]).read_text()
+        elif cmd[1] == "deletefile":
+            self.path(cmd[2]).unlink()
+        else:
+            raise AssertionError(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+
+def test_a_pcloud_study_is_analysed_in_a_temp_folder_and_uploaded_by_rclone_never_through_the_mount(tmp_path, monkeypatch):
+    cloud = tmp_path / "cloud"
+    d = cloud / "Music" / "Studies" / "A" / "Song" / "Song_stems"
+    d.mkdir(parents=True)
+    sf.write(str(d / "drums_kick.flac"), stem([(at(i * 4), kick_hit()) for i in range(32)], 8).astype(np.float32), SR)
+    (d / "alignment.json").write_text(json.dumps({"result": {"bpm": BPM, "downbeat_sec": T0, "downbeat_verdict": "ok"}}))
+    (d / "drum_roles").mkdir()
+    for name in ("old-gone.wav", "kick.wav", "mine.wav"):
+        (d / "drum_roles" / name).write_bytes(b"old")
+    (d / "drums.json").write_text(json.dumps({"kind": "drum_roles", "version": 1, "stems": {"kick": {"roles": [
+        {"clip": "drum_roles/kick.wav"}, {"clip": "drum_roles/old-gone.wav"}]}}}))
+    fake = FakeRclone(cloud)
+    monkeypatch.setattr(drums.subprocess, "run", fake)
+    monkeypatch.setattr(drums.keymod, "pcloud_remote", lambda p: (
+        "pcloud:" + pathlib.Path(p).resolve().relative_to(cloud.resolve()).as_posix() if str(p).startswith(str(cloud)) else None))
+    rec = drums.drum_roles(d, jobs=1)
+    uses = [c for c in fake.calls]
+    assert rec["written"].endswith("Song_stems/drums.json") and rec["written"].startswith("pcloud:")
+    new = json.loads((d / "drums.json").read_text())
+    assert new["stems"]["kick"]["roles"][0]["name"] == "kick" and new["version"] == 1
+    lib = sorted(p.name for p in (d / "drum_roles").iterdir())
+    assert lib == ["kick.wav", "mine.wav"]                         # old-gone (listed before, not now) went; mine.wav was never listed
+    assert (d / "drum_roles" / "kick.wav").read_bytes() != b"old"
+    verbs = [(c[0], pathlib.Path(c[-1]).name) for c in uses]
+    assert verbs.index(("copyto", "kick.wav")) < verbs.index(("copyto", "drums.json")) < verbs.index(("deletefile", "old-gone.wav"))
+    stems_copied = [c for c in uses if c[0] == "copyto" and c[1].endswith("drums_kick.flac")]
+    assert stems_copied and not stems_copied[0][2].startswith(str(cloud))      # the audio went to a temp folder
+    tmp_used = pathlib.Path(stems_copied[0][2]).parent
+    assert not tmp_used.exists()                                                # and the temp folder is gone
+    assert sorted(p.name for p in d.iterdir()) == ["alignment.json", "drum_roles", "drums.json", "drums_kick.flac"]
