@@ -30,7 +30,7 @@ import test_analysis_equivalence as E
 
 HERE = pathlib.Path(__file__).resolve().parent
 MCP_GOLDEN = HERE / "mcp_golden" / "sideman_main.json"
-TOOLS = {"sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read",
+TOOLS = {"drum_roles", "sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read",
          "arrangement_compare"}
 CLIP = "live_set tracks 2 clip_slots 0 clip"
 
