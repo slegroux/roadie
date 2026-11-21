@@ -661,3 +661,13 @@ def test_tagging_the_same_key_again_keeps_its_note_url_and_confidence(tmp_path):
     assert kept["key_confidence"] == 0.3                        # a field that was not there yet is filled in
     study.tag_study(folder, key="Bm", source="online", url="https://x/new")                  # another key: the old note goes
     assert "key_note" not in json.loads((folder / "study.json").read_text())
+
+
+def test_an_exact_title_beats_a_longer_title_that_contains_it(tmp_path):
+    make_study(tmp_path, "Blomqvist", "Carry On [123 Ebm 2A]")
+    make_study(tmp_path, "Blomqvist", "Carry On (EarthLife Remix) [123 Ebm 2A]")
+    assert load_study("Carry On", tmp_path).root.name == "Carry On [123 Ebm 2A]"
+    assert load_study("carry on (earthlife remix)", tmp_path).root.name == "Carry On (EarthLife Remix) [123 Ebm 2A]"
+    assert load_study("earthlife", tmp_path).title == "Carry On (EarthLife Remix)"       # a unique part of a title
+    with pytest.raises(ValueError, match="ambiguous"):
+        load_study("Carry", tmp_path)                                                    # a part shared by both
