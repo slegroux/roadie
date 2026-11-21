@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""`roadie study fill-keys --from LOOKUP.json --dry-run`: decide, for every analysed study of a library root,
-what its `study.json` would get (key, source, listed bpm) and print one table. It writes nothing under the
-Studies folders: only the table (and an optional detection cache) are files.
+"""`roadie study fill-keys --from LOOKUP.json --dry-run | --write`: decide, for every analysed study of a library
+root, what its `study.json` gets (key, source, listed bpm) and print one table. `--dry-run` writes nothing
+under the Studies folders (only the table and an optional detection cache are files). `--write` records
+each study through `study.tag_study`, saving any study.json it replaces first; it touches no other file.
 
 The rules, from the user's decisions on plan roadie/03 item 3:
 - a published key (a lookup row matched to the study by its `study` field, exactly) is recorded as `online`
   with its URL and its listed bpm; `decisions` in the lookup file override a study's key, source and note
   (the user's old tag kept as `key_note`);
+- a `decisions` entry with `no_key` records a note and no key (a whole-set recording);
 - a row marked `use_published: false` (identity not established) is not used: that study gets a detected key only;
 - a study with no published key gets the detected key as `detected`, only when both stems were analysed;
   otherwise no key;
@@ -26,7 +28,7 @@ from pathlib import Path
 import study
 from roadie_analysis import key as keymod
 
-NOTES_NO_KEY = "no key: not renamed until one is recorded"
+NOTES_NO_KEY = "no bpm: not renamed until one is known"
 
 
 def relation(a: str, b: str) -> str:
@@ -43,10 +45,20 @@ def relation(a: str, b: str) -> str:
     return "parallel" if pa == pb else "different"
 
 
+def name_bpm(measured: float | None, listed: float | None) -> float | None:
+    """The tempo a folder name carries: the listed one when it is within 1 bpm of the measured one (or nothing
+    was measured), else the measured one: the user's choice, 2026-11-20."""
+    if listed is not None and (measured is None or abs(listed - measured) <= 1):
+        return listed
+    return measured if measured is not None else None
+
+
 def folder_name(title: str, bpm: float | None, key: str | None, detected: bool) -> str | None:
-    """`Title [124 Am 8A]` (a `?` after an unconfirmed key and code), or None without a bpm or a key."""
-    if bpm is None or not key:
+    """`Title [124 Am 8A]` (a `?` after an unconfirmed key and code); `Title [124]` with no key; None with no bpm."""
+    if bpm is None:
         return None
+    if not key:
+        return "%s [%d]" % (title, int(bpm + 0.5))
     pc, mode = keymod.parse_key(key)
     q = "?" if detected else ""
     return "%s [%d %s%s %s%s]" % (title, int(bpm + 0.5), keymod.short_name(pc, mode), q, keymod.camelot(pc, mode), q)
@@ -65,14 +77,16 @@ def _detect(ref: study.StudyRef, detector) -> dict:
 def decide(name: str, measured, row: dict | None, decision: dict | None, det: dict) -> dict:
     """One study's entry: what would be written, and how it sits against detection."""
     pub = row if row and row.get("use_published", True) else None
-    out = {"study": name, "measured_bpm": measured, "listed_bpm": pub["bpm"] if pub else None,
+    out = {"study": name, "path": None, "measured_bpm": measured, "listed_bpm": pub["bpm"] if pub else None,
            "bpm_url": pub["url"] if pub else None, "key": None, "camelot": None, "source": None, "url": None,
            "key_confidence": None, "key_note": None, "detected": det, "notes": []}
     if row and not pub:
         out["notes"].append("lookup row not used: " + row.get("unused_reason", "marked not to be used"))
-    if decision:
+    if decision and decision.get("no_key"):
+        out["key_note"] = decision["key_note"]
+    elif decision:
         out.update(key=decision["key"], source=decision["source"], key_note=decision.get("key_note"))
-        out["url"] = row["url"] if row and decision["source"] == "online" else None
+        out["url"] = decision.get("url") or (row["url"] if row and decision["source"] == "online" else None)
     elif pub:
         out.update(key=pub["key"], source="online", url=pub["url"])
     elif det["ok"]:
@@ -88,8 +102,14 @@ def decide(name: str, measured, row: dict | None, decision: dict | None, det: di
             out["verdict"] = "agree" if rel == "exact" else "disagree (%s)" % rel
     elif out["source"] == "detected":
         out["verdict"] = "detected only"
+    elif decision and decision.get("no_key"):
+        out["verdict"] = "no key (%s)" % decision["key_note"]
     else:
         out["verdict"] = "no listing, no key (%s)" % det.get("reason", "?")
+    if out["verdict"].startswith("disagree"):      # the disagreement stays visible in the record
+        why = "detection disagrees (%s): %s %s, confidence %.3f" % (
+            out["verdict"][len("disagree ("):-1], det["key"], det["camelot"], det["confidence"])
+        out["key_note"] = "%s; %s" % (out["key_note"], why) if out["key_note"] else why
     if not row:
         out["notes"].append("no lookup row")
     return out
@@ -117,7 +137,8 @@ def run_plan(lookup: dict, refs, detector=keymod.key_of, cache: dict | None = No
         except (ValueError, OSError, KeyError, TypeError, AttributeError):
             measured = None
         e = decide(name, measured, rows.get(k), decisions.get(k), cache[name])
-        e["folder_name"] = folder_name(ref.title, e["listed_bpm"] or measured, e["key"], e["source"] == "detected")
+        e["path"] = str(ref.root)
+        e["folder_name"] = folder_name(ref.title, name_bpm(measured, e["listed_bpm"]), e["key"], e["source"] == "detected")
         if e["folder_name"] is None:
             e["notes"].append(NOTES_NO_KEY)
         entries.append(e)
@@ -130,10 +151,10 @@ def render(plan: dict, root_label: str) -> str:
     es = plan["entries"]
     count = lambda src: sum(1 for e in es if e["source"] == src)
     dis = [e for e in es if e["verdict"].startswith("disagree")]
-    L = ["# Keys table, dry run: root `%s`, %d analysed studies\n" % (root_label, len(es)),
-         "Nothing was written: no `study.json`, no rename. `key to write` is what `study tag` would record; "
-         "`folder name` is what the rename pass would give (listed bpm rounded when there is one, else the measured one; "
-         "`?` after a detected key).\n",
+    L = ["# Keys table, root `%s`, %d analysed studies\n" % (root_label, len(es)),
+         "`key to write` is what `study tag` records (`listed bpm` with it); `folder name` is what the rename pass would "
+         "give (the listed bpm rounded when within 1 of the measured one, else the measured one; `?` after a detected "
+         "key). The key note carries the old tag, or the detection that disagreed.\n",
          "**Counts:** online %d, tagged %d, detected %d, no key %d; disagreements %d.\n" % (
              count("online"), count("tagged"), count("detected"), sum(1 for e in es if e["source"] is None), len(dis)),
          "| Study | Measured bpm | Listed bpm | Key to write | Camelot | Source | Detected (confidence) | Verdict | Folder name | Notes |",
@@ -158,15 +179,51 @@ def render(plan: dict, root_label: str) -> str:
     return "\n".join(L) + "\n"
 
 
+def write_records(plan: dict, backup_dir: Path, log=print) -> tuple[int, int]:
+    """Record each entry in its study's `study.json` through `study.tag_study` (rclone read, write, read-back for
+    a pCloud study), one study at a time, saving the study.json it replaces first. One log line per study.
+    A study that fails is logged and the run goes on. Returns (ok, failed)."""
+    ok = failed = 0
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for e in plan["entries"]:
+        folder = Path(e["path"])
+        try:
+            if e["key"] is None and e["listed_bpm"] is None and not e["key_note"]:
+                raise ValueError("nothing to record")
+            path = folder / "study.json"
+            remote = keymod.pcloud_remote(path)
+            old = study._remote_read(remote) if remote else (path.read_text() if path.exists() else None)
+            if old is not None:
+                (backup_dir / ("%s__%s.study.json" % (folder.parent.name, folder.name))).write_text(old)
+            study.tag_study(folder, key=e["key"], bpm=e["listed_bpm"], source=e["source"] or "tagged",
+                            confidence=e["key_confidence"], url=e["url"], bpm_url=e["bpm_url"], note=e["key_note"])
+            log("OK %s: %s%s%s%s" % (
+                e["study"], "key %s (%s)" % (e["key"], e["source"]) if e["key"] else "no key",
+                ", listed bpm %g" % e["listed_bpm"] if e["listed_bpm"] is not None else "",
+                ", note: %s" % e["key_note"] if e["key_note"] else "",
+                " (replaced a study.json: saved)" if old is not None else ""))
+            ok += 1
+        except Exception as ex:
+            err = ex.stderr.strip() if getattr(ex, "stderr", None) else ex
+            log("FAILED %s: %s" % (e["study"], err))
+            failed += 1
+    log("done: %d OK, %d FAILED" % (ok, failed))
+    return ok, failed
+
+
 def main(args) -> int:
-    if not args.dry_run:
-        print("study: fill-keys: only --dry-run exists so far; writing the records waits for the user's yes", file=sys.stderr)
+    if not args.dry_run and not args.write:
+        print("study: fill-keys: give --dry-run (the table only) or --write (record the keys)", file=sys.stderr)
+        return 1
+    if args.write and (args.dry_run or args.root == "local" or not args.backup_dir):
+        print("study: fill-keys: --write is for one library root (not local), without --dry-run, with --backup-dir",
+              file=sys.stderr)
         return 1
     roots = [r for r in study.STUDIES_ROOTS if r.label == args.root]
     if not roots:
         print("study: fill-keys: no root labelled %r" % args.root, file=sys.stderr)
         return 1
-    for f in (args.out, args.cache):
+    for f in (args.out, args.cache, args.log):
         if f and any(Path(r.path).resolve() in Path(f).resolve().parents for r in study.STUDIES_ROOTS):
             print("study: fill-keys: %s is inside a Studies folder: nothing is written there" % f, file=sys.stderr)
             return 1
@@ -183,4 +240,13 @@ def main(args) -> int:
     if args.out:
         Path(args.out).write_text(text)
     print(text)
+    if args.write:
+        lines = []
+        def log(line):
+            lines.append(line)
+            print(line, flush=True)
+        _, failed = write_records(plan, Path(args.backup_dir), log)
+        if args.log:
+            Path(args.log).write_text("\n".join(lines) + "\n")
+        return 1 if failed else 0
     return 0

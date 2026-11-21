@@ -55,8 +55,9 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFC", s).casefold()
 
 
-# `[124 Am 8A]`: bpm (decimals allowed), key, Camelot code, each of key and code optionally marked `?` (an estimate)
-_SUFFIX = re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s+[A-G][#b]?m?\??\s+\d{1,2}[AB]\??\s*\]\s*$")
+# `[124 Am 8A]`: bpm (decimals allowed), key, Camelot code, each of key and code optionally marked `?` (an
+# estimate); a study with no key is `[124]` (two or three digits, so `[2024]` is not one)
+_SUFFIX = re.compile(r"\s*\[\s*\d{2,3}(?:\.\d+)?(?:\s+[A-G][#b]?m?\??\s+\d{1,2}[AB]\??)?\s*\]\s*$")
 
 
 def _strip_suffix(name: str) -> str:
@@ -539,13 +540,16 @@ def _bpm_cell(bpm, listed) -> str:
 
 def _key_line(study: Study) -> str:
     if not study.key:
-        return "unknown (`roadie key %s` estimates it, `roadie study tag` records it)" % study.title
+        return "unknown%s" % (" (%s)" % study.key_note if study.key_note else
+                              " (`roadie key %s` estimates it, `roadie study tag` records it)" % study.title)
     short, cam = _key_cells(vars(study))
     why = "source %s" % (study.key_source or "not recorded")
     if study.key_confidence is not None:
         why += ", confidence %g" % study.key_confidence
     if study.key_url:
         why += ", %s" % study.key_url
+    if study.key_note:
+        why += ", note: %s" % study.key_note
     return "%s%s (%s, %s), %s" % (study.key, "?" if study.key_source == "detected" else "", short, cam, why)
 
 
@@ -699,8 +703,8 @@ def tag_study(folder: Path, key: str | None = None, bpm: float | None = None, so
     by ear beats tagged beats online beats detected; a key with no recorded source counts as tagged). A study
     on the pCloud mount is read and written through rclone (never the mount), and read back to check the
     write; a local one directly. Returns the marker as written."""
-    if key is None and bpm is None:
-        raise ValueError("nothing to tag: give a key and/or a bpm")
+    if key is None and bpm is None and note is None:
+        raise ValueError("nothing to tag: give a key, a bpm and/or a note")
     if source not in KEY_SOURCES:
         raise ValueError("key source must be one of %s" % ", ".join(KEY_SOURCES))
     path = folder / "study.json"
@@ -718,6 +722,8 @@ def tag_study(folder: Path, key: str | None = None, bpm: float | None = None, so
         marker["listed_bpm"] = _finite(bpm, "bpm")
         if bpm_url:
             marker["bpm_url"] = bpm_url
+    if key is None and note is not None:
+        marker["key_note"] = note
     if key is not None:
         if confidence is not None:
             _finite(confidence, "confidence", positive=False)
@@ -776,7 +782,10 @@ def main(argv=None) -> int:
     tag.add_argument("--confidence", type=float, help="a detected key's margin over the runner-up")
     fill = sub.add_parser("fill-keys", help="dry run: the keys and listed bpm the records would get, as one table (writes nothing here)")
     fill.add_argument("--from", dest="lookup", required=True, help="the published-lookup JSON")
-    fill.add_argument("--dry-run", action="store_true", help="required: only the table is made")
+    fill.add_argument("--dry-run", action="store_true", help="make the table only")
+    fill.add_argument("--write", action="store_true", help="record the keys (needs --backup-dir; not for the local root)")
+    fill.add_argument("--backup-dir", help="where --write saves each study.json it replaces")
+    fill.add_argument("--log", help="write the --write log to this file")
     fill.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     fill.add_argument("--out", help="write the table (markdown) to this file")
     fill.add_argument("--cache", help="keep detection results in this JSON file, so a rerun does not repeat them")

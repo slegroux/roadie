@@ -65,6 +65,7 @@ def test_the_plan_applies_the_rules_and_writes_nothing(tmp_path):
     assert (earth["measured_bpm"], earth["listed_bpm"], earth["folder_name"]) == (124.0, 125, "Earth [125 Bm 10A]")
     baby = by["Matador/Baby"]                   # published, detection disagrees: published still written
     assert (baby["key"], baby["source"], baby["verdict"]) == ("G major", "online", "disagree (parallel)")
+    assert baby["key_note"] == "detection disagrees (parallel): G minor 6A, confidence 0.100"
     assert by["Einmusik/Flare"]["verdict"] == "agree"
     vit = by["Vitalic/Alone"]
     assert (vit["source"], vit["url"], vit["verdict"]) == ("tagged", None, "agree")
@@ -73,7 +74,7 @@ def test_the_plan_applies_the_rules_and_writes_nothing(tmp_path):
     assert "identity not established" in pml["notes"][0]
     assert by["Sylvain/Live"]["source"] == "detected"           # no row: detection only
     bench = by["Rodriguez/Bench"]               # one stem: no key at all, and not renamed
-    assert (bench["source"], bench["key"], bench["folder_name"]) == (None, None, None)
+    assert (bench["source"], bench["key"], bench["folder_name"]) == (None, None, "Bench [124]")
     assert "no synths stem" in bench["verdict"]
     assert plan["unmatched_rows"] == ["Gone/Missing"] and plan["unmatched_decisions"] == []
     text = keyfill.render(plan, "lib")
@@ -101,3 +102,67 @@ def test_cli_needs_dry_run_writes_only_the_table_and_refuses_a_path_in_the_libra
     assert "Einmusik/Flare | 124 | 124 | C minor | 5A | online" in text and "Flare [124 Cm 5A]" in text
     assert "**Counts:** online 1, tagged 0, detected 0, no key 0; disagreements 0." in text
     assert snapshot(lib) == before
+
+
+def test_whole_sets_get_a_note_and_no_key_and_the_measured_bpm_names_the_folder_when_the_listing_is_far_off(tmp_path):
+    refs = library(tmp_path)
+    lk = lookup()
+    lk["decisions"]["Sylvain/Live"] = {"no_key": True, "key_note": "whole-set recording: no single key"}
+    lk["decisions"]["Rodriguez/Bench"] = {"key": "C minor", "source": "online", "url": "https://x/orig", "key_note": "listing is for 'Original Mix'"}
+    lk["rows"][1]["bpm"] = 92                                       # Flare: listed 92, measured 124
+    by = {e["study"]: e for e in keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)["entries"]}
+    live = by["Sylvain/Live"]
+    assert (live["key"], live["source"], live["key_note"], live["verdict"]) == (
+        None, None, "whole-set recording: no single key", "no key (whole-set recording: no single key)")
+    assert by["Rodriguez/Bench"]["url"] == "https://x/orig" and by["Rodriguez/Bench"]["source"] == "online"
+    assert (by["Einmusik/Flare"]["listed_bpm"], by["Einmusik/Flare"]["folder_name"]) == (92, "Flare [124 Cm 5A]")
+    assert keyfill.name_bpm(123.999, 123) == 123 and keyfill.name_bpm(120.0, 113) == 120.0
+    assert keyfill.name_bpm(None, 125) == 125 and keyfill.name_bpm(124.0, None) == 124.0
+
+
+def test_write_records_through_tag_study_keeps_the_marker_and_saves_what_it_replaces(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    refs = library(lib)
+    marker = {"kind": "study_marker", "stems": "Bench_124bpm_stems", "bpm": 124, "t0": 0.0}
+    (lib / "Rodriguez" / "Bench" / "study.json").write_text(json.dumps(marker))
+    lk = lookup()
+    lk["decisions"]["Sylvain/Live"] = {"no_key": True, "key_note": "whole-set recording: no single key"}
+    lk["rows"].append({"row": "x", "study": "Rodriguez/Bench", "bpm": 124, "key": "C minor", "camelot": "5A",
+                       "url": "https://x/b", "use_published": True})
+    plan = keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0)
+    before = snapshot(lib)
+    lines = []
+    ok, failed = keyfill.write_records(plan, tmp_path / "backup", lines.append)
+    assert (ok, failed) == (7, 0) and lines[-1] == "done: 7 OK, 0 FAILED"
+    after = {p for p, _ in snapshot(lib)} - {p for p, _ in before}
+    assert {os.path.basename(p) for p in after} == {"study.json"} and len(after) == 6     # only new study.json files
+    kept = json.loads((lib / "Rodriguez" / "Bench" / "study.json").read_text())
+    assert (kept["stems"], kept["bpm"], kept["t0"], kept["key"], kept["key_source"], kept["listed_bpm"]) == (
+        "Bench_124bpm_stems", 124, 0.0, "C minor", "online", 124)
+    assert json.loads((tmp_path / "backup" / "Rodriguez__Bench.study.json").read_text()) == marker
+    baby = json.loads((lib / "Matador" / "Baby" / "study.json").read_text())
+    assert baby["key"] == "G major" and baby["key_note"].startswith("detection disagrees (parallel)")
+    live = json.loads((lib / "Sylvain" / "Live" / "study.json").read_text())
+    assert "key" not in live and live["key_note"] == "whole-set recording: no single key"
+    assert study.load_study("Live", lib).key is None and study.load_study("Baby", lib).key == "G major"
+    # a key from a weaker source than the record's is a logged failure, and the run goes on
+    lk["rows"][0]["bpm"] = 125
+    (lib / "Einmusik" / "Flare" / "study.json").write_text(json.dumps({"kind": "study_marker", "key": "A minor", "key_source": "by ear"}))
+    lines.clear()
+    ok, failed = keyfill.write_records(keyfill.run_plan(lk, refs, detector=detector, min_free_gb=0), tmp_path / "backup", lines.append)
+    assert failed == 1 and any(l.startswith("FAILED Einmusik/Flare") and "outranks" in l for l in lines) and ok == 6
+
+
+def test_cli_write_is_for_one_non_local_root_with_a_backup_dir(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    make_study(lib, "Einmusik", "Flare")
+    (tmp_path / "lookup.json").write_text(json.dumps(lookup()))
+    base = [sys.executable, os.path.join(HERE, "study.py"), "fill-keys", "--from", str(tmp_path / "lookup.json"), "--write"]
+    env = dict(os.environ, ROADIE_STUDIES="local=%s" % lib)
+    r = subprocess.run(base + ["--root", "local", "--backup-dir", str(tmp_path / "b")], capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "not local" in r.stderr
+    r = subprocess.run(base + ["--root", "local"], capture_output=True, text=True, env=env)
+    assert r.returncode == 1
+    assert not (lib / "Einmusik" / "Flare" / "study.json").exists()

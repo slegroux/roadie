@@ -570,7 +570,7 @@ def test_a_pcloud_study_is_read_and_written_by_rclone_never_through_the_mount(tm
 def test_only_the_bpm_key_camelot_suffix_is_stripped_from_a_folder_name(tmp_path):
     for name, title in (("Flare [124 Am 8A]", "Flare"), ("Track [Live]", "Track [Live]"),
                         ("Track [Live] [124 F#m 11A?]", "Track [Live]"), ("Mix [123.5 Bb 6B]", "Mix"),
-                        ("Cut [2024]", "Cut [2024]"), ("Breathing (Extended Mix)", "Breathing (Extended Mix)")):
+                        ("Cut [2024]", "Cut [2024]"), ("Set [122]", "Set"), ("Set [121.5] ", "Set"), ("Op [7]", "Op [7]"), ("Breathing (Extended Mix)", "Breathing (Extended Mix)")):
         assert study._strip_suffix(name) == title
     make_study(tmp_path, "A", "Track [Live]")
     make_study(tmp_path, "A", "Track")
