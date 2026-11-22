@@ -773,8 +773,8 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             bass_roots.update(b.pop("_root_of", {}))
             b["level_by_16th_db"] = _level(meas["bass"], sec, t0, bar_s)
             if b["style"] == "continuous" and (b["onsets_per_bar"] or 0) < FEW_ONSETS:
-                b["notes"].append("continuous with under %g onsets a bar: its rhythm is in its level (sidechain, filter), "
-                                  "not in note starts: see level_by_16th_db" % FEW_ONSETS)
+                b["notes"].append("continuous with under %g onsets a bar: it moves in level more than in note starts "
+                                  "(level_by_16th_db says where it is quieter, not why)" % FEW_ONSETS)
             rec["bass"] = b
         else:
             rec["bass"] = None
