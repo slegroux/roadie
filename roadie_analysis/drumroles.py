@@ -682,6 +682,9 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
              "end": end, "room": nxt - o, "status": "grouped", "reason": None, "group": None, "distance": None}
         hits.append(h)
         cut = x[o:end]
+        if not len(cut):                                # the next hit starts within END_GUARD_S: nothing to measure
+            h["status"], h["reason"] = "silent", "no room: the next hit starts within %.0f ms" % (1000 * END_GUARD_S)
+            continue
         if float(np.abs(cut).max()) <= 0:
             h["status"], h["reason"] = "silent", "the cut holds only zeros"
             continue

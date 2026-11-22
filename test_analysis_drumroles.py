@@ -1527,3 +1527,19 @@ def test_a_result_without_tail_levels_says_its_hidden_cells_were_not_judged():
     use = drumroles._use(result, g)
     assert use["hidden_unjudged"] is False
     assert [r["state"] for r in use["steps"] if r["step"] in (1, 5, 9, 13)] == ["not in use"] * 4
+
+
+def test_a_hit_with_no_room_before_the_next_one_is_skipped_with_a_reason_not_a_crash(monkeypatch):
+    # Breathe (Bodzin, 2026-11-21): two onsets closer than END_GUARD_S left a cut of zero samples, and its max() raised
+    # "zero-size array to reduction operation maximum", killing the whole drum pass for the study.
+    sr = 44100
+    rng = np.random.default_rng(0)
+    x = np.zeros(sr)
+    for s in (4410, 4430, 22050):
+        x[s:s + 2000] += rng.standard_normal(2000) * np.exp(-np.arange(2000) / 300.0)
+    monkeypatch.setattr(drumroles.oneshot, "_segments", lambda x, sr, ref_power=None: [(4410, 4430), (4430, 22050), (22050, sr)])
+    monkeypatch.setattr(drumroles, "_onset_after_tail", lambda x, sr, s: s)
+    res = drumroles.hit_groups(x, 120.0, 0.0, sr=sr, stability_runs=0)
+    first = [h for h in res["hits"] if h["start"] == 4410][0]
+    assert first["status"] == "silent" and "next hit" in first["reason"]
+    assert len(res["hits"]) == 3
