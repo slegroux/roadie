@@ -11,3 +11,4 @@ numba==0.66.0
 # requirements-sideman.txt and installed with --no-deps, after this file: see there.
 # tests
 pytest==9.1.1
+pytest-xdist==3.8.0     # parallel runs in CI (-n auto --dist loadfile); pulls in execnet
