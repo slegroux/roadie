@@ -77,6 +77,7 @@ PEDAL_SHARE = 0.75         # the top pitch class carries at least this share of 
 MIN_PC_SHARE = 0.05        # a pitch class under this share of the onsets is a pitch-tracking slip, not counted
 DRONE_LEVEL, DRONE_BARS = 0.5, 0.9
 REPEAT_SHARE = 0.75
+LOOP_COVER = 0.5           # a chord loop that covers at least this share of a section's runs names its progression
 PERIODS = (1, 2, 4, 8)
 TIE = 0.02                 # chord scores this close are a tie, broken by the bass
 OFFBEAT_8THS = (2, 6, 10, 14)  # 0-based 16ths: the "and" of each beat
@@ -332,7 +333,9 @@ def cycle(seq: list) -> tuple[int, float | None, list]:
     """(k, share, cycle) for a sequence of chord runs: the smallest k at which a run equals the run k before in at least
     REPEAT_SHARE of the pairs (so one extra or missing chord breaks a few pairs, not the phase of all that follow), the
     sequence coming round at least twice; the cycle is its most common window of k runs, rotated to start where the
-    section does when it can. With none, the whole sequence and share None."""
+    section does when it can. With no such lag, the loop of 2 to 4 chords whose occurrences (any rotation) cover at
+    least LOOP_COVER of the runs, with that cover as the share (a loop broken by an inserted chord now and then); with
+    none, the whole sequence and share None."""
     n = len(seq)
     for k in range(1, n // 2 + 1):
         share = sum(seq[i] == seq[i - k] for i in range(k, n)) / (n - k)
@@ -342,7 +345,24 @@ def cycle(seq: list) -> tuple[int, float | None, list]:
                 j = cyc.index(seq[0])
                 cyc = cyc[j:] + cyc[:j]
             return k, round(share, 2), cyc
+    best = None                    # no lag holds: the loop of 2 to 4 chords (any rotation) whose occurrences cover most runs
+    for k in range(2, min(4, n // 2) + 1):
+        for i in range(n - k + 1):
+            cls = _rotation(seq[i:i + k])
+            cov = set()
+            for j in range(n - k + 1):
+                if _rotation(seq[j:j + k]) == cls:
+                    cov.update(range(j, j + k))
+            if best is None or len(cov) > best[0]:
+                best = (len(cov), k, list(seq[i:i + k]))
+    if best and best[0] / n >= LOOP_COVER:
+        return best[1], round(best[0] / n, 2), best[2]
     return n, None, list(seq)
+
+
+def _rotation(w) -> tuple:
+    w = tuple(w)
+    return min(w[i:] + w[:i] for i in range(len(w)))
 
 
 def repeat(sigs: list) -> tuple[int | None, list[int]]:
@@ -487,7 +507,8 @@ def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict
         if share == 1.0 and len(seq) >= 2 * k and k > 1:
             out["loop_bars"] = int(sum(r[1] for r in runs[:k]))
         if share is not None and share < 1.0:
-            out["notes"].append("progression: the cycle that fits %d %% of the chord changes" % round(100 * share))
+            out["notes"].append("progression: the loop that fits %d %% of the chord changes; every change is in runs"
+                                % round(100 * share))
         elif share is None and len(seq) >= 4:
             out["notes"].append("progression: no cycle repeats, every change listed")
         out["distinct_chords"] = sorted(set(seq), key=seq.index)

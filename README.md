@@ -358,7 +358,8 @@ the peak itself comes late on a slow attack. Per section:
   starts to count).
 - **synths** (`synths.wav`): the rhythm as for the bass, a chord per bar from chroma (major, minor, sus2, sus4, root
   and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major); a chord lasts while its root
-  holds, so the progression (the shortest cycle of roots at which 75 % of the changes repeat, with that share), bars per
+  holds, so the progression (the shortest cycle of roots at which 75 % of the changes repeat, else the loop of 2 to
+  4 chords whose occurrences cover most of them, from half; with that share), bars per
   chord and the distinct chords follow the root, and the pitch classes held in 90 % of the bars (a drone, or a tone the chords share).
   **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
 - **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat

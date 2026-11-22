@@ -192,3 +192,5 @@ def test_progression_is_the_shortest_cycle_that_fits():
     assert micro.cycle(list("abcabcabd")) == (3, 0.83, list("abc"))
     assert micro.cycle("VI i VII iv VI i VII iv VI i VII i iv".split())[2] == ["VI", "i", "VII", "iv"]  # one extra i
     assert micro.cycle(["i", "VI"]) == (2, None, ["i", "VI"])          # once through: no cycle to speak of
+    seq = "i VII iv VI i VII iv i III i VII iv VI i VII iv VI i III i".split()      # Destination Lost, Drop 2
+    assert micro.cycle(seq) == (4, 0.8, ["i", "VII", "iv", "VI"])

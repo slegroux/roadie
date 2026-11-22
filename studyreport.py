@@ -325,12 +325,14 @@ def micro_markdown(mc: dict | None) -> list[str]:
             ", ".join(map(str, b["rhythm_steps"] or [])) or "-", _num(b["onsets_per_bar"]),
             _pct(b["on_step1_share"]), _pct(b["on_offbeat_8ths_share"]), _dips(b.get("level_by_16th_db"), f), notes, b["register"] or "-",
             b.get("register_range") or "-",
-            "%s (%s %s, %s classes)" % (b["movement"], b["top_pitch_class"], _pct(b["top_pitch_class_share"]), b["pitch_classes"])
+            "%s (%s %s, %s class%s)" % (b["movement"], b["top_pitch_class"], _pct(b["top_pitch_class_share"]), b["pitch_classes"],
+                                        "" if b["pitch_classes"] == 1 else "es")
             if b["movement"] else "-", _num(b["duty"], "%.2f"), b["style"] or "", _repeat(b, f)))
     # synths
     L += ["", "### Synths", "", "Leads and pads are one stem: the rhythm and the chords are of both together.", "",
           "Chords change when the root does (VII, VII5 and VIIsus2 in a row are one VII); the progression is the shortest "
-          "cycle at which 75 % of the changes repeat, with that share when it is not all of them.", "",
+          "cycle at which 75 % of the changes repeat, else the loop of 2 to 4 chords that covers most of them (from half), "
+          "with that share when it is not all of them.", "",
           "| Section | Bars playing | Rhythm (share of bars with onsets) | Onsets/bar | Level dips | Progression | Bars per chord | Chords "
           "| Held (90 % of bars) | Repeat |", "|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
