@@ -732,3 +732,13 @@ def test_an_unreadable_stem_model_marker_is_unknown_not_old(tmp_path, monkeypatc
     study._list(False)
     out = capsys.readouterr().out
     assert "older separation model" not in out and not any(l.rstrip().endswith("old-stems") for l in out.splitlines())
+
+
+def test_study_show_says_when_a_drum_role_name_is_unsteady(tmp_path, capsys):
+    folder = make_study(tmp_path, "A", "Hats")
+    role = lambda n, steady: {"name": n, "hits": 40, "measured": 40, "line": "x...x...x...x...", "name_steady": steady}  # noqa: E731
+    (folder / "Hats_124bpm_stems" / "drums.json").write_text(json.dumps({"kind": "drum_roles", "version": 1, "inputs": [], "stems": {
+        "hh": {"roles": [role("hh 16th", False), role("hh 2", True)], "bleed": []}}}))
+    study._show(load_study("A/Hats", [study.Root("l", tmp_path)]))
+    lines = {l.split()[0] + " " + l.split()[1]: l for l in capsys.readouterr().out.splitlines() if l.startswith("      hh ")}
+    assert lines["hh 16th"].endswith("name unsteady") and "unsteady" not in lines["hh 2"]

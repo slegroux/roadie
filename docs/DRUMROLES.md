@@ -32,7 +32,7 @@ a process pool (`--jobs N`, default the cores).
    last, **rounded outwards to a multiple of lcm(1 ms, 10 ms) of samples** (19,404 at 44.1 kHz): the detector reads the audio on a
    1 ms grid and the DC offset on 10 ms blocks anchored at the slice start, so a slice that began a few samples later (a grid
    moved by 0.001 bpm moves a section line by about a millisecond) found hits a few samples apart and grouped them differently.
-   With the anchor fixed the same audio gives the same hits and groups under any grid that is nearly the same. A hit belongs
+   With the anchor fixed the same audio gives the same hits and groups as long as the grid change does not move a section line across a quantum boundary: at 44.1 kHz the quantum is 19,404 samples (0.44 s), and a line crossing one brings the old instability back for that section. Rough odds at 44.1 kHz: about 0.5 % per section line for a tempo change of 0.001 bpm and about 3 % for 0.005 bpm (the line of a late section moves by about 2.6 ms and 13 ms), a few thousandths of that for t0 +-1 ms. At 48 kHz the quantum is 480 samples (10 ms), so the limit is much tighter there (a 2.6 ms move crosses one about a quarter of the time); a grid-independent anchor would remove the limit and is not done. A hit belongs
    to the section whose bar lines, moved 20 ms earlier, enclose it, so a hit 8 ms early on the first beat is that section's
    and none is counted twice.
 3. The groups of all the sections are matched by sound: each group's clean hit (else the cut of its member nearest the
@@ -102,7 +102,7 @@ rate); no clean hit, no file. A run writes the new clips first, then `drums.json
 **Steadiness.** `python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare]` re-runs the analysis with the grid
 moved by tempo +-0.001 and +-0.005 bpm and t0 +-1 ms (nothing written) and compares, hit by hit, which role each hit lands in
 (`kept`: the share of a base role's hits in its best-matching role; `agreement`: the same over all roles of 4 or more hits).
-The hit assignment is steady under those moves (Glacier's hat and snare stems: 1.0 in 11 of 12 runs, 0.995 in the other). What is
+The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: see the stability report). What is
 not steady is a **name that rests on a threshold the pattern sits on**: the patterns are made from the hits within 20 ms of a
 16th line, and a hat whose offsets spread to the edge (Glacier's `hh 16th`: 60 of 1600 hat hits lie within 3 ms of it) loses or
 gains a few hits when the grid moves, which moves its hits a bar on the odd 16ths across the 4.0 the `hh 16th` rule asks for

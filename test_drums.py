@@ -287,3 +287,19 @@ def test_the_stability_check_refuses_stems_that_are_not_there_and_perturbations_
         drumstability.main([str(tmp_path), "--stems", "snare"])
     with pytest.raises(SystemExit, match="matches no perturbation"):
         drumstability.main([str(tmp_path), "--stems", "hh,snare", "--only", "tempo+0.5"])
+
+
+@pytest.mark.parametrize("sr", [44100, 48000])
+def test_a_section_slice_starts_on_the_same_sample_when_its_bar_line_moves_a_millisecond(tmp_path, sr):
+    """The slice is anchored to a multiple of lcm(1 ms, 10 ms) of samples, so t0 and t0 + 1 ms give the same slice."""
+    import math
+    from roadie_analysis import drumsections
+    x = np.zeros(40 * sr, dtype=np.float32)
+    for k in range(60):
+        x[int((0.3 + 0.5 * k) * sr):][:200] = 0.5
+    sf.write(str(tmp_path / "s.wav"), x, sr, subtype="FLOAT")
+    sec = {"name": "B", "start_bar": 4, "bars": 6, "first": False, "to_end": False}
+    a = drumsections.section_job(tmp_path / "s.wav", 120.0, 0.5, sec)
+    b = drumsections.section_job(tmp_path / "s.wav", 120.0, 0.501, sec)
+    quantum = math.lcm(round(0.001 * sr), round(0.010 * sr))
+    assert a["offset_s"] == b["offset_s"] and round(a["offset_s"] * sr) % quantum == 0 and a["offset_s"] > 0
