@@ -129,7 +129,20 @@ case "$cmd" in
     if [[ -n "$src" && "$src" != *://* && -e "$src" ]]; then
       src="$(cd -P "$(dirname "$src")" && pwd)/$(basename "$src")"
     fi
-    run_logged split "$src" "$REPO/yt2stems.sh" ${args[@]+"${args[@]}"} ;;
+    # The separation is the heavy part: take the machine-wide lock first. jobqueue.py replaces itself
+    # with yt2stems.sh, which keeps the lock until it and its children are gone. No lock for --help or
+    # a run with no source (they end at once); ROADIE_NO_QUEUE=1 skips it. The usage log's seconds
+    # include the wait.
+    queue=()
+    if [[ -n "$src" ]]; then
+      queue=(1)
+      for a in ${args[@]+"${args[@]}"}; do [[ "$a" == -h || "$a" == --help ]] && queue=(); done
+    fi
+    if [[ ${#queue[@]} -gt 0 ]]; then
+      PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
+      queue=("$PY" -I "$REPO/roadie_analysis/jobqueue.py" run "roadie split $src" --)
+    fi
+    run_logged split "$src" ${queue[@]+"${queue[@]}"} "$REPO/yt2stems.sh" ${args[@]+"${args[@]}"} ;;
   load)     run_logged load     "$(first_dir "$@")" "$REPO/stems2live.py" "$@" ;;
   open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;

@@ -381,3 +381,31 @@ def test_upload_resumes_from_kept_work_dir(env, monkeypatch):
     assert (tmp / "roadie.log").read_text().count("split") == splits   # no second split
     assert [s["status"] for s in states(tmp)] == ["upload_failed", "done"]
     assert list((tmp / "cache" / "work").iterdir()) == []
+
+
+def test_the_queue_wait_does_not_count_against_the_split_timeout(env):
+    """Another heavy job holds the machine for longer than the split's timeout (2 s here): the track still
+    splits, because the wait happens before the step's clock starts."""
+    import threading
+    from roadie_analysis import jobqueue
+    tmp = env
+    touch(tmp / "Studies" / "a.mp3")
+    manifest = plan(tmp, tmp / "Studies")
+    held, free = threading.Event(), threading.Event()
+
+    def other_job():
+        with jobqueue.heavy_job("roadie drums Glacier 3000", poll=0.05):
+            held.set()
+            free.wait(10)
+    t = threading.Thread(target=other_job)
+    t.start()
+    assert held.wait(10)
+    threading.Timer(3.0, free.set).start()               # longer than batch.SPLIT_NODUR
+    t0 = time.monotonic()
+    try:
+        assert run(tmp, manifest) == 0
+    finally:
+        free.set()
+        t.join(10)
+    assert time.monotonic() - t0 > 2.5                   # the batch itself waited for the other job (the fake roadie takes no lock)
+    assert [s["status"] for s in states(tmp)] == ["done"]
