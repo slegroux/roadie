@@ -642,7 +642,8 @@ def _show(study: Study) -> None:
                 print("    %s: %d roles of 4+ hits, %d smaller%s" % (stem, len(big), len(st["roles"]) - len(big),
                                                                   ", %d bleed" % len(st["bleed"]) if st.get("bleed") else ""))
                 for r in big:
-                    print("      %-14s %5d  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4))))
+                    print("      %-14s %5d  %s%s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
+                                           "  name unsteady" if r.get("name_steady") is False else ""))
         if name == "sections":
             for s in study.sections():
                 live = "Live bar %g" % s.live_bar if s.live_bar is not None else "-"
