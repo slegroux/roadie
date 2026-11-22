@@ -742,3 +742,14 @@ def test_study_show_says_when_a_drum_role_name_is_unsteady(tmp_path, capsys):
     study._show(load_study("A/Hats", [study.Root("l", tmp_path)]))
     lines = {l.split()[0] + " " + l.split()[1]: l for l in capsys.readouterr().out.splitlines() if l.startswith("      hh ")}
     assert lines["hh 16th"].endswith("name unsteady") and "unsteady" not in lines["hh 2"]
+
+
+def test_study_show_prints_an_echo_and_a_merged_role(tmp_path, capsys):
+    folder = make_study(tmp_path, "A", "Snares")
+    role = lambda n, **kw: {"name": n, "hits": 100, "measured": 100, "line": "....x.......x...", **kw}  # noqa: E731
+    (folder / "Snares_124bpm_stems" / "drums.json").write_text(json.dumps({"kind": "drum_roles", "version": 1, "inputs": [], "stems": {
+        "snare": {"roles": [role("snare 1", merged_from=[{"hits": 60, "bars": [[0, 7]]}, {"hits": 40, "bars": [[8, 15]]}]),
+                            role("echo of snare 1", echo_of="snare 1", echo_ms=152.0, echo_bars=[[0, 15]])], "bleed": []}}}))
+    study._show(load_study("A/Snares", [study.Root("l", tmp_path)]))
+    out = capsys.readouterr().out
+    assert "(2 groups merged)" in out and "echo of snare 1, +152 ms" in out

@@ -42,6 +42,15 @@ QUANTUM_S = 0.45         # a slice starts and ends on a multiple of about this m
 SHIFT_WINDOW_MS = 3.0     # ...from the densest cluster of offsets, this wide either side
 SHIFT_SUPPORT = 0.4      # ...and the densest window must hold at least this share of them (40 %: a cluster that is not a minority of two)
 SHIFT_DRIFT_MS = 15.0    # a section's phase may differ from the track-wide one by this much (the drift of 0.005 bpm over a track is 13 ms)
+MERGE_MIN_HITS = 4       # one sound, one role: groups of at least this many measured hits are compared
+MERGE_COINCIDE_S = 0.030 # two groups "take turns" when no hit of one lies within this of a hit of the other (the bleed test's 25 ms and a little)
+MERGE_COINCIDE_SHARE = 0.05  # ...beyond this share of the smaller group's hits (chance)
+MERGE_DISTANCE = drumroles.NEAR_SEPARATION * drumroles.THRESHOLD   # ...and they sound alike: the mean spectral distance of their clean hits is at most this (1.73: the bound the naming already uses for "possibly one sound", measured on Flare, where distinct snare groups held at 1.77 to 1.82)
+ECHO_MIN_HITS = 4        # an echo needs at least this many measured hits...
+ECHO_SHARE = 0.90        # ...this share of them following a hit of one other role by the same gap...
+ECHO_SPREAD_S = 0.015    # ...the same to within this either side of the median gap (an onset is found to about 10 ms, a gap is the difference of two: 10 ms x 1.4)
+ECHO_MIN_S = 0.030       # ...a gap over the 25 ms the bleed test calls one event and the 20 ms grid tolerance (under it: one hit detected twice)...
+ECHO_MAX_S = 0.600       # ...and under about a beat
 SHIFT_MIN_HITS = 8       # a section's grid phase is read from its hits' densest offsets when it has at least this many
 
 
@@ -217,6 +226,121 @@ def _rephase(hits: list, plan: list, tempo: float, t0: float) -> list:
     return [round(x, 2) for x in shifts]
 
 
+def _stability(parts: list, owned: callable) -> tuple[float | None, str]:
+    """(stability, status) of a group made of the section groups `parts` (entries): the hit-weighted mean of the measured stabilities,
+    else "stable by construction" when a part says so, else "not measured"."""
+    stabs = [(len(owned(si, g["members"])), g["stability"]) for si, g in parts if g["stability"] is not None]
+    if stabs:
+        return round(float(sum(c * v for c, v in stabs) / max(1, sum(c for c, _ in stabs))), 3), "measured"
+    return None, ("stable by construction" if any(g["stability_status"] == "stable by construction" for _, g in parts) else "not measured")
+
+
+def _runs(bars: list) -> list:
+    """[[first, last], ...] of the runs of consecutive bars in `bars`."""
+    out = []
+    for b in sorted(set(bars)):
+        if out and b == out[-1][1] + 1:
+            out[-1][1] = b
+        else:
+            out.append([b, b])
+    return out
+
+
+def _pair_stats(built: list, hits: list, raw: np.ndarray, clean: list) -> dict:
+    """{(a, b): numbers} for each pair of groups (indices into `built`) of at least MERGE_MIN_HITS measured hits: "cosine" of
+    the hits-per-16th vectors (do they play the same steps), "coincide" (hits of the smaller group with a hit of the other within
+    MERGE_COINCIDE_S) and its share, "distance" (mean spectral distance of their sections' clean hits: only entries that have a clean hit
+    count, as in the bleed test, so two groups of which one has no complete hit are not compared: None), "shared_bars". `clean[k]` says
+    whether each entry (index into `raw`) has a clean hit."""
+    out = {}
+    for a in range(len(built)):
+        for b in range(a + 1, len(built)):
+            ma, mb = built[a][0], built[b][0]
+            if len(ma) < MERGE_MIN_HITS or len(mb) < MERGE_MIN_HITS:
+                continue
+            va, vb = (np.bincount([hits[i]["step"] for i in (built[k][0] + built[k][1]) if hits[i]["on_grid"]], minlength=STEPS).astype(float)
+                      for k in (a, b))
+            cos = float(va @ vb / (np.linalg.norm(va) * np.linalg.norm(vb))) if va.any() and vb.any() else 0.0
+            ta = np.array(sorted(hits[i]["onset_s"] for i in ma + built[a][1]))
+            tb = np.array(sorted(hits[i]["onset_s"] for i in mb + built[b][1]))
+            small, big = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+            j = np.searchsorted(big, small)
+            near = np.minimum(np.abs(small - big[np.minimum(j, len(big) - 1)]), np.abs(small - big[np.maximum(j - 1, 0)]))
+            coincide = int((near <= MERGE_COINCIDE_S).sum())
+            pairs = [raw[i, k] for i in built[a][2] for k in built[b][2] if clean[i] and clean[k]]
+            dist = float(np.mean(pairs)) if pairs else None
+            bars_a = {hits[i]["bar"] for i in ma + built[a][1]}
+            bars_b = {hits[i]["bar"] for i in mb + built[b][1]}
+            out[(a, b)] = {"cosine": round(cos, 3), "coincide": coincide, "coincide_share": round(coincide / len(small), 3),
+                           "distance": None if dist is None else round(dist, 3), "shared_bars": len(bars_a & bars_b), "hits": (len(ma), len(mb))}
+    return out
+
+
+def _merge_alike(built: list, hits: list, raw: np.ndarray, clean: list, steady: list | None = None) -> tuple[list, dict, list]:
+    """One sound, one role: groups of a stem that play the same 16th steps (cosine of their hits-per-16th at least
+    drumroles.SAME_PATTERN), take turns (at most MERGE_COINCIDE_SHARE of the smaller one's hits within MERGE_COINCIDE_S of a hit of
+    the other) and sound alike (distance at most MERGE_DISTANCE) become one; both must also be steady groups (`steady[k]`: the naming's own
+    gate, stability measured and at least 0.75 or stable by construction): a group the grouping cuts differently with a shifted sample
+    is a piece of a continuum, and merging it makes the outcome as unsteady as the group. Returns (the groups, the pair stats, `merged_from`
+    for each group: None, or [{hits, bars}] of the groups it was made from)."""
+    stats = _pair_stats(built, hits, raw, clean)
+    def ok(st):
+        return (st["cosine"] >= drumroles.SAME_PATTERN and st["coincide_share"] <= MERGE_COINCIDE_SHARE
+                and st["distance"] is not None and st["distance"] <= MERGE_DISTANCE)
+    good = {pair for pair, st in stats.items() if ok(st) and (steady is None or (steady[pair[0]] and steady[pair[1]]))}
+    comps = {i: [i] for i in range(len(built))}
+    where = list(range(len(built)))
+    for a, b in sorted(good, key=lambda pr: stats[pr]["distance"]):       # closest first; a group joins another only when it fits every member
+        ca, cb = where[a], where[b]
+        if ca != cb and all((min(x, y), max(x, y)) in good for x in comps[ca] for y in comps[cb]):
+            comps[ca] += comps.pop(cb)
+            for x in comps[ca]:
+                where[x] = ca
+    merged, info = [], []
+    for ids in comps.values():
+        mem = sorted(i for k in ids for i in built[k][0])
+        asg = sorted(i for k in ids for i in built[k][1])
+        cl = [k for i in ids for k in built[i][2]]
+        merged.append((mem, asg, cl))
+        info.append(None if len(ids) == 1 else [{"hits": len(built[k][0]) + len(built[k][1]),
+                                                  "bars": _runs([hits[i]["bar"] for i in built[k][0] + built[k][1]])} for k in ids])
+    order = sorted(range(len(merged)), key=lambda m: (-len(merged[m][0]), (merged[m][0] + merged[m][1])[0]))
+    return [merged[m] for m in order], stats, [info[m] for m in order]
+
+
+def _echoes(groups: list, hits: list, tempo: float) -> None:
+    """Label the groups that are an echo of another: sets `echo_of` (the group id), `echo_ms` (the median gap) and `echo_bars` on
+    a group of at least ECHO_MIN_HITS measured hits when at least ECHO_SHARE of its hits follow the nearest earlier hit of one
+    other group (not itself an echo) by the same gap, within ECHO_SPREAD_S either side of the median, the median gap being
+    between ECHO_MIN_S and ECHO_MAX_S and not within the grid tolerance of a multiple of a 16th (a gap the grid explains is two
+    parts on the grid, such as the offbeat hat after the on-beat hat, not an echo). Groups are taken biggest first, so a
+    parent is never an echo."""
+    step_s = 60.0 / tempo / 4
+    times = {g["id"]: np.array(sorted(hits[i]["onset_s"] for i in g["members"] + g["assigned_members"])) for g in groups}
+    for g in sorted(groups, key=lambda g: (-g["count"], g["id"])):
+        g["echo_of"] = g["echo_ms"] = g["echo_bars"] = None
+        if g["count"] < ECHO_MIN_HITS:
+            continue
+        tg, best = times[g["id"]], None
+        for r in groups:
+            if r["id"] == g["id"] or r.get("echo_of") is not None:
+                continue
+            tr = times[r["id"]]
+            j = np.searchsorted(tr, tg, side="left") - 1
+            gaps = tg[j >= 0] - tr[j[j >= 0]]
+            if len(gaps) < ECHO_MIN_HITS:
+                continue
+            med = float(np.median(gaps))
+            share = float((np.abs(gaps - med) <= ECHO_SPREAD_S).sum() / len(tg))
+            off = abs(med / step_s - round(med / step_s)) * step_s
+            if share >= ECHO_SHARE and ECHO_MIN_S <= med <= ECHO_MAX_S and off > drumroles.GRID_LEAD_S:
+                if best is None or share > best[0]:
+                    best = (share, r["id"], med)
+        if best is not None:
+            g["echo_of"], g["echo_ms"] = best[1], round(best[2] * 1000.0, 1)
+            g["echo_bars"] = _runs([hits[i]["bar"] for i in g["members"] + g["assigned_members"]])
+
+
 def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float = drumroles.THRESHOLD) -> dict:
     """One `hit_groups`-shaped result for a stem from its sections' `section_job` outputs (aligned with `plan`). Bars are
     the track's (bar 0 at `t0`); every hit of every slice is in `hits` (`owned` says whether the section keeps it), and
@@ -274,6 +398,11 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
         if mem or asg:
             built.append((sorted(mem), sorted(asg), cl))
     built.sort(key=lambda b: (-len(b[0]), (b[0] + b[1])[0]))
+    steady = []
+    for mem, asg, cl in built:
+        stab, status = _stability([entries[k] for k in cl], owned_ids)
+        steady.append(status == "stable by construction" or (stab is not None and stab >= drumroles.NAME_STABILITY))
+    built, out["merge_stats"], merged_from = _merge_alike(built, hits, raw, [g["clean_hit"] is not None for _, g in entries], steady)
     real = [h["bar"] for h in hits if h["owned"] and h["status"] not in ("faint", "silent", "no_lead")]
     first, last = (min(real), max(real)) if real else (0, 0)
     nbars = last - first + 1
@@ -283,13 +412,7 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
         on = [hits[i] for i in mem + asg if hits[i]["on_grid"]]
         lv = [hits[i]["level_db"] for i in mem if hits[i]["level_db"] is not None]
         parts = sorted(cl, key=lambda k: -len(owned_ids(entries[k][0], entries[k][1]["members"])))
-        stabs = [(len(owned_ids(entries[k][0], entries[k][1]["members"])), entries[k][1]["stability"]) for k in parts
-                 if entries[k][1]["stability"] is not None]
-        if stabs:
-            stab, status = round(float(sum(c * s for c, s in stabs) / max(1, sum(c for c, _ in stabs))), 3), "measured"
-        else:
-            stab = None
-            status = "stable by construction" if any(entries[k][1]["stability_status"] == "stable by construction" for k in parts) else "not measured"
+        stab, status = _stability([entries[k] for k in parts], owned_ids)
         clean, note = None, None
         for k in parts:
             si, g = entries[k]
@@ -311,11 +434,12 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
             "pattern": [len({h["bar"] for h in on if h["step"] == s}) / nbars if nbars else 0.0 for s in range(STEPS)],
             "level_db": float(np.median(lv)) if lv else None, "off_grid": len(mem) + len(asg) - len(on),
             "members": mem, "assigned_members": asg, "clean_hit": clean, "clean_note": note, "read_members": read,
-            "sections_of": [(entries[k][0], entries[k][1]["id"]) for k in cl]})
+            "sections_of": [(entries[k][0], entries[k][1]["id"]) for k in cl], "merged_from": merged_from[gid]})
+    _echoes(out["groups"], hits, tempo)
     for a, ga in enumerate(out["groups"]):
         rows = []
         for b, gb in enumerate(out["groups"]):
-            if b != a:
+            if b != a and gb["echo_of"] is None:                # an echo is not another sound to be told apart from
                 d = float(np.mean([raw[i, j] for i in built[a][2] for j in built[b][2]]))
                 rows.append((d, b, gb["count"] >= drumroles.TENTATIVE_N))
         if rows:

@@ -16,7 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import roadie_drums  # noqa: E402
 import study  # noqa: E402
 from roadie_analysis import drums  # noqa: E402
-from test_analysis_drumroles import BPM, SR, STEP, T0, at, noise_hit, stem, tom_hit  # noqa: E402
+from test_analysis_drumroles import BPM, SR, STEP, T0, at, clap_hit, noise_hit, stem, tom_hit  # noqa: E402
 
 BARS = 24
 BAR_S = 16 * STEP
@@ -365,3 +365,78 @@ def test_a_hit_whose_cut_is_empty_is_silent_not_a_crash(monkeypatch):
     monkeypatch.setattr(drumroles, "_onset_after_tail", lambda x, sr, start: start)
     res = drumroles.hit_groups(x, 120.0, 0.0, None, sr=sr)
     assert [h["status"] for h in res["hits"]][:1] == ["silent"]
+
+
+def _fake_groups(*specs):
+    """hits and `built` for `_merge_alike` / `_echoes`: each spec is a list of (bar, step, extra_ms) hits of one group."""
+    hits, built = [], []
+    for k, spec in enumerate(specs):
+        ids = []
+        for bar, step, extra in spec:
+            ids.append(len(hits))
+            hits.append({"step": step, "bar": bar, "on_grid": True, "onset_s": 0.5 + (bar * 16 + step) * STEP + extra / 1000.0})
+        built.append((ids, [], [k]))
+    return hits, built
+
+
+def test_groups_on_the_same_steps_that_take_turns_and_sound_alike_become_one_role():
+    from roadie_analysis import drumsections
+    a = [(b, s, 0.0) for b in range(0, 8) for s in (4, 12)]                  # a backbeat on steps 4 and 12 in bars 0-7...
+    b = [(b, s, 0.0) for b in range(10, 18) for s in (4, 12)]                # ...and the same steps in bars 10-17: never at the same time
+    hits, built = _fake_groups(a, b)
+    close, far = np.array([[0, 1.6], [1.6, 0]]), np.array([[0, 1.9], [1.9, 0]])
+    got, stats, info = drumsections._merge_alike(built, hits, close, [True, True])
+    assert len(got) == 1 and sorted(got[0][0]) == list(range(32)) and [(m["hits"], m["bars"]) for m in info[0]] == [(16, [[0, 7]]), (16, [[10, 17]])]
+    got, _, info = drumsections._merge_alike(built, hits, far, [True, True])                 # sounds different: two roles
+    assert len(got) == 2 and info == [None, None]
+    got, _, _ = drumsections._merge_alike(built, hits, close, [True, False])                 # one has no clean hit: the sound cannot be compared
+    assert len(got) == 2
+    got, _, _ = drumsections._merge_alike(built, hits, close, [True, True], [True, False])   # one is not a steady group (a piece of a continuum)
+    assert len(got) == 2
+
+
+def test_groups_that_play_together_or_on_other_steps_do_not_merge():
+    from roadie_analysis import drumsections
+    close = np.array([[0, 1.6], [1.6, 0]])
+    same_time, other_steps = [(b, s, 0.0) for b in range(8) for s in (4, 12)], [(b, s, 0.0) for b in range(8) for s in (2, 10)]
+    hits, built = _fake_groups(same_time, [(b, s, 5.0) for b in range(8) for s in (4, 12)])   # 5 ms apart: one event, two sounds
+    assert len(drumsections._merge_alike(built, hits, close, [True, True])[0]) == 2
+    hits, built = _fake_groups(same_time, [(b, s, 0.0) for b in range(10, 18) for s in (2, 10)])
+    assert len(drumsections._merge_alike(built, hits, close, [True, True])[0]) == 2          # other steps
+
+
+def test_a_group_that_trails_another_by_a_constant_gap_is_its_echo_and_other_gaps_are_not():
+    from roadie_analysis import drumsections
+    main = [(b, s, 0.0) for b in range(12) for s in (4, 12)]
+
+    def run(gap_ms, spread=0.0):
+        echo = [(b, s, gap_ms + (spread if (b + s) % 2 else -spread)) for b in range(12) for s in (4, 12)]
+        hits, built = _fake_groups(main, echo)
+        groups = [{"id": k, "count": len(m), "assigned": 0, "members": m, "assigned_members": []} for k, (m, _, _) in enumerate(built)]
+        drumsections._echoes(groups, hits, BPM)
+        return groups[1]
+    e = run(152.0, 4.0)
+    assert e["echo_of"] == 0 and 148 <= e["echo_ms"] <= 156 and e["echo_bars"] == [[0, 11]]
+    assert run(10.0)["echo_of"] is None                       # a second hit 10 ms later is one hit detected twice
+    assert run(2 * STEP * 1000, 0.0)["echo_of"] is None      # two 16ths later: the grid explains it, two parts on the grid
+    assert run(152.0, 25.0)["echo_of"] is None               # the gap is not constant
+
+
+def test_an_echo_in_a_stem_is_labelled_with_its_gap_and_takes_no_name_of_its_own(tmp_path):
+    """A hat-like noise hit on steps 5 and 13 and a duller clap 152 ms after each: the clap group is the first one's echo."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    ev = []
+    for b in range(16):
+        for s in (4, 12):
+            ev.append((at(b * 16 + s), noise_hit(b * 16 + s, 0.02, 0.0)))
+            ev.append((at(b * 16 + s, 152.0), clap_hit(b * 16 + s, -6.0)))
+    sf.write(str(d / "drums_snare.flac"), (stem(ev, 16) * 0.3).astype(np.float32), SR)
+    secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    roles = rec["stems"]["snare"]["roles"]
+    echo = [r for r in roles if r.get("echo_of")]
+    assert len(echo) == 1 and not echo[0]["named"] and 148 <= echo[0]["echo_ms"] <= 156 and echo[0]["echo_bars"] == [[0, 15]], [(r["name"], r["hits"]) for r in roles]
+    assert echo[0]["name"] == "echo of " + echo[0]["echo_of"] and echo[0]["hits"] == 32
+    parent = [r for r in roles if r["name"] == echo[0]["echo_of"]]
+    assert len(parent) == 1 and parent[0]["hits"] == 32
