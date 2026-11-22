@@ -26,6 +26,7 @@ import numpy as np
 import soundfile as sf
 
 from roadie_analysis import drumroles, drumsections
+from roadie_analysis.drumsections import _runs as _runs_of
 from roadie_analysis import key as keymod
 
 KIND, VERSION = "drum_roles", 1
@@ -158,20 +159,24 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k]) for k, si in keys], pool, deadline)
         stages["sections"] = time.monotonic() - t
         t = time.monotonic()
-        merged = _run(drumsections.merge_stem, [([outs[i] for i, (k2, _) in enumerate(keys) if k2 == k], plan, tempo, t0) for k in stems],
-                      pool, deadline)
+        sec_outs = {k: [outs[i] for i, (k2, _) in enumerate(keys) if k2 == k] for k in stems}
+        unmerged = dict(zip(stems, _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, False) for k in stems],
+                                        pool, deadline)))
+        bleed0 = drumroles.mark_bleed(unmerged)             # a group that is bleed is never merged: found before merging, on the unmerged groups
+        merged = _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, True,
+                                                 frozenset(g for g, b in bleed0[k].items() if b["bleed"])) for k in stems], pool, deadline)
         results = dict(zip(stems, merged))
         stages["matching"] = time.monotonic() - t
         t = time.monotonic()
         bleed = drumroles.mark_bleed(results)
         stages["bleed"] = time.monotonic() - t
         t = time.monotonic()
-        named = _run(drumroles.name_roles, [(results[k], k, bleed[k]) for k in stems], pool, deadline)
+        named = _run(drumroles.name_roles, [(_for_naming(results[k]), k, bleed[k]) for k in stems], pool, deadline)
         stages["naming"] = time.monotonic() - t
         t = time.monotonic()
-        tight = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S - STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+        tight = _run(drumroles.name_roles, [(_with_grid_tol(_for_naming(results[k]), drumroles.GRID_LEAD_S - STEADY_MARGIN_S), k, bleed[k]) for k in stems],
                      pool, deadline)
-        loose = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S + STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+        loose = _run(drumroles.name_roles, [(_with_grid_tol(_for_naming(results[k]), drumroles.GRID_LEAD_S + STEADY_MARGIN_S), k, bleed[k]) for k in stems],
                      pool, deadline)
         stages["steadiness"] = time.monotonic() - t
     finally:
@@ -306,6 +311,13 @@ def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
     return [len({h["bar"] for h in on if h["step"] == s}) / len(own) if own else 0.0 for s in range(16)], len(own)
 
 
+def _for_naming(res: dict) -> dict:
+    """`res` without the groups that are an echo of another: they take no name and take no part in the naming of the others."""
+    out = dict(res)
+    out["groups"] = [g for g in res["groups"] if g.get("echo_of") is None]
+    return out
+
+
 def _with_grid_tol(res: dict, tol: float) -> dict:
     """`res` with each hit's `on_grid` judged against `tol` seconds instead of the core's 20 ms (groups are unchanged: only the
     patterns the naming rules read move)."""
@@ -345,10 +357,18 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                              "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat), "late_ms": _late_ms(hs)})
         return rows
 
+    group_role = {gid: r["name"] for r in named["roles"] for gid in r["groups"]}
+    echoes = []
+    for g in res["groups"]:
+        if g.get("echo_of") is not None:
+            parent = group_role.get(g["echo_of"], "%s %d" % (kind, g["echo_of"] + 1))
+            echoes.append({"name": "echo of %s %+.0f ms" % (parent, g["echo_ms"]), "named": False, "rule": None, "groups": [g["id"]], "count": g["count"],
+                           "assigned": g["assigned"], "level_db": g["level_db"], "pattern": g["pattern"], "note": None, "variants": None,
+                           "possibly_also": [], "echo_of": parent, "echo_ms": g["echo_ms"], "echo_bars": g["echo_bars"]})
     roles, clips = [], []
-    for r in named["roles"]:
+    for r in named["roles"] + echoes:
         big = by_id[max(r["groups"], key=lambda i: by_id[i]["count"])]
-        e = info[big["id"]]
+        e = info.get(big["id"]) or {"reason": "an echo of %s: its hits follow that role's by %.0f ms" % (r.get("echo_of"), r.get("echo_ms") or 0)}
         clip = big["clean_hit"]
         ids = [i for gid in r["groups"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]]
         own, nb = _own_line([hits[i] for i in ids])
@@ -365,7 +385,25 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
                "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
-        if variants:
+        if any(by_id[gid].get("merged_from") for gid in r["groups"]):    # one sound the grouping had split: each part with its evidence; the parts sum to the role's hits
+            parts = []
+            for gid in r["groups"]:
+                g_parts = by_id[gid].get("merged_from") or [{"hits": by_id[gid]["count"] + by_id[gid]["assigned"], "ids": by_id[gid]["members"] + by_id[gid]["assigned_members"],
+                                                             "bars": _runs_of([hits[i]["bar"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]])}]
+                for part in g_parts:
+                    part = dict(part, group=gid)
+                    ids_ = part.pop("ids")
+                    if hit_times:
+                        part["hit_times"] = sorted(round(hits[i]["onset_s"], 4) for i in ids_)
+                    parts.append(part)
+            rec["merged_from"] = parts
+        if r.get("echo_of") is not None:
+            rec["echo_of"], rec["echo_ms"], rec["echo_bars"] = r["echo_of"], r["echo_ms"], r["echo_bars"]
+        maybe = sorted({group_role[og] for gid in r["groups"] for og in by_id[gid].get("may_be_one_sound_with", [])
+                        if og in group_role and group_role[og] != r["name"]})
+        if maybe and r.get("echo_of") is None:
+            rec["may_be_one_sound_with"], rec["may_be_note"] = maybe, "not compared: too few clean hits on one side"
+        if variants and r.get("echo_of") is None:
             why = _steadiness(r["groups"], r["name"], r["named"], variants)
             rec["name_steady"], rec["name_steady_note"] = why is None, why
         if hit_times:                                  # onset seconds of the role's hits, for roadie_analysis/drumstability.py
@@ -389,6 +427,11 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
            "hat_like": res["hat_like"], "bars": res["bars"], "first_bar": res["first_bar"], "roles": roles, "bleed": marked,
            "per_section": per_section, "notes": res["notes"] + named["notes"]}
     return rec, clips
+
+
+def _bars_text(runs: list) -> str:
+    """[[3, 9], [12, 12]] as "3-9, 12" (file bars counted from bar 0)."""
+    return ", ".join("%d" % a if a == b else "%d-%d" % (a, b) for a, b in runs)
 
 
 def format_table(record: dict) -> str:
@@ -418,6 +461,12 @@ def format_table(record: dict) -> str:
                 flags.append("%d variants" % len(r["variants"]))
             if r.get("name_steady") is False:
                 flags.append("name unsteady")
+            if r.get("echo_of"):
+                flags.append("echo of %s, %+.0f ms later" % (r["echo_of"], r["echo_ms"]))
+            if r.get("merged_from"):
+                flags.append("%d groups merged" % len(r["merged_from"]))
+            if r.get("may_be_one_sound_with"):
+                flags.append("may be one sound with %s (%s)" % (", ".join(r["may_be_one_sound_with"]), r["may_be_note"]))
             lvl = "%.1f dB" % r["level_db"] if r["level_db"] is not None else "-"
             lines.append("  %-14s %5d  %-19s %7s  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
                                                           lvl, ", ".join(flags)))
@@ -427,6 +476,10 @@ def format_table(record: dict) -> str:
                 lines.append("      note: %s" % r["note"])
             if r.get("name_steady") is False:
                 lines.append("      unsteady: %s" % r["name_steady_note"])
+            for m in r.get("merged_from") or []:
+                lines.append("      merged part: %d hits in bars %s" % (m["hits"], _bars_text(m["bars"])))
+            if r.get("echo_bars"):
+                lines.append("      echo is on in bars %s" % _bars_text(r["echo_bars"]))
             for v in r["per_section"] if len(r["per_section"]) > 1 else []:
                 lines.append("      %-22s %4d  %s" % (v["section"][:22], v["hits"], " ".join(v["line"][i:i + 4] for i in range(0, 16, 4))))
             if r["clip"]:
