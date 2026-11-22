@@ -19,6 +19,7 @@ the mount, and its micro.json is read the same way.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -65,6 +66,65 @@ def read_micro(st: studymod.Study) -> tuple[dict | None, str | None]:
     if not isinstance(rec, dict) or rec.get("kind") != "micro":
         return None, "micro.json is not a micro record"
     return rec, None
+
+
+def _sizes(folder: Path) -> dict[str, int] | None:
+    """{file name: size} of a stems folder: through rclone for a pCloud study, by listing otherwise; None when it cannot be
+    listed."""
+    remote = keymod.pcloud_remote(folder)
+    try:
+        if remote:
+            out = {}
+            for line in studymod._rclone("lsf", "--files-only", "--format", "sp", "--separator", "\t", remote).splitlines():
+                size, _, name = line.partition("\t")
+                if name:
+                    out[name] = int(size)
+            return out
+        return {p.name: p.stat().st_size for p in Path(folder).iterdir() if p.is_file()}
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return None
+
+
+def micro_stale(st: studymod.Study, mc: dict) -> list[str]:
+    """Why micro.json no longer describes the study (empty when it still does): another key, grid or section list than
+    the records now give, or an input file (a stem, alignment.json, sections.json, drums.json) of another size, gone, or
+    new. drums.json and the sizes are read through rclone for a pCloud study."""
+    why = []
+    try:
+        key = keymod.key_name(*keymod.parse_key(st.key)) if st.key else None
+    except ValueError:
+        key = st.key
+    if ((mc.get("key") or {}).get("name")) != key:
+        why.append("key %s, now %s" % ((mc.get("key") or {}).get("name"), key))
+    res, g = st.layers["grid"].data or {}, mc.get("grid") or {}
+    bpm, down = res.get("bpm"), res.get("downbeat_sec")
+    if isinstance(bpm, (int, float)) and isinstance(down, (int, float)) and bpm > 0:
+        bar_s = 240.0 / bpm
+        t0 = down - math.floor(down / bar_s) * bar_s
+        if abs(float(g.get("tempo") or 0) - bpm) > 0.001 or abs(float(g.get("t0") or 0) - t0) > 0.005:
+            why.append("grid %s bpm at %s s, now %g bpm at %.4f s" % (g.get("tempo"), g.get("t0"), bpm, t0))
+    now = [(s.label, s.bar, s.bars) for s in st.sections()]
+    was = [(s.get("name"), s.get("file_bar"), s.get("bars")) for s in mc.get("sections") or []]
+    if now != was:
+        why.append("the sections changed")
+    sd = studymod._stems_dir(st.root)
+    sizes = _sizes(sd) if sd else None
+    if sizes is not None:
+        recorded = {i["name"]: i.get("size") for i in mc.get("inputs") or []}
+        changed = sorted(n for n, size in recorded.items() if sizes.get(n) != size)
+        new = sorted(n for n in ("alignment.json", "sections.json", "drums.json") if n in sizes and n not in recorded)
+        if changed:
+            why.append("changed since: %s" % ", ".join(changed))
+        if new:
+            why.append("made since: %s" % ", ".join(new))
+    text = read_text(sd / "drums.json") if sd else None
+    try:
+        made = json.loads(text).get("made") if text else None
+    except (ValueError, AttributeError):
+        made = None
+    if made and mc.get("drums_made") and made != mc["drums_made"]:
+        why.append("its drum roles are from an older drums.json (%s, now %s)" % (mc["drums_made"], made))
+    return why
 
 
 def grid_state(st: studymod.Study) -> dict:
@@ -142,15 +202,15 @@ def report_data(st: studymod.Study, micro: dict | None = None, micro_missing: st
         m = ref["metrics"]
         data["structure"] = {"blocks": m["blocks"], "kick": m["kick"], "bass": m["bass"], "hats": m["hats"],
                              "drops": arrangement.labelled_drops(m), "drop_ratio": m["drop_ratio"]}
-    if st.mix():
-        data["mix"] = st.mix()
+    data["mix"] = st.mix() or None
     if micro is None:
         data["missing"].append({"layer": "micro", "command": micro_missing})
     else:
-        made = (st.layers["drums"].data or {}).get("made")
-        if made and micro.get("drums_made") and made != micro["drums_made"]:
-            data["caveats"].append("micro: its drum roles come from an older drums.json (%s, now %s): re-run roadie micro"
-                                   % (micro["drums_made"], made))
+        stale = micro_stale(st, micro)
+        data["micro_stale"] = stale
+        if stale:
+            data["caveats"].append("micro: micro.json is stale (%s): re-run roadie micro \"%s/%s\""
+                                   % ("; ".join(stale), st.artist, st.title))
     return data
 
 
@@ -310,7 +370,10 @@ def micro_markdown(mc: dict | None) -> list[str]:
 
     # bass
     L += ["", "### Bass", "", "Rhythm: the most common one-bar pattern, with its share of the bars that have an onset on the grid. "
-          "Level dips: the 16ths %g dB or more under the loudest (a sidechain or a gap)." % DIP_DB, "",
+          "Level dips: the 16ths at which the stem's mean level over its playing bars is %g dB or more under its loudest 16th. "
+          "A dip says the part is quieter there on average: a sidechain duck, the gap between notes, or the tail of notes "
+          "that start elsewhere, not which; read it against the kick and the rhythm, and listen before calling it a "
+          "sidechain." % DIP_DB, "",
           "| Section | Bars playing | Rhythm (share of bars with onsets) | 16th steps | Onsets/bar | On 1 / on 8th offbeats "
           "| Level dips | Notes (degrees) | Register | Pedal or moving | Duty | Repeat |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
@@ -320,19 +383,21 @@ def micro_markdown(mc: dict | None) -> list[str]:
             continue
         degs = b["degrees"] or b.get("pitch_names")
         notes = ", ".join("%s %s" % (x.get("degree") or x["note"], _pct(x["share"])) for x in degs) if degs else "-"
-        L.append("| %s | %d of %d | %s%s (%s of %s) | %s | %s | %s / %s | %s | %s | %s (%s) | %s | %s %s | %s |" % (
-            s["name"], b["bars_playing"], s["bars"], _code(b["rhythm"]), f, _pct(b["rhythm_share"]), b.get("bars_with_onsets", "?"),
-            ", ".join(map(str, b["rhythm_steps"] or [])) or "-", _num(b["onsets_per_bar"]),
-            _pct(b["on_step1_share"]), _pct(b["on_offbeat_8ths_share"]), _dips(b.get("level_by_16th_db"), f), notes, b["register"] or "-",
+        L.append("| %s | %d of %d | %s | %s | %s | %s | %s | %s | %s (%s) | %s | %s %s | %s |" % (
+            s["name"], b["bars_playing"], s["bars"], _rhythm(b, f),
+            (", ".join(map(str, b["rhythm_steps"])) + f) if b["rhythm_steps"] else "-", _num(b["onsets_per_bar"]),
+            ("%s / %s%s" % (_pct(b["on_step1_share"]), _pct(b["on_offbeat_8ths_share"]), f))
+            if b["on_step1_share"] is not None else "-", _dips(b.get("level_by_16th_db"), f), notes, b["register"] or "-",
             b.get("register_range") or "-",
             "%s (%s %s, %s class%s)" % (b["movement"], b["top_pitch_class"], _pct(b["top_pitch_class_share"]), b["pitch_classes"],
                                         "" if b["pitch_classes"] == 1 else "es")
             if b["movement"] else "-", _num(b["duty"], "%.2f"), b["style"] or "", _repeat(b, f)))
+    L += _notes(secs, "bass")
     # synths
     L += ["", "### Synths", "", "Leads and pads are one stem: the rhythm and the chords are of both together.", "",
-          "Chords change when the root does (VII, VII5 and VIIsus2 in a row are one VII); the progression is the shortest "
-          "cycle at which 75 % of the changes repeat, else the loop of 2 to 4 chords that covers most of them (from half), "
-          "with that share when it is not all of them.", "",
+          "Chords change when the root does (VII, VII5 and VIIsus2 in a row are one VII). The progression is a loop of 2 to 4 "
+          "chords, written on the same phase in every section, with the share of the changes that follow it when that is "
+          "not all of them; with no loop, every change in order.", "",
           "| Section | Bars playing | Rhythm (share of bars with onsets) | Onsets/bar | Level dips | Progression | Bars per chord | Chords "
           "| Held (90 % of bars) | Repeat |", "|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
@@ -345,12 +410,13 @@ def micro_markdown(mc: dict | None) -> list[str]:
             drone.get("pitch_classes", []), drone.get("degrees", [None] * 12), drone.get("bars_share", []))) or "none"
         prog = (y["progression"] or "-") + f + (" (%s)" % _pct(y["progression_share"])
                                                 if y.get("progression_share") not in (None, 1.0) else "")
-        L.append("| %s | %d of %d | %s%s (%s of %s) | %s | %s | %s | %s | %s | %s | %s |" % (
-            s["name"], y["bars_playing"], s["bars"], _code(y["rhythm"]), f, _pct(y["rhythm_share"]), y.get("bars_with_onsets", "?"),
+        L.append("| %s | %d of %d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            s["name"], y["bars_playing"], s["bars"], _rhythm(y, f),
             _num(y["onsets_per_bar"]), _dips(y.get("level_by_16th_db"), f), prog, ("%g" % y["bars_per_chord"] + f) if y["bars_per_chord"] else
             ("whole section" if y.get("runs") and len(y["runs"]) == 1 else "-"),
-            ", ".join(y["distinct_chords"] or []) or "-", held, _repeat(y, f)
-            + (", loop %d bars" % y["loop_bars"] if y.get("loop_bars") else "")))
+            (", ".join(y["distinct_chords"]) + f) if y["distinct_chords"] else "-", held, _repeat(y, f)
+            + (", loop %g bars" % y["loop_bars"] if y.get("loop_bars") else "")))
+    L += _notes(secs, "synths")
     # vocals
     L += ["", "### Vocals", "", "| Section | Bars with vocal | Share | Phrase starts (bar.beat) |", "|---|---|---|---|"]
     for s in secs:
@@ -361,6 +427,7 @@ def micro_markdown(mc: dict | None) -> list[str]:
         starts = ", ".join("%d.%d" % (p["bar"], p["beat"]) for p in v["phrase_starts"] or [])
         L.append("| %s | %s%s | %s | %s |" % (s["name"], v["bars_with_vocal"], f, _pct(v["share"]),
                                               (starts + f) if starts else "- (%s)" % (v["notes"] or ["none"])[-1]))
+    L += _notes(secs, "vocals")
     # drums
     L += ["", "### Drums", "", "Roles and patterns from drums.json (`x` most bars, `o` some, `.` fewer), the roles with 4 or more hits "
           "in the section; not measured again here.", "",
@@ -375,10 +442,11 @@ def micro_markdown(mc: dict | None) -> list[str]:
             continue
         for r in dr["roles"]:
             acc = "-" if r["stem"] not in ("hh", "ride") else (
-                "16th %s" % r["accent_16th"] if r.get("accent_16th") else "missing (no per-hit levels in drums.json)")
+                "16th %s" % r["accent_16th"] if r.get("accent_16th") is not None else "missing (no per-hit levels in drums.json)")
             L.append("| %s | %s | %s%s | %s%s | %d | %d | %s |" % (
                 s["name"] + (" (as %s)" % dr["drums_section"] if dr["drums_section"] != s["name"] else ""), r["stem"],
                 r["role"], "" if r.get("named") else " (neutral)", _code(r["pattern"]), f, r["hits"], r["bars_with"], acc))
+    L += _notes(secs, "drums")
     notes = list(mc.get("notes") or [])
     if notes:
         L += ["", "Micro notes:"] + ["- %s" % n for n in notes]
@@ -386,6 +454,24 @@ def micro_markdown(mc: dict | None) -> list[str]:
 
 
 DIP_DB = 6.0
+
+
+def _rhythm(x, f) -> str:
+    """The rhythm cell: the pattern, its share and of how many bars, or `-` with the reason."""
+    if not x.get("rhythm"):
+        return "- (%s)" % ((x.get("notes") or ["no rhythm"])[0])
+    return "%s%s (%s of %s)" % (_code(x["rhythm"]), f, _pct(x["rhythm_share"]), x.get("bars_with_onsets", "?"))
+
+
+def _notes(secs, part) -> list[str]:
+    """The per-section notes of one instrument (what a `-` cell stands for), the stem-wide synths note left out."""
+    rows = []
+    for s in secs:
+        x = s.get(part)
+        ns = [n for n in (x or {}).get("notes") or [] if not n.startswith("the synths stem holds")]
+        if ns:
+            rows.append("- %s: %s" % (s["name"], "; ".join(ns)))
+    return ["", "Notes:"] + rows if rows else []
 
 
 def _dips(levels, f) -> str:
@@ -398,7 +484,7 @@ def _dips(levels, f) -> str:
 
 def _repeat(x, f) -> str:
     if x.get("repeat_bars") is None:
-        return "none of 1, 2, 4, 8 bars"
+        return "none of 1, 2, 4, 8 bars" if x.get("changes_at_bars") is not None else "- (too few playing bars)"
     ch = x.get("changes_at_bars") or []
     more = ", ..." if len(ch) > 8 else ""
     return "%d bar%s%s" % (x["repeat_bars"], "" if x["repeat_bars"] == 1 else "s", (
@@ -419,8 +505,11 @@ def write_report(st: studymod.Study, text: str) -> str:
             raise OSError("%s: read back after writing and it is not what was written" % remote)
         return remote
     tmp_path = path.with_name(".report.md.tmp")
-    tmp_path.write_text(text)
-    os.replace(tmp_path, path)
+    try:
+        tmp_path.write_text(text)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
     return str(path)
 
 

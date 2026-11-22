@@ -47,6 +47,9 @@ def make_study(root, verdict="confident", micro=None, mix=True, key=True):
                  "mix": {"level_db": -9.5, "integrated_lufs": -8.9, "bands_db": {"sub": -12.0, "bass": -13.0, "low_mid": -20.0,
                                                                                   "mid": -22.0, "high_mid": -28.0, "high": -33.0}}}]}))
     if micro is not None:
+        if micro.get("inputs") == "as on disk":        # what roadie micro records: the three stems and the grid files
+            micro = dict(micro, inputs=[{"name": n, "size": (sd / n).stat().st_size} for n in (
+                "bass.flac", "synths.flac", "vocals.flac", "alignment.json", "sections.json")])
         (sd / "micro.json").write_text(json.dumps(micro))
     return folder
 
@@ -68,11 +71,13 @@ def micro_record(reliable=True):
     drums = {"drums_section": "Drop 1", "notes": [], "roles": [
         {"stem": "hh", "role": "hh offbeat", "named": True, "hits": 30, "bars_with": 8, "pattern": "..x. ..x. ..x. ..x.",
          "accent_16th": None, "accent_note": "drums.json records no per-hit levels"}]}
-    sec = {"index": 0, "name": "Drop 1", "file_bar": 1, "start_bar": 0, "bars": 8, "reliable": reliable,
-           "bass": bass, "synths": synths, "vocals": silent, "drums": drums}
+    secs = [{"index": i, "name": name, "file_bar": bar, "start_bar": bar - 1, "bars": bars, "reliable": reliable,
+             "bass": bass, "synths": synths, "vocals": silent, "drums": dict(drums, drums_section=name)}
+            for i, (name, bar, bars) in enumerate((("Drop 1", 1, 8), ("Breakdown", 9, 8), ("Drop 2", 17, 16)))]
     return {"kind": "micro", "version": 1, "made": "2026-11-21T12:00:00+0100",
-            "grid": {"reliable": reliable, "unreliable_because": [] if reliable else ["the downbeat is chance-level"]},
-            "key": {"name": "A minor"}, "drums_made": None, "notes": [], "sections": [sec]}
+            "grid": {"tempo": 124.0, "t0": 0.5, "reliable": reliable,
+                     "unreliable_because": [] if reliable else ["the downbeat is chance-level"]},
+            "key": {"name": "A minor"}, "drums_made": None, "notes": [], "inputs": "as on disk", "sections": secs}
 
 
 def report(folder, capsys, *extra):
@@ -115,6 +120,58 @@ def test_chance_level_grid_is_flagged_on_every_bar_and_pattern(tmp_path, capsys)
     assert "| Drop 1 | 1%s | 9%s | 8 |" % (f, f) in md
     assert "| 9%s | 8 | Breakdown |" % f in md
     assert "`o..o o... o..o o...`%s" % f in md and "i VI%s" % f in md and "`..x. ..x. ..x. ..x.`%s" % f in md
+    assert "| 1, 4, 5, 9, 12, 13%s |" % f in md and "| 17 %% / 0 %%%s |" % f in md and "| i, VI%s |" % f in md
+
+
+def test_a_fresh_micro_json_has_no_caveat_and_a_changed_input_makes_it_stale(tmp_path):
+    folder = make_study(tmp_path, micro=micro_record())
+    st = study.load_study(str(folder), tmp_path)
+    d = studyreport.report_data(st, *studyreport.read_micro(st))
+    assert d["micro_stale"] == [] and not any(c.startswith("micro:") for c in d["caveats"])
+    (folder / "Track_124bpm_stems" / "bass.flac").write_bytes(b"new")
+    (folder / "study.json").write_text(json.dumps({"kind": "study_marker", "key": "C minor"}))
+    st = study.load_study(str(folder), tmp_path)
+    d = studyreport.report_data(st, *studyreport.read_micro(st))
+    assert any("changed since: bass.flac" in w for w in d["micro_stale"]) and any("key A minor, now C minor" in w
+                                                                                    for w in d["micro_stale"])
+    assert any("micro.json is stale" in c and "re-run roadie micro" in c for c in d["caveats"])
+
+
+def test_an_empty_cell_says_why(tmp_path, capsys):
+    mc = micro_record()
+    mc["sections"][0]["bass"] = dict(mc["sections"][0]["bass"], rhythm=None, rhythm_steps=None, rhythm_share=None,
+                                     bars_with_onsets=0, on_step1_share=None, on_offbeat_8ths_share=None, repeat_bars=None,
+                                     changes_at_bars=None, notes=["no onset on the grid in the bars it plays",
+                                                                  "repeat: too few playing bars"])
+    md = report(make_study(tmp_path, micro=mc), capsys)
+    assert "| - (no onset on the grid in the bars it plays) | - |" in md and "- (too few playing bars)" in md
+    assert "- Drop 1: no onset on the grid in the bars it plays; repeat: too few playing bars" in md
+
+
+def test_study_show_does_not_list_micro_json_as_an_extra(tmp_path):
+    st = study.load_study(str(make_study(tmp_path, micro=micro_record())), tmp_path)
+    assert not any(p.name == "micro.json" for p in st.extras)
+
+
+def test_pcloud_report_write_reads_back_and_a_mismatch_raises(tmp_path, monkeypatch):
+    folder = make_study(tmp_path)
+    st = study.load_study(str(folder), tmp_path)
+    store, temps = {}, []
+
+    def fake_rclone(*args):
+        assert args[0] == "copyto" and args[2] == "pcloud:S/report.md"
+        temps.append(args[1])
+        store["text"] = open(args[1]).read()
+        return ""
+
+    monkeypatch.setattr(studyreport.keymod, "pcloud_remote", lambda p: "pcloud:S/report.md" if p == folder / "report.md" else None)
+    monkeypatch.setattr(studyreport.studymod, "_rclone", fake_rclone)
+    monkeypatch.setattr(studyreport.studymod, "_remote_read", lambda r: store["text"])
+    assert studyreport.write_report(st, "# report\n") == "pcloud:S/report.md" and store["text"] == "# report\n"
+    monkeypatch.setattr(studyreport.studymod, "_remote_read", lambda r: "something else")
+    with pytest.raises(OSError, match="read back"):
+        studyreport.write_report(st, "# report\n")
+    assert temps and not any(os.path.exists(t) for t in temps) and not (folder / "report.md").exists()
 
 
 def test_missing_layers_are_listed_with_their_command(tmp_path, capsys):

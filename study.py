@@ -520,7 +520,8 @@ def load_study(name_or_path: str, roots=None) -> Study:
         else:
             layers["drums"] = unreadable("drums", path)
 
-    known = {stems_dir / "alignment.json", stems_dir / "sections.json", stems_dir / "drums.json", folder / "study.json"}
+    known = {stems_dir / "alignment.json", stems_dir / "sections.json", stems_dir / "drums.json", stems_dir / "micro.json",
+             folder / "study.json"}
     profiles, extras = [], []
     for p in _json_files(folder):
         if p in known or p.name == "study.json":      # a nested study.json marks a nested folder, it is no extra
