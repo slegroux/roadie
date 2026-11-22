@@ -497,16 +497,21 @@ def _repeat(x, f) -> str:
 
 def write_report(st: studymod.Study, text: str) -> str:
     """`report.md` in the study folder; a pCloud study through rclone with a read-back. Returns where it went."""
-    path = st.root / "report.md"
+    return write_file(st.root / "report.md", text)
+
+
+def write_file(path: Path, text: str) -> str:
+    """One generated file: on the pCloud mount through rclone (a temp file, `copyto`, a read-back compared), never
+    through the mount; locally by a temp file and a rename. Returns where it went."""
     remote = keymod.pcloud_remote(path)
     if remote:
         with tempfile.TemporaryDirectory(prefix="roadie-report-") as tmp:
-            Path(tmp, "report.md").write_text(text)
-            studymod._rclone("copyto", str(Path(tmp, "report.md")), remote)
+            Path(tmp, path.name).write_text(text)
+            studymod._rclone("copyto", str(Path(tmp, path.name)), remote)
         if studymod._remote_read(remote) != text:
             raise OSError("%s: read back after writing and it is not what was written" % remote)
         return remote
-    tmp_path = path.with_name(".report.md.tmp")
+    tmp_path = path.with_name("." + path.name + ".tmp")
     try:
         tmp_path.write_text(text)
         os.replace(tmp_path, path)
@@ -515,14 +520,282 @@ def write_report(st: studymod.Study, text: str) -> str:
     return str(path)
 
 
+# ---- the artist report
+
+ARTIST_KIND = "artist_report"
+# Which aggregates need bar 1 where the grid put it. A chance-level downbeat (or a warp map, or no alignment.json) can put
+# bar 1 on the wrong beat: that moves every 16-step pattern, on-1 share and phrase-start beat, and every boundary's place
+# in its 8-bar phrase, so those leave out such tracks. Lengths, ratios, rates and chord numerals do not move when the
+# whole grid shifts by a beat or two, and positions given as a share of the track move by under a bar: those use every
+# track.
+BAR1_RULE = ("Two kinds of aggregate. Bar-1-dependent ones (where section boundaries fall in their 8-bar phrase, 16-step "
+             "patterns, the bass's share on step 1, vocal phrases starting on beat 1) leave out tracks whose grid is "
+             "unreliable (chance-level downbeat, a warp map, no alignment.json): a downbeat on the wrong beat moves all of "
+             "them. Shift-invariant ones (lengths of sections and kick-outs, Drop 2 / Drop 1, bars per chord, onsets per "
+             "bar, duty, pedal or moving, progressions as numerals, and positions as a share of the track, which move by "
+             "under a bar) use every track. Each row says how many tracks it used.")
+KICKOUT_CLASSES = ((0, "no kick-out"), (1, "1-7 bars (a fill)"), (8, "8-15 bars"), (16, "16-31 bars"), (32, "32+ bars"))
+
+
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def _majority(pairs):
+    """The value with the most weight in [(value, weight)], None for none."""
+    w = {}
+    for v, n in pairs:
+        if v is not None:
+            w[v] = w.get(v, 0) + (n or 0)
+    return max(w, key=lambda v: (w[v], str(v))) if w else None
+
+
+def track_row(st: studymod.Study, d: dict) -> dict:
+    """One study of the artist as the numbers the artist report compares (from its report record)."""
+    secs = d["sections"]
+    length = sum(s["bars"] for s in secs) or None
+    first = secs[0]["file_bar"] if secs else None
+    S = d["structure"] or {}
+    kick = S.get("kick") or {}
+    longest = max(kick.get("out") or [], key=lambda o: o["bars"], default=None)
+    bass_entry = (S.get("bass") or {}).get("entry_bar")
+    row = {"title": st.title, "path": str(st.root), "bpm": st.bpm, "key": (d["key"] or {}).get("short"),
+           "camelot": (d["key"] or {}).get("camelot"), "key_source": (d["key"] or {}).get("source"),
+           "verdict": d["grid"]["verdict"], "reliable": d["grid"]["reliable"], "old_stems": st.stem_model != studymod.STEM_MODEL_CURRENT,
+           "length_bars": length, "sections": [(s["label"], s["bars"]) for s in secs],
+           "section_bars": [s["bars"] for s in secs],
+           "drop_ratio": (S.get("drop_ratio") or {}).get("ratio"),
+           "kickout_start": longest["bar"] if longest else None, "kickout_bars": longest["bars"] if longest else (0 if kick else None),
+           "kickout_in": longest["section"] if longest else None,
+           "kickout_at": round((longest["bar"] - first) / length, 2) if longest and length and first is not None else None,
+           "bass_entry": bass_entry,
+           "bass_entry_at": round((bass_entry - first) / length, 2) if bass_entry is not None and length and first is not None else None,
+           "bass_before_drop": (S.get("bass") or {}).get("before_first_drop"),
+           "phrase_lines": None, "micro": d["micro"] is not None}
+    bounds = [s["file_bar"] - first for s in secs[1:]] if first is not None else []
+    if bounds:
+        row["phrase_lines"] = round(sum(b % 8 == 0 for b in bounds) / len(bounds), 2)
+    mc = d["micro"] or {}
+    msecs = mc.get("sections") or []
+    bass = [(s["bass"], s["bars"]) for s in msecs if s.get("bass") and s["bass"].get("bars_playing")]
+    row.update(bass_movement=_majority((b["movement"], b["bars_playing"]) for b, _ in bass),
+               bass_style=_majority((b["style"], b["bars_playing"]) for b, _ in bass),
+               bass_duty=_median([b["duty"] for b, _ in bass]),
+               bass_onsets=_median([b["onsets_per_bar"] for b, _ in bass]),
+               bass_on1=_median([b["on_step1_share"] for b, _ in bass]),
+               bass_rhythm=max(bass, key=lambda x: x[0].get("bars_with_onsets") or 0)[0]["rhythm"] if bass else None)
+    syn = [s["synths"] for s in msecs if s.get("synths") and s["synths"].get("bars_playing")]
+    loops = [(y["progression"], y["bars_playing"]) for y in syn if y.get("progression_share") is not None]
+    row.update(progression=_majority(loops), bars_per_chord=_median([y.get("bars_per_chord") for y in syn]),
+               synth_onsets=_median([y["onsets_per_bar"] for y in syn]),
+               loops=sorted({y["progression"] for y in syn if y.get("progression_share") is not None}))
+    voc = [s["vocals"] for s in msecs if s.get("vocals") is not None]
+    starts = [p for v in voc for p in v.get("phrase_starts") or []]
+    row.update(vocal_share=round(sum(v["bars_playing"] for v in voc) / sum(s["bars"] for s in msecs), 2) if voc else None,
+               vocal_beat1=round(sum(p["beat"] == 1 for p in starts) / len(starts), 2) if starts else None)
+    roles = {}
+    for s in msecs:
+        for r in (s.get("drums") or {}).get("roles") or []:
+            if r.get("named"):
+                roles.setdefault(r["role"], set()).add(r["pattern"])
+    row["drum_roles"] = {k: sorted(v) for k, v in roles.items()}
+    row["missing"] = d["missing"]
+    row["caveats"] = [c for c in d["caveats"] if c.startswith("micro:")]
+    return row
+
+
+# (field, label, bar-1-dependent, format)
+AGGREGATES = (("bpm", "bpm", False, "%g"), ("length_bars", "length, bars", False, "%g"),
+              ("n_sections", "sections", False, "%g"), ("median_section", "section length (median), bars", False, "%g"),
+              ("drop_ratio", "Drop 2 / Drop 1", False, "%.2f"), ("kickout_bars", "longest kick-out, bars", False, "%g"),
+              ("kickout_at", "longest kick-out starts at (share of the track)", False, "%.2f"),
+              ("bass_entry_at", "bass enters at (share of the track)", False, "%.2f"),
+              ("bass_duty", "bass duty", False, "%.2f"), ("bass_onsets", "bass onsets per bar", False, "%.2f"),
+              ("bars_per_chord", "bars per chord", False, "%g"), ("synth_onsets", "synth onsets per bar", False, "%.2f"),
+              ("vocal_share", "share of bars with vocal", False, "%.2f"),
+              ("phrase_lines", "boundaries on an 8-bar phrase line", True, "%.2f"),
+              ("bass_on1", "bass onsets on step 1", True, "%.2f"),
+              ("vocal_beat1", "vocal phrases starting on beat 1", True, "%.2f"))
+
+
+def artist_data(artist: str, roots=None) -> dict:
+    """The artist report as one record: a row per analysed study, the aggregates (each saying the tracks it used and
+    which it left out, see BAR1_RULE), the patterns two or more tracks share, and the layers each lacks."""
+    roots = studymod._roots(roots)
+    label, _, rest = artist.partition(":")
+    if rest.strip() and studymod._norm(label) in {studymod._norm(r.label) for r in roots}:
+        roots, artist = [r for r in roots if studymod._norm(r.label) == studymod._norm(label)], rest.strip()
+    refs = [r for r in studymod.find_studies(roots) if r.analysed and studymod._norm(r.artist) == studymod._norm(artist)]
+    if not refs:
+        raise ValueError("no analysed study by %r under %s" % (artist, ", ".join("%s=%s" % (r.label, r.path) for r in roots)))
+    folders = {r.root.parent for r in refs}
+    if len(folders) > 1:
+        raise ValueError("%r is in several roots (%s): give one, as %s:%s" % (
+            artist, ", ".join(sorted({r.source for r in refs})), refs[0].source, artist))
+    rows, unreadable = [], []
+    for r in refs:
+        try:
+            st = studymod.load_study(str(r.root), roots)
+            mc, why = read_micro(st)
+            rows.append(track_row(st, report_data(st, mc, why)))
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+            unreadable.append({"title": r.title, "why": "%s: %s" % (type(e).__name__, e)})
+    for row in rows:
+        row["n_sections"] = len(row["sections"]) or None
+        row["median_section"] = _median(row["section_bars"])
+    aggs = []
+    for field, name, bar1, fmt in AGGREGATES:
+        use = [x for x in rows if x.get(field) is not None and (x["reliable"] or not bar1)]
+        out = [x["title"] for x in rows if x.get(field) is not None and bar1 and not x["reliable"]]
+        none = [x["title"] for x in rows if x.get(field) is None]
+        vals = [x[field] for x in use]
+        med = _median(vals)
+        aggs.append({"field": field, "name": name, "bar1": bar1, "fmt": fmt, "median": None if med is None else round(med, 3),
+                     "min": min(vals) if vals else None, "max": max(vals) if vals else None, "used": len(use),
+                     "of": len(rows), "left_out_grid": out, "no_value": none})
+    keys = {}
+    for x in rows:
+        if x["camelot"]:
+            keys.setdefault(x["camelot"], []).append(x["title"])
+    return {"kind": ARTIST_KIND, "version": 1, "artist": refs[0].artist, "folder": str(refs[0].root.parent),
+            "rule": BAR1_RULE, "rows": rows, "aggregates": aggs, "keys": keys, "shared": shared_patterns(rows),
+            "unreadable": unreadable}
+
+
+def shared_patterns(rows: list[dict]) -> list[dict]:
+    """Patterns at least 2 tracks share: [{scope, kind, pattern, tracks, bar1}], bar-1-dependent ones (16-step lines)
+    from tracks with a reliable grid only."""
+    groups, shown = {}, {}
+
+    def add(scope, kind, pattern, title, bar1=False, as_written=None):
+        groups.setdefault((scope, kind, pattern, bar1), []).append(title)
+        if as_written:
+            shown.setdefault(pattern, []).append(as_written)
+
+    for x in rows:
+        t = x["title"]
+        if x["bass_before_drop"] is not None:
+            add("macro", "bass entry", "bass in before Drop 1" if x["bass_before_drop"] else "bass held until Drop 1", t)
+        if x["kickout_bars"] is not None:
+            add("macro", "longest kick-out", next(n for lo, n in reversed(KICKOUT_CLASSES) if x["kickout_bars"] >= lo), t)
+        if x["drop_ratio"] is not None:
+            r = x["drop_ratio"]
+            add("macro", "Drop 2 / Drop 1", "Drop 2 shorter (under 0.9)" if r < 0.9 else "Drop 2 longer (over 1.1)" if r > 1.1
+                else "about equal (0.9-1.1)", t)
+        seen = set()
+        for loop in x["loops"]:
+            rot = micro_rotation(loop.split())
+            if rot not in seen:
+                seen.add(rot)
+                add("micro", "chord loop (numerals, any rotation)", rot, t, as_written=loop)
+        if x["bars_per_chord"] is not None:
+            add("micro", "bars per chord (median)", "%g" % x["bars_per_chord"], t)
+        if x["bass_movement"]:
+            add("micro", "bass type", "%s, %s" % (x["bass_movement"], x["bass_style"]), t)
+        for role, lines in x["drum_roles"].items():
+            add("micro", "drum role", role, t)
+            if x["reliable"]:
+                for line in lines:
+                    add("micro", "drum role pattern", "%s `%s`" % (role, line), t, True)
+        if x["reliable"] and x["bass_rhythm"]:
+            add("micro", "bass rhythm", "`%s`" % x["bass_rhythm"], t, True)
+    def name(p):                                        # a loop as most of its tracks write it, not its sorting key
+        return max(set(shown[p]), key=lambda w: (shown[p].count(w), w)) if p in shown else p
+
+    out = [{"scope": sc, "kind": k, "pattern": name(p), "tracks": sorted(set(ts)), "bar1": b}
+           for (sc, k, p, b), ts in groups.items() if len(set(ts)) >= 2]
+    return sorted(out, key=lambda g: (g["scope"], g["kind"], -len(g["tracks"]), g["pattern"]))
+
+
+def micro_rotation(loop: list[str]) -> str:
+    """A loop written from its rotation that comes first in a fixed order, so two tracks' loops compare."""
+    w = tuple(loop)
+    return " ".join(min(w[i:] + w[:i] for i in range(len(w))))
+
+
+def artist_markdown(a: dict) -> str:
+    rows = a["rows"]
+    L = ["# %s: artist report" % a["artist"], "",
+         "Generated by `roadie study report --artist` from the %d analysed studies' records; a rebuild overwrites it "
+         "(notes go to the vault). Each track's own report is `report.md` in its folder." % len(rows), "", a["rule"], "",
+         "## Tracks", "",
+         "| Track | bpm | Key | Grid | Bars | Sections | Drop 2 / Drop 1 | Longest kick-out | Bass enters | Bass | "
+         "Synth loop, bars per chord | Vocal |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for x in rows:
+        f = "" if x["reliable"] else FLAG
+        L.append("| %s%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            x["title"], " (old stems)" if x["old_stems"] else "", _num(x["bpm"]),
+            "%s %s (%s)" % (x["key"], x["camelot"], x["key_source"]) if x["key"] else "missing",
+            (x["verdict"] or "none") + ("" if x["reliable"] else " " + FLAG), _num(x["length_bars"]),
+            " ".join("%s %d" % (lab, b) for lab, b in x["sections"]) or "-", _num(x["drop_ratio"], "%.2f"),
+            ("bar %d%s, %d bars (%s)" % (x["kickout_start"], f, x["kickout_bars"], x["kickout_in"] or "no label")
+             if x["kickout_start"] is not None else ("none" if x["kickout_bars"] == 0 else "-")),
+            ("bar %d%s%s" % (x["bass_entry"], f, "" if x["bass_before_drop"] is None else
+                             ", before Drop 1" if x["bass_before_drop"] else ", with or after Drop 1"))
+            if x["bass_entry"] is not None else "-",
+            ("%s, duty %.2f" % (x["bass_movement"], x["bass_duty"]) if x["bass_movement"] else "-") if x["micro"] else "missing: micro",
+            ("%s, %s" % (x["progression"] or "no loop", "%g" % x["bars_per_chord"] if x["bars_per_chord"] else "-"))
+            if x["micro"] else "missing: micro",
+            _pct(x["vocal_share"]) if x["micro"] else "missing: micro"))
+    if any(not x["reliable"] for x in rows):
+        L += ["", "%s grid unreliable: its bar positions are a guess (the rule above)." % FLAG]
+    L += ["", "## Medians and spreads", "", "| Measure | Kind | Median | Range | Tracks used | Left out |", "|---|---|---|---|---|---|"]
+    for g in a["aggregates"]:
+        fmt = g["fmt"]
+        left = []
+        if g["left_out_grid"]:
+            left.append("unreliable grid: " + ", ".join(g["left_out_grid"]))
+        if g["no_value"]:
+            left.append("no value: " + ", ".join(g["no_value"]))
+        L.append("| %s | %s | %s | %s | %d of %d | %s |" % (
+            g["name"], "bar-1-dependent" if g["bar1"] else "shift-invariant",
+            _num(g["median"], fmt) if g["used"] else "- (no track)",
+            ("%s-%s" % (_num(g["min"], fmt), _num(g["max"], fmt))) if g["used"] else "-",
+            g["used"], g["of"], "; ".join(left) or "-"))
+    L += ["", "Keys: " + ", ".join("%s (%s)" % (cam, ", ".join(ts)) for cam, ts in sorted(a["keys"].items())) if a["keys"] else "Keys: none recorded"]
+    L += ["", "## Shared patterns", "", "Patterns two or more tracks share. Drum-role names and chord loops are compared "
+          "on every track; 16-step lines (drum patterns, bass rhythms) only on tracks with a reliable grid.", "",
+          "| Scope | Kind | Pattern | Tracks |", "|---|---|---|---|"]
+    if not a["shared"]:
+        L.append("| - | - | none shared by 2 tracks | - |")
+    for g in a["shared"]:
+        L.append("| %s | %s | %s | %d: %s |" % (g["scope"], g["kind"], g["pattern"], len(g["tracks"]), ", ".join(g["tracks"])))
+    L += ["", "## Missing layers", ""]
+    miss = [(x["title"], m) for x in rows for m in x["missing"]]
+    if miss:
+        L += ["| Track | Missing | Command |", "|---|---|---|"] + ["| %s | %s | `%s` |" % (t, m["layer"], m["command"]) for t, m in miss]
+    else:
+        L.append("none")
+    notes = [(x["title"], c) for x in rows for c in x["caveats"]] + [(u["title"], "could not be read: " + u["why"])
+                                                                       for u in a["unreadable"]]
+    old = [x["title"] for x in rows if x["old_stems"]]
+    if old:
+        notes.append((", ".join(old), "stems from an older separation model (re-split planned in studies/08)"))
+    if notes:
+        L += ["", "## Notes", ""] + ["- %s: %s" % n for n in notes]
+    return "\n".join(L) + "\n"
+
+
 def main(args) -> int:
-    """`roadie study report` (args from study.py's parser: name, write, json)."""
+    """`roadie study report` (args from study.py's parser: name or --artist, write, json)."""
+    if bool(getattr(args, "artist", None)) == bool(args.name):
+        print("study: report: give a study name or --artist <name>, one of the two", file=sys.stderr)
+        return 2
     try:
-        st = studymod.load_study(args.name)
-        mc, why = read_micro(st)
-        data = report_data(st, mc, why)
-        text = to_markdown(data)
-        where = write_report(st, text) if args.write else None
+        if args.artist:
+            data = artist_data(args.artist)
+            text = artist_markdown(data)
+            where = write_file(Path(data["folder"]) / "_artist.md", text) if args.write else None
+        else:
+            st = studymod.load_study(args.name)
+            mc, why = read_micro(st)
+            data = report_data(st, mc, why)
+            text = to_markdown(data)
+            where = write_report(st, text) if args.write else None
     except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.CalledProcessError) as e:
         print("study: report: %s" % (e.stderr.strip() if isinstance(e, subprocess.CalledProcessError) and e.stderr else e),
               file=sys.stderr)

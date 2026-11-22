@@ -21,8 +21,8 @@ SYNTHS = "1" * 32
 VOCALS = "0" * 8 + "1" * 8 + "0" * 16
 
 
-def make_study(root, verdict="confident", micro=None, mix=True, key=True):
-    folder = root / "Artist" / "Track [124 Am 8A]"
+def make_study(root, verdict="confident", micro=None, mix=True, key=True, title="Track"):
+    folder = root / "Artist" / ("%s [124 Am 8A]" % title)
     sd = folder / "Track_124bpm_stems"
     sd.mkdir(parents=True)
     for n in ("drums_kick", "drums_hh", "bass", "synths", "vocals"):
@@ -237,3 +237,60 @@ def test_unreadable_micro_json_is_said_so(tmp_path, bad):
     (folder / "Track_124bpm_stems" / "micro.json").write_text(bad)
     mc, why = studyreport.read_micro(study.load_study(str(folder), tmp_path))
     assert mc is None and ("could not be read" in why or "not a micro record" in why)
+
+
+def artist_micro(duty, on1, loop, reliable=True):
+    mc = micro_record(reliable)
+    for sec in mc["sections"]:
+        sec["bass"] = dict(sec["bass"], duty=duty, on_step1_share=on1)
+        sec["synths"] = dict(sec["synths"], progression=loop, progression_share=1.0)
+    return mc
+
+
+@pytest.fixture
+def artist_root(tmp_path, monkeypatch):
+    make_study(tmp_path, micro=artist_micro(0.3, 0.17, "i VI"), title="One")
+    make_study(tmp_path, micro=artist_micro(0.5, 0.25, "VI i"), title="Two")
+    make_study(tmp_path, verdict="chance-level", micro=artist_micro(0.9, 0.9, "i iv", reliable=False), title="Three")
+    make_study(tmp_path, mix=False, title="Four")                             # no micro, no mix
+    monkeypatch.setattr(study, "STUDIES_ROOTS", [study.Root("t", tmp_path)])
+    return tmp_path
+
+
+def test_artist_medians_leave_out_unreliable_grids_only_for_bar_1_dependent_fields(artist_root):
+    a = studyreport.artist_data("Artist")
+    assert sorted(x["title"] for x in a["rows"]) == ["Four", "One", "Three", "Two"]
+    agg = {g["field"]: g for g in a["aggregates"]}
+    on1, duty = agg["bass_on1"], agg["bass_duty"]
+    assert on1["bar1"] and (on1["median"], on1["used"], on1["of"]) == (0.21, 2, 4) and on1["left_out_grid"] == ["Three"]
+    assert on1["no_value"] == ["Four"]
+    assert not duty["bar1"] and (duty["median"], duty["used"]) == (0.5, 3) and duty["left_out_grid"] == []
+    assert (agg["kickout_bars"]["median"], agg["kickout_bars"]["used"]) == (8, 4)          # every track: a length
+    md = studyreport.artist_markdown(a)
+    assert "| bass onsets on step 1 | bar-1-dependent | 0.21 | 0.17-0.25 | 2 of 4 | unreliable grid: Three; no value: Four |" in md
+    assert "| bass duty | shift-invariant | 0.50 | 0.30-0.90 | 3 of 4 | no value: Four |" in md
+    assert "Bar-1-dependent ones" in md and "| Three (old stems) | 124 | Am 8A (online) | chance-level † |" in md
+
+
+def test_artist_shared_patterns_say_which_tracks(artist_root):
+    shared = {(g["kind"], g["pattern"]): g for g in studyreport.artist_data("Artist")["shared"]}
+    loops = [g for (k, p), g in shared.items() if k == "chord loop (numerals, any rotation)"]
+    assert [(g["pattern"] in ("i VI", "VI i"), g["tracks"]) for g in loops] == [(True, ["One", "Two"])]   # two rotations
+    assert shared[("longest kick-out", "8-15 bars")]["tracks"] == ["Four", "One", "Three", "Two"]
+    assert shared[("bass entry", "bass held until Drop 1")]["tracks"] == ["Four", "One", "Three", "Two"]
+    assert shared[("drum role", "hh offbeat")]["tracks"] == ["One", "Three", "Two"]          # a name: every track
+    line = shared[("drum role pattern", "hh offbeat `..x. ..x. ..x. ..x.`")]
+    assert line["tracks"] == ["One", "Two"] and line["bar1"]                                  # a 16-step line: reliable only
+    assert shared[("bass rhythm", "`o..o o... o..o o...`")]["tracks"] == ["One", "Two"]
+
+
+def test_artist_report_lists_missing_layers_and_writes_artist_md(artist_root, capsys):
+    assert study.main(["report", "--artist", "Artist", "--write"]) == 0
+    assert capsys.readouterr().out.strip() == "wrote %s" % (artist_root / "Artist" / "_artist.md")
+    md = (artist_root / "Artist" / "_artist.md").read_text()
+    assert "| Four | micro | `roadie micro \"Artist/Four\" (writes micro.json beside drums.json)` |" in md
+    assert "| Four | mix | `reference_profile" in md and "missing: micro" in md
+    data = json.loads((lambda: (study.main(["report", "--artist", "t:Artist", "--json"]), capsys.readouterr().out)[1])())
+    assert data["kind"] == "artist_report" and len(data["rows"]) == 4
+    assert study.main(["report"]) == 2 and study.main(["report", "One", "--artist", "Artist"]) == 2
+    assert study.main(["report", "--artist", "Nobody"]) == 1

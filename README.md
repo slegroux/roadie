@@ -44,7 +44,7 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
 | `roadie study list\|show <name>` | the studies under the Studies folder with their bpm, key, Camelot code and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)); `roadie study tag <name> --key Am` writes a study's own key and bpm | `study.py` |
 | `roadie key <study or stems folder>` | estimate the key from the bass and synths stems (an estimate, with a confidence; see [Reading a study](#reading-a-study)) | `roadie_analysis/key.py` |
-| `roadie study report <name> [--write] [--json]` | one study's report as Markdown, from its records: bpm, key, grid reliability, section map, entries and exits, kick-outs, groove blocks, mix per section, the micro layer, and what is missing (see [Study reports and the micro layer](#study-reports-and-the-micro-layer)) | `studyreport.py` |
+| `roadie study report <name> [--write] [--json]`, `--artist <name>` | one study's report as Markdown, from its records: bpm, key, grid reliability, section map, entries and exits, kick-outs, groove blocks, mix per section, the micro layer, and what is missing (see [Study reports and the micro layer](#study-reports-and-the-micro-layer)) | `studyreport.py` |
 | `roadie micro <study or stems folder>` | per section, what the bass, the synths, the vocal and the drums play at the scale of a bar; writes `micro.json` beside `drums.json` | `roadie_analysis/micro.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 | `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
@@ -384,6 +384,20 @@ never read or written through the mount: the stems and records are copied to a t
 (deleted after), and `micro.json` and `report.md` go back with `rclone copyto` and are read back and compared. The
 report says when `micro.json` is stale (another key, grid or section list, or a stem or record of another size than it
 was made from) and to re-run `roadie micro`.
+
+**The artist report.** `roadie study report --artist Blomqvist [--write] [--json]` (`label:Artist` picks a root)
+puts every analysed study of an artist side by side in `<Artist>/_artist.md`, written like `report.md` (rclone and a
+read-back on pCloud). It has one row per track (bpm, key and source, grid verdict, length, sections, Drop 2 / Drop 1,
+the longest kick-out, the bass entry, and from micro.json the bass type and duty, the synth loop with bars per chord,
+and the vocal share), then medians and ranges, then the patterns two or more tracks share (bass held until Drop 1 or
+not, the kick-out's length class, Drop 2 against Drop 1, chord loops as numerals up to rotation, bars per chord, the
+bass type, drum-role names), each with its tracks, and the layers each track lacks with the command that makes them.
+Aggregates are of two kinds. **Bar-1-dependent** ones leave out tracks with an unreliable grid (chance-level
+downbeat, warp map, no alignment.json): where section boundaries fall in their 8-bar phrase, 16-step patterns (bass
+rhythms, drum-role lines), the bass's share on step 1, vocal phrases on beat 1. **Shift-invariant** ones use every
+track, since a downbeat a beat or two off does not move them: section and kick-out lengths, Drop 2 / Drop 1, bars per
+chord, onsets per bar, duty, pedal or moving, chord loops as numerals, and positions given as a share of the track
+(they move by under a bar). Every row says how many tracks it used and which it left out.
 
 Known limits: a section that switches from one chord loop to another halfway gets one progression (the one that fits
 best, or every change); drums.json joins sections under 8 bars, so both rows of a joined pair show the same drum
