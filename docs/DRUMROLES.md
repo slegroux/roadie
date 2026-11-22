@@ -22,6 +22,10 @@ as eleven groups, none stable enough to name). A section holds a few dozen to a 
 (a section of at most 32 hits of a stem is grouped exactly: "stable by construction"), and the (stem, section) jobs run in
 a process pool (`--jobs N`, default the fast cores: the performance cores on macOS, every core elsewhere).
 
+`roadie drums` and the stability check (`python -m roadie_analysis.drumstability`) are heavy jobs: each waits for the
+machine's one heavy-job lock, prints what it is waiting for, and runs when the lock is free (`ROADIE_NO_QUEUE=1` skips
+the queue; README, "Heavy jobs queue").
+
 **The cache.** What a (stem, section) job finds depends only on its slice's samples, the sample rate and the detector's
 settings: the hits (onsets, cuts, levels, leads, statuses), their groups (members, medoids, distances, stability,
 separation, overlapped hits assigned to a group) and, at the matching, each group's sound reading (`group_reading`).
