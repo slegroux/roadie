@@ -188,6 +188,11 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     for kind, nm, tg, lo in zip(stems, named, tight, loose):
         record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s, hit_times, (tg, lo))
         clips += more
+    for kind, st in record["stems"].items():
+        far = ["%s (%+.0f ms)" % (ps["name"], ps["grid_shift_ms"]) for ps in st["per_section"] if abs(ps["grid_shift_ms"]) > drumroles.GRID_LEAD_S * 1000]
+        if far:
+            record["notes"].append("%s: in %s most hits sit more than %g ms from the grid lines, so the grid's phase may be wrong there; "
+                                   "its patterns are read against where the hits sit" % (kind, ", ".join(far), drumroles.GRID_LEAD_S * 1000))
     if write:
         base = Path(out) if out else stems_dir
         old = _read_json(base / "drums.json")
@@ -367,7 +372,9 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"], "line": pattern_line(pat),
                            "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
                            "why": bleed[g["id"]]["why"]})
+    shifts = res.get("section_shift_ms") or [0.0] * len(plan)
     per_section = [{"name": p["name"], "start_bar": p["start_bar"], "bars": p["bars"],      # by index: labels repeat (two "Drop")
+                    "grid_shift_ms": shifts[i],      # where this stem's hits sit against the grid in this section (median)
                     "roles": {r["name"]: v["hits"] for r in roles for v in r["per_section"] if v["index"] == i}}
                    for i, p in enumerate(plan)]
     rec = {"file": path.name, "sample_rate": res["sample_rate"], "hits": sum(h["owned"] for h in hits),

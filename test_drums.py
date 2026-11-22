@@ -301,5 +301,23 @@ def test_a_section_slice_starts_on_the_same_sample_when_its_bar_line_moves_a_mil
     sec = {"name": "B", "start_bar": 4, "bars": 6, "first": False, "to_end": False}
     a = drumsections.section_job(tmp_path / "s.wav", 120.0, 0.5, sec)
     b = drumsections.section_job(tmp_path / "s.wav", 120.0, 0.501, sec)
-    quantum = math.lcm(round(0.001 * sr), round(0.010 * sr))
+    quantum = drumsections.slice_quantum(sr)
+    assert 0.4 <= quantum / sr <= 0.5 and quantum % math.lcm(round(0.001 * sr), round(0.010 * sr)) == 0
     assert a["offset_s"] == b["offset_s"] and round(a["offset_s"] * sr) % quantum == 0 and a["offset_s"] > 0
+
+
+def test_a_hat_detected_late_keeps_its_name_when_the_grid_moves_a_few_milliseconds(tmp_path):
+    """16th hats all 19 ms late of the grid, right at the 20 ms edge: against the global grid a 3 ms move in either direction
+    puts every hit off the grid; against the section's own phase the role is named in all three runs."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    ev = [(at(b * 16 + s, 19.0), noise_hit(b * 16 + s, 0.005, (s % 3 - 1))) for b in range(24) for s in range(1, 16, 2)]
+    sf.write(str(d / "drums_hh.flac"), (stem(ev, 24) * 0.3).astype(np.float32), SR)
+    secs = [{"name": "ABC"[k], "start_bar": 8 * k, "bars": 8} for k in range(3)]
+    names = {}
+    for label, dt0 in (("base", 0.0), ("early", -0.003), ("late", 0.003)):
+        rec = drums.drum_roles(d, tempo=BPM, t0=T0 + dt0, sections=secs, write=False, jobs=1)
+        names[label] = [(r["name"], r["hits"]) for r in rec["stems"]["hh"]["roles"]]
+        assert all(abs(s["grid_shift_ms"] - (19.0 - dt0 * 1000)) < 1.0 for s in rec["stems"]["hh"]["per_section"]), rec["stems"]["hh"]["per_section"]
+    assert names["base"] == names["early"] == names["late"] == [("hh 16th", 24 * 8)], names
+

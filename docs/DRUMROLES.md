@@ -29,10 +29,10 @@ a process pool (`--jobs N`, default the cores).
    to the end of the file.
 2. Each stem's loudest 5 ms is measured once over the whole file (`ref_power`), so a section is judged against that and not
    against its own loudest moment. A section's slice runs from about 40 ms before its first bar line to about 60 ms after its
-   last, **rounded outwards to a multiple of lcm(1 ms, 10 ms) of samples** (19,404 at 44.1 kHz): the detector reads the audio on a
+   last, **rounded outwards to a multiple of lcm(1 ms, 10 ms) of samples that is about 0.45 s long** (19,404 samples at 44.1 kHz, 21,600 at 48 kHz, 43,200 at 96 kHz): the detector reads the audio on a
    1 ms grid and the DC offset on 10 ms blocks anchored at the slice start, so a slice that began a few samples later (a grid
    moved by 0.001 bpm moves a section line by about a millisecond) found hits a few samples apart and grouped them differently.
-   With the anchor fixed the same audio gives the same hits and groups as long as the grid change does not move a section line across a quantum boundary: at 44.1 kHz the quantum is 19,404 samples (0.44 s), and a line crossing one brings the old instability back for that section. Rough odds at 44.1 kHz: about 0.5 % per section line for a tempo change of 0.001 bpm and about 3 % for 0.005 bpm (the line of a late section moves by about 2.6 ms and 13 ms), a few thousandths of that for t0 +-1 ms. At 48 kHz the quantum is 480 samples (10 ms), so the limit is much tighter there (a 2.6 ms move crosses one about a quarter of the time); a grid-independent anchor would remove the limit and is not done. A hit belongs
+   With the anchor fixed the same audio gives the same hits and groups as long as the grid change does not move a section line across a quantum boundary (about 0.45 s at every sample rate); a line crossing one brings the old instability back for that section. Rough odds: about 0.5 % per section line for a tempo change of 0.001 bpm and about 3 % for 0.005 bpm (the line of a late section moves by about 2.6 ms and 13 ms), a few thousandths of that for t0 +-1 ms. A hit belongs
    to the section whose bar lines, moved 20 ms earlier, enclose it, so a hit 8 ms early on the first beat is that section's
    and none is counted twice.
 3. The groups of all the sections are matched by sound: each group's clean hit (else the cut of its member nearest the
@@ -58,8 +58,12 @@ clips the previous `drums.json` listed and the new one does not (nothing else is
 line. A default bar line is moved back by whole bars to the first one at or after the start of the file; the 16ths
 are still counted from the downbeat (step 0). A hit before that line (a pickup, a hit in the first partial bar) has bar -1. A `t0` passed in is used as given. A downbeat the aligner
 calls chance-level is repeated in the output's `notes`: the whole table is then counted from a bar line that may be the
-wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late, and a hit more than
-20 ms from a line is off the grid and counts in no pattern.
+wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late. **A hit is on the grid when it is within 20 ms of a
+16th line moved by its section's own phase**: the offset where most of the section's hits sit from their nearest lines (the densest 6 ms window, and the median of the hits in it, not the median of all: a stem with two sounds detected at different latencies has a median that is neither; at least 8 hits, else 0;
+the hats of one track sit 3 to 10 ms late, a grid a few thousandths of a bpm off drifts by 13 ms over a track) is taken as the section's
+phase, and `bar`, `step`, `offset_ms` and `on_grid` are recomputed against the lines moved by it (`grid_shift_ms` per section in
+`per_section`; the raw offset stays in the hit's `offset_raw_ms`). The 20 ms is unchanged; what it is measured from is. A hit more than 20 ms
+from its section's lines is off the grid and counts in no pattern.
 
 **The table**, one block per stem:
 
@@ -102,14 +106,14 @@ rate); no clean hit, no file. A run writes the new clips first, then `drums.json
 **Steadiness.** `python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare]` re-runs the analysis with the grid
 moved by tempo +-0.001 and +-0.005 bpm and t0 +-1 ms (nothing written) and compares, hit by hit, which role each hit lands in
 (`kept`: the share of a base role's hits in its best-matching role; `agreement`: the same over all roles of 4 or more hits).
-The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: agreement 1.0 in 11, 0.995 in one, nothing absorbed, worst purity 0.99). What is
-not steady is a **name that rests on a threshold the pattern sits on**: the patterns are made from the hits within 20 ms of a
-16th line, and a hat whose offsets spread to the edge (Glacier's `hh 16th`: 60 of 1600 hat hits lie within 3 ms of it) loses or
-gains a few hits when the grid moves, which moves its hits a bar on the odd 16ths across the 4.0 the `hh 16th` rule asks for
-(4.3 at the base grid, 4.0 and 3.7 at +0.001 and +0.005 bpm) while its hits stay the same. A role whose name or whether it is
-named changes when the on-grid tolerance is 3 ms tighter or 3 ms looser (about what 0.001 bpm moves the last section's bar line
-by) has `name_steady: false` and a `name_steady_note` saying what changes, and the table says `name unsteady`: the name is a
-reading of a pattern at a rule's edge. Nothing is tuned.
+The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: agreement 1.0 in 11, 0.995 in one, nothing absorbed, worst purity 0.99). Names were not steady before the section phase: a hat whose offsets spread to the 20 ms edge (Glacier's `hh 16th`: about 60 of
+1600 hat hits within 3 ms of it) lost or gained a few hits as the grid moved, which moved its hits a bar on the odd 16ths across the 4.0
+the `hh 16th` rule asks for (4.3 at the base grid, 4.0 and 3.7 at +0.001 and +0.005 bpm) while its hits stayed the same; measured on
+those hits, the on-grid count with the phase taken from where most of the section's hits sit is the same in all seven runs, and a soft ramp
+from 15 to 25 ms without the phase moved by 14 % as before. A role whose name or whether it is named changes when the on-grid
+tolerance is 3 ms tighter or 3 ms looser (about what 0.001 bpm moves the last section's bar line by) still has `name_steady: false`
+and a `name_steady_note` saying what changes, and the table says `name unsteady`: the name is then a reading of a pattern at a
+rule's edge. Nothing is tuned.
 
 **Known limits.** Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
 section are one role, and one sound that changes between sections (a filter sweep, a different sample) is two. A section
