@@ -889,7 +889,14 @@ def main(argv=None) -> int:
     ren.add_argument("--stamp", help="a name for the --write files (default: the date and time); they are created exclusively")
     ren.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     ren.add_argument("--out", help="write the table (markdown) to this file")
+    rep = sub.add_parser("report", help="one study's report as Markdown: structure, mix and micro, from the records (studyreport.py)")
+    rep.add_argument("name", help="a title under the studies root, or a path")
+    rep.add_argument("--write", action="store_true", help="write report.md into the study folder (a pCloud study through rclone)")
+    rep.add_argument("--json", action="store_true", help="print the report's record as JSON")
     args = ap.parse_args(argv)
+    if args.cmd == "report":
+        import studyreport
+        return studyreport.main(args)
     if args.cmd == "rename":
         import studyrename
         return studyrename.main(args)

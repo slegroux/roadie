@@ -44,6 +44,8 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
 | `roadie study list\|show <name>` | the studies under the Studies folder with their bpm, key, Camelot code and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)); `roadie study tag <name> --key Am` writes a study's own key and bpm | `study.py` |
 | `roadie key <study or stems folder>` | estimate the key from the bass and synths stems (an estimate, with a confidence; see [Reading a study](#reading-a-study)) | `roadie_analysis/key.py` |
+| `roadie study report <name> [--write] [--json]` | one study's report as Markdown, from its records: bpm, key, grid reliability, section map, entries and exits, kick-outs, groove blocks, mix per section, the micro layer, and what is missing (see [Study reports and the micro layer](#study-reports-and-the-micro-layer)) | `studyreport.py` |
+| `roadie micro <study or stems folder>` | per section, what the bass, the synths, the vocal and the drums play at the scale of a bar; writes `micro.json` beside `drums.json` | `roadie_analysis/micro.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 | `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
 
@@ -319,6 +321,53 @@ The numbers come from 108 role-sorted one-shots and the Flare replica. Where eac
 comes from, and the known misnames (a rim rule that also names some hats, "tom" meaning
 "pitched, in the toms stem", what bleed cannot catch), are in
 [`docs/DRUMROLES.md`](docs/DRUMROLES.md).
+
+## Study reports and the micro layer
+
+```bash
+roadie micro "Blomqvist/More"                 # writes micro.json beside drums.json; --json for the record, --no-write to only print
+roadie study report "Blomqvist/More"          # the report, Markdown on stdout
+roadie study report "Blomqvist/More" --write  # ...into report.md in the study folder
+roadie study report "Blomqvist/More" --json   # the record the Markdown is made from
+```
+
+**Macro is the structure, micro is each instrument's pattern at a small scale.** The report is built from the
+records only, nothing is measured: the study record (`roadie study show`), the structure `roadie arrangement ref`
+reads from `bar_activity` (groove blocks, each role's entry, the stretches it is out and its last bar, kick-outs,
+the labelled drops), the mix profile per section (the mix's level, LUFS and six bands, then each stem's level) and
+`micro.json`. A part that is not on disk is listed as `missing: <layer>` with the command that makes it. The report
+is generated: a rebuild overwrites it, so notes belong in the vault.
+
+**Grid reliability.** Every bar position and every 16-step pattern counts from bar 1. When the downbeat is
+chance-level, there is no `alignment.json`, or the grid has a warp map (the tempo drifts; bars are placed at a
+constant tempo), the report says why at the top and marks each of those numbers with `†`; `micro.json` carries
+`reliable: false` on the grid and on every section.
+
+`roadie micro` uses the grid and sections of the stems folder, with bar 0 placed as `drums.json` places it (the
+downbeat moved back whole bars to the first bar line in the file). A stem plays in a bar by the rule
+`sections.json` uses; onsets count only there, and one within 30 % of a 16th of a line is on it (else off-grid,
+counted, never moved). Per section:
+
+- **bass** (`bass.flac`): the most common one-bar rhythm (`o..o o... o..o o...`, with its 16th steps `1, 4, 5, 9, 12,
+  13`) and its share of the bars, onsets per bar, the share of onsets on step 1 and on the 8th offbeats, the notes
+  (pyin per onset) as scale degrees of the study's key with their shares, the median register and range, the
+  number of pitch classes and the top one's share (`pedal` at 75 % or more, else `moving`), and the duty (sounding
+  time per bar: `stabby` under 0.5, `continuous` from 0.8).
+- **synths** (`synths.wav`): the rhythm as for the bass, a chord per bar from chroma (major, minor, sus2, sus4, root
+  and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major), the progression, bars per
+  chord, the distinct chords, and the pitch classes held in 90 % of the bars (a drone, or a tone the chords share).
+  **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
+- **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat
+  (a pickup shows as `.4`).
+- **drums**: the roles of 4+ hits and their patterns from `drums.json`, not measured again. A hat's accent (the
+  loudest 16th of the beat) needs per-hit levels, which `drums.json` does not record: it is `missing`, with that
+  reason.
+- **variation** (bass and synths): the repeat period, the smallest of 1, 2, 4 or 8 bars at which 75 % of the bars
+  equal the bar that many before, and the bars that break it.
+
+What cannot be measured is `null` with the reason in `notes`, never left empty. A study on the pCloud mount is
+never read or written through the mount: the stems and records are copied to a temp folder with `rclone copyto`
+(deleted after), and `micro.json` and `report.md` go back with `rclone copyto` and are read back and compared.
 
 ## Configuration
 
