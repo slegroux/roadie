@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -38,7 +39,7 @@ AM, F = (57, 60, 64), (53, 57, 60)
 VOCAL_PHRASES = ((0, 6), (4 * 4 + 3, 8), (8 * 4, 6))                         # (first beat, beats): bar 1.1, bar 5.4, bar 9.1
 
 
-def make_study(root, verdict="confident", stems=("bass", "synths", "vocals"), drums=True):
+def make_study(root, verdict="confident", stems=("bass", "synths", "vocals"), drums=True, phrases=VOCAL_PHRASES):
     total = int((T0 + BARS * BAR + 1.0) * SR)
     bass, syn, voc = np.zeros(total), np.zeros(total), np.zeros(total)
     for b in range(BARS):
@@ -49,7 +50,7 @@ def make_study(root, verdict="confident", stems=("bass", "synths", "vocals"), dr
         i = int((T0 + b * BAR) * SR)
         x = sum(0.15 * tone(hz(m), BAR, 0.5, (1, .1)) for m in (AM if (b // 4) % 2 == 0 else F))
         syn[i:i + len(x)] += x
-    for first, n in VOCAL_PHRASES:
+    for first, n in phrases:
         i, k = int((T0 + first * BAR / 4) * SR), int(n * BAR / 4 * SR)
         t = np.arange(k) / SR
         voc[i:i + k] += 0.3 * np.sin(2 * np.pi * 440 * t + 2 * np.sin(2 * np.pi * 5 * t)) * np.minimum(1, t / 0.02)
@@ -180,17 +181,139 @@ def test_match_chord_breaks_a_sus_tie_with_the_bass():
 
 
 def test_repeat_period_is_the_smallest_that_holds_in_75_percent():
-    assert micro.repeat(["a"] * 8) == (1, [])
-    assert micro.repeat(["a", "b"] * 4) == (2, [])
-    assert micro.repeat(["a", "b", "c", "d"] * 2 + ["a", "b", "c", "x"]) == (4, [12])
-    assert micro.repeat(list("abcdefgh")) == (None, list(range(2, 9)))
-    assert micro.repeat(["a", None, "a", "a"]) == (1, [])
+    assert micro.repeat(["a"] * 8) == (1, [], None)
+    assert micro.repeat(["a", "b"] * 4) == (2, [], None)
+    assert micro.repeat(["a", "b", "c", "d"] * 2 + ["a", "b", "c", "x"]) == (4, [12], None)
+    p, changes, why = micro.repeat(list("abcdefgh"))
+    assert (p, changes) == (None, list(range(2, 9))) and "no period" in why
 
 
-def test_progression_is_the_shortest_cycle_that_fits():
+def test_repeat_needs_three_pairs_of_playing_bars():
+    assert micro.repeat(["a", None, "a", "a"])[:2] == (None, None)            # one pair at 1 bar, one at 2: no period
+    assert "too few playing bars" in micro.repeat(["a"] * 2 + [None] * 22)[2]  # More's Breakdown bass: 2 of 24 bars
+    assert micro.repeat(["a"] * 4)[0] == 1                                    # 3 pairs: enough
+
+
+def test_progression_is_a_loop_of_2_to_4_chords_or_every_change():
     assert micro.cycle(["iv", "VI", "i", "VII"] * 3 + ["iv"]) == (4, 1.0, ["iv", "VI", "i", "VII"])
     assert micro.cycle(list("abcabcabd")) == (3, 0.83, list("abc"))
-    assert micro.cycle("VI i VII iv VI i VII iv VI i VII i iv".split())[2] == ["VI", "i", "VII", "iv"]  # one extra i
-    assert micro.cycle(["i", "VI"]) == (2, None, ["i", "VI"])          # once through: no cycle to speak of
+    assert micro.cycle(["i", "VI"]) == (2, None, ["i", "VI"])          # once through: no loop to speak of
     seq = "i VII iv VI i VII iv i III i VII iv VI i VII iv VI i III i".split()      # Destination Lost, Drop 2
-    assert micro.cycle(seq) == (4, 0.8, ["i", "VII", "iv", "VI"])
+    assert micro.cycle(seq) == (4, 0.75, ["i", "VII", "iv", "VI"])
+
+
+def test_cycle_does_not_invent_loops():
+    assert micro.cycle(list("abcd"))[1] is None                         # one pass of 4 is not a loop of 2
+    assert micro.cycle(list("abcdbadcacbd"))[1] is None                 # the loop's chords in no order
+    drop1 = "i iv VII iv VI i VII i iv VI i VII iv VI i VII i iv VI i VII".split()   # More, Drop 1: was a 9-chord "cycle"
+    k, share, loop = micro.cycle(drop1)
+    assert k <= micro.LOOP_MAX and micro._rotation(loop) == micro._rotation(["iv", "VI", "i", "VII"])
+
+
+@pytest.mark.parametrize("runs", ["iv VI i VII iv VI",                   # More, Drop 2: a loop longer than half, every pair
+                                  "i VII iv VI i VII i iv VI i"])         # More, Intro: one chord put in
+def test_more_loops_are_iv_vi_i_vii(runs):
+    k, share, loop = micro.cycle(runs.split())
+    assert k == 4 and share >= 0.75 and micro._rotation(loop) == micro._rotation(["iv", "VI", "i", "VII"])
+
+
+def test_one_loop_is_written_on_one_phase_across_the_track():
+    secs = [{"synths": {"progression": p, "progression_share": sh}} for p, sh in (
+        ("i VII iv VI", 0.9), ("iv VI i VII", 1.0), ("iv VI i VII", 1.0), ("i VII iv", None), ("iv VI i VII", 1.0))]
+    micro.phase_loops(secs)
+    assert [s["synths"]["progression"] for s in secs] == ["iv VI i VII"] * 3 + ["i VII iv", "iv VI i VII"]
+
+
+@pytest.mark.parametrize("root,quality,want", [(1, "maj", "#III"), (6, "maj", "#VI"), (8, "maj", "#VII"),
+                                               (3, "maj", "bV"), (8, "5", "#VII5")])
+def test_chromatic_roman_numerals_in_a_minor(root, quality, want):
+    assert micro.roman(root, quality, 9, "minor") == want
+
+
+def test_chromatic_roman_numerals_in_a_major_are_flats():
+    assert [micro.roman(r, "maj", 9, "major") for r in (10, 0, 5, 7)] == ["bII", "bIII", "bVI", "bVII"]
+
+
+def test_a_phrase_across_a_section_line_starts_once(tmp_path):
+    sd = make_study(tmp_path, stems=("vocals",), drums=False, phrases=((0, 6), (7 * 4 + 2, 8)))   # bar 8.3 into bar 10
+    rec = micro.micro_of(sd, write=False)
+    intro, drop = (s["vocals"] for s in rec["sections"])
+    assert intro["phrase_starts"] == [{"bar": 1, "beat": 1}, {"bar": 8, "beat": 3}]
+    assert drop["bars_with_vocal"] == "1-2" and drop["phrase_starts"] == [] and "section before" in drop["notes"][0]
+
+
+def test_grid_places_sections_and_pickups_as_drums_json_does(tmp_path):
+    sd = tmp_path / "s"
+    sd.mkdir()
+    (sd / "alignment.json").write_text(json.dumps({"result": {"bpm": 120.0, "downbeat_sec": 4.5, "downbeat_verdict": "weak"}}))
+    (sd / "sections.json").write_text(json.dumps({"sections": [
+        {"bar": 1, "time_sec": 0.5, "duration_beats": 16, "label": "Intro"},
+        {"bar": 5, "time_sec": 8.51, "duration_beats": 30, "label": "Drop"}]}))       # 10 ms off the line, 7.5 bars
+    g = micro.grid_of(sd)
+    assert g["t0"] == pytest.approx(0.5) and g["reliable"] is True
+    assert [(s["start_bar"], s["bars"]) for s in g["sections"]] == [(0, 4), (4, 7)]
+    placed = micro.place([0.375, 0.5, 0.5 + 2.0 + 3 * 0.125 + 0.01, 0.5 + 0.06], 0.5, 2.0)
+    assert [(o["bar"], o["step"], o["on_grid"]) for o in placed] == [(-1, 15, True), (0, 0, True), (1, 3, True), (0, 0, False)]
+
+
+def test_drum_sections_joined_or_missing_say_so():
+    role = {"name": "kick", "measured": 40, "per_section": [{"index": 0, "hits": 40, "bars_with": 10, "line": "x" * 16}]}
+    drums = {"grid": {"sections": [{"name": "Build + Drop 3", "start_bar": 0, "bars": 12}]}, "stems": {"kick": {"roles": [role]}}}
+    d = micro.drum_section({"name": "Drop 3", "start_bar": 4, "bars": 8}, drums)
+    assert d["drums_section"] == "Build + Drop 3" and "joins sections" in d["notes"][0] and d["roles"][0]["role"] == "kick"
+    d = micro.drum_section({"name": "Drop 3", "start_bar": 4, "bars": 8}, {"stems": {"kick": {"roles": [role]}}})
+    assert d["roles"] == [] and "no grid sections" in d["notes"][0]
+
+
+class FakeRemote:
+    """rclone against a local folder standing for `pcloud:<folder>`: lsf, cat, copyto both ways."""
+
+    def __init__(self, root, corrupt=False):
+        self.root, self.corrupt, self.local_paths = root, corrupt, []
+
+    def path(self, remote):
+        return self.root / remote.partition(":")[2]
+
+    def __call__(self, *args):
+        cmd = args[0]
+        if cmd == "lsf":
+            return "\n".join(p.name for p in sorted(self.path(args[-1]).iterdir()) if p.is_file())
+        if cmd == "cat":
+            text = self.path(args[1]).read_text()
+            return text + " " if self.corrupt and args[1].endswith("micro.json") else text
+        if cmd == "copyto":
+            src, dst = args[1], args[2]
+            if src.startswith("pcloud:"):
+                self.local_paths.append(dst)
+                shutil.copyfile(self.path(src), dst)
+            else:
+                self.local_paths.append(src)
+                shutil.copyfile(src, self.path(dst))
+            return ""
+        raise AssertionError(args)
+
+
+@pytest.fixture
+def remote_study(tmp_path, monkeypatch):
+    sd = make_study(tmp_path / "remote", stems=("vocals",), drums=False)
+    rel = sd.relative_to(tmp_path / "remote")
+    monkeypatch.setattr(micro.keymod, "pcloud_remote", lambda p: "pcloud:" + str(rel) if Path(p) == sd else None)
+    return sd, tmp_path / "remote"
+
+
+def test_pcloud_study_goes_through_rclone_and_its_temp_folder_is_removed(remote_study, monkeypatch):
+    sd, root = remote_study
+    fake = FakeRemote(root)
+    monkeypatch.setattr(micro, "_rclone", fake)
+    rec = micro.micro_of(sd)
+    assert rec["written"].startswith("pcloud:") and json.loads((sd / "micro.json").read_text())["kind"] == "micro"
+    assert fake.local_paths and not any(Path(p).exists() for p in fake.local_paths)
+
+
+def test_pcloud_read_back_mismatch_raises_and_removes_the_temp_folder(remote_study, monkeypatch):
+    sd, root = remote_study
+    fake = FakeRemote(root, corrupt=True)
+    monkeypatch.setattr(micro, "_rclone", fake)
+    with pytest.raises(OSError, match="read back"):
+        micro.micro_of(sd)
+    assert not any(Path(p).exists() for p in fake.local_paths)

@@ -28,8 +28,8 @@ Choices:
   near-ties go to the root of the bass's first note in that bar (sus2 on C and sus4 on G are the same notes). Named
   relative to the key: diatonic degrees of its scale plain (`i`, `VI`, `III`, `VII` in a minor key), others with b/#;
   upper case for major, lower for minor, a sus or root+5 chord in the case of the scale's own triad (`i5`, `Vsus4`).
-  A chord run lasts while the root holds; the progression is the shortest cycle of roots at which 75 % of the runs
-  equal the run that many before (coming round twice), else every run in order.
+  A chord run lasts while the root holds; the progression is a loop of 2 to 4 roots (`cycle`) or, when none holds,
+  every run in order; one loop is written on the same phase in every section of the track (`phase_loops`).
   The synths stem is leads and pads together: chords and rhythm are of the mix of both.
 - Drone: a pitch class at DRONE_LEVEL of the bar's strongest in at least 90 % of the bars the synths play. A common
   tone of the chords counts too: it is "held", not necessarily one sustained note.
@@ -77,8 +77,10 @@ PEDAL_SHARE = 0.75         # the top pitch class carries at least this share of 
 MIN_PC_SHARE = 0.05        # a pitch class under this share of the onsets is a pitch-tracking slip, not counted
 DRONE_LEVEL, DRONE_BARS = 0.5, 0.9
 REPEAT_SHARE = 0.75
-LOOP_COVER = 0.5           # a chord loop that covers at least this share of a section's runs names its progression
+LOOP_MIN, LOOP_MAX = 2, 4  # a chord loop is 2 to 4 chords: longer is a sequence of changes, not a loop
+FOLLOW_SHARE = 0.75        # a loop with chords put in names the progression when it is followed in this share of the runs
 PERIODS = (1, 2, 4, 8)
+MIN_PAIRS = 3              # a repeat period read from fewer pairs of playing bars than this is not one
 TIE = 0.02                 # chord scores this close are a tie, broken by the bass
 OFFBEAT_8THS = (2, 6, 10, 14)  # 0-based 16ths: the "and" of each beat
 AUDIO = (".flac", ".wav")
@@ -116,11 +118,14 @@ def degree(pc: int, tonic: int) -> str:
 
 
 def roman(root: int, quality: str, tonic: int, mode: str) -> str:
-    """A chord relative to the key: the scale's degrees plain, the others flat or sharp of the nearest one."""
+    """A chord relative to the key: the scale's degrees plain, the others flat of the degree above, except that in a
+    minor key the degrees of the parallel major are sharps of the minor ones (A minor: C# is #III, F# #VI, G# #VII)."""
     iv = (root - tonic) % 12
     scale = SCALES[mode]
     if iv in scale:
         n, acc = scale.index(iv), ""
+    elif mode == keymod.MINOR and iv in SCALES[keymod.MAJOR]:
+        n, acc = scale.index((iv - 1) % 12), "#"
     elif (iv + 1) % 12 in scale:
         n, acc = scale.index((iv + 1) % 12), "b"
     else:
@@ -278,7 +283,9 @@ def level_by_16th(fdb: np.ndarray, t0: float, bar_s: float, bars) -> list[float]
 
 def bass_pitches(y_low, sr, times) -> list[float | None]:
     """The MIDI pitch of each onset: the median pyin f0 of the voiced frames from 25 ms after it to the next onset (at
-    most 300 ms); None when fewer than 2 frames are voiced."""
+    most 300 ms); None when fewer than 2 frames are voiced. The frames are centred and 186 ms long, so the first ones
+    also hear up to 68 ms before the onset (the note before): the median over the frames damps that, it does not
+    remove it."""
     import librosa
     if not len(times):
         return []
@@ -330,34 +337,64 @@ def match_chord(vec, bass_pc: int | None = None) -> dict | None:
 
 
 def cycle(seq: list) -> tuple[int, float | None, list]:
-    """(k, share, cycle) for a sequence of chord runs: the smallest k at which a run equals the run k before in at least
-    REPEAT_SHARE of the pairs (so one extra or missing chord breaks a few pairs, not the phase of all that follow), the
-    sequence coming round at least twice; the cycle is its most common window of k runs, rotated to start where the
-    section does when it can. With no such lag, the loop of 2 to 4 chords whose occurrences (any rotation) cover at
-    least LOOP_COVER of the runs, with that cover as the share (a loop broken by an inserted chord now and then); with
-    none, the whole sequence and share None."""
+    """(k, share, loop) for a section's chord runs: a loop of LOOP_MIN to LOOP_MAX chords, or the whole sequence with
+    share None when no loop is there. Two ways to find one, both limited to 2-4 chords so a long run of changes is never
+    called a loop:
+
+    - lag: at k, a run equals the run k before in at least REPEAT_SHARE of the pairs, with the sequence at least twice
+      the loop's length; a loop longer than half the sequence only when every pair matches, and at least 2 pairs
+      (`iv VI i VII iv VI` is `iv VI i VII`). The loop is the most common window at the loop's own phase.
+    - a loop played in order with now and then a chord put in or left out (`_follow`): at least 2 loops' worth of runs
+      matched in order, and matches less left-out chords at least FOLLOW_SHARE of the runs (`i VII iv VI i VII i iv VI
+      i`: 9 of 10). The best score wins, ties to the longer loop; that score over the runs is the share.
+
+    The loop starts where the section first plays it (`phase_loops` puts every section of a track on one phase)."""
     n = len(seq)
-    for k in range(1, n // 2 + 1):
-        share = sum(seq[i] == seq[i - k] for i in range(k, n)) / (n - k)
-        if share >= REPEAT_SHARE:
-            cyc = list(Counter(tuple(seq[i:i + k]) for i in range(n - k + 1)).most_common(1)[0][0])
-            if seq[0] in cyc:
-                j = cyc.index(seq[0])
-                cyc = cyc[j:] + cyc[:j]
-            return k, round(share, 2), cyc
-    best = None                    # no lag holds: the loop of 2 to 4 chords (any rotation) whose occurrences cover most runs
-    for k in range(2, min(4, n // 2) + 1):
-        for i in range(n - k + 1):
-            cls = _rotation(seq[i:i + k])
-            cov = set()
-            for j in range(n - k + 1):
-                if _rotation(seq[j:j + k]) == cls:
-                    cov.update(range(j, j + k))
-            if best is None or len(cov) > best[0]:
-                best = (len(cov), k, list(seq[i:i + k]))
-    if best and best[0] / n >= LOOP_COVER:
+    if n < 2 * LOOP_MIN:
+        return n, None, list(seq)
+    for k in range(LOOP_MIN, LOOP_MAX + 1):
+        pairs = n - k
+        if pairs < 2:
+            break
+        share = sum(seq[i] == seq[i - k] for i in range(k, n)) / pairs
+        if (2 * k <= n and share >= REPEAT_SHARE) or share == 1.0:
+            wins = Counter(tuple(seq[i:i + k]) for i in range(0, n - k + 1, k))
+            return k, round(share, 2), list(max(wins, key=lambda w: (wins[w], -next(i for i in range(0, n, k)
+                                                                                  if tuple(seq[i:i + k]) == w))))
+    best = None
+    for k in range(LOOP_MIN, LOOP_MAX + 1):
+        for w in sorted({tuple(seq[i:i + k]) for i in range(n - k + 1)}):
+            score, m, first = _follow(seq, w)
+            if m >= 2 * k and score / n >= FOLLOW_SHARE and (best is None or (score, k) > best[:2]):
+                best = (score, k, list(w[first:] + w[:first]))
+    if best:
         return best[1], round(best[0] / n, 2), best[2]
     return n, None, list(seq)
+
+
+def _follow(seq, w) -> tuple[int, int, int | None]:
+    """(score, matched runs, loop index of the first match) for the best in-order alignment of `seq` to loop `w` played
+    over and over: a run that is the loop's next chord matches (+1), a run put in is passed over (0), a loop chord that
+    is not played is skipped (-1, so a reordering of the loop's chords does not score as the loop). Free start and end."""
+    k = len(w)
+    cur = [(0, 0, None)] * k
+
+    def skip(row):
+        for _ in range(k - 1):
+            for p in range(k):
+                sc, m, f = row[p]
+                if m and (sc - 1, m) > row[(p + 1) % k][:2]:
+                    row[(p + 1) % k] = (sc - 1, m, f)
+        return row
+
+    for x in seq:
+        nxt = list(cur)                                      # the run passed over
+        for p in range(k):
+            sc, m, f = cur[p]
+            if x == w[p] and (sc + 1, m + 1) > nxt[(p + 1) % k][:2]:
+                nxt[(p + 1) % k] = (sc + 1, m + 1, p if f is None else f)
+        cur = skip(nxt)
+    return max(cur, key=lambda c: (c[0], c[1]))
 
 
 def _rotation(w) -> tuple:
@@ -365,17 +402,42 @@ def _rotation(w) -> tuple:
     return min(w[i:] + w[:i] for i in range(len(w)))
 
 
-def repeat(sigs: list) -> tuple[int | None, list[int]]:
-    """(period, changes) for per-bar signatures (None = the part is silent that bar); see the module docstring. Bars in
+def phase_loops(sections: list[dict]) -> None:
+    """Every section's synth loop on one phase for the track: a loop heard as `i VII iv VI` in one section and as
+    `iv VI i VII` in three is written `iv VI i VII` in all four (the rotation most sections start it on; ties to the
+    first section's). Changes `progression` in place."""
+    loops = [s["synths"] for s in sections if s.get("synths") and s["synths"].get("progression_share") is not None
+             and s["synths"].get("progression")]
+    by_class = {}
+    for y in loops:
+        w = tuple(y["progression"].split())
+        by_class.setdefault(_rotation(w), []).append(w)
+    for y in loops:
+        w = tuple(y["progression"].split())
+        seen = Counter(by_class[_rotation(w)])
+        top = max(seen, key=lambda r: (seen[r], -by_class[_rotation(w)].index(r)))
+        y["progression"] = " ".join(top)
+
+
+def repeat(sigs: list) -> tuple[int | None, list[int] | None, str | None]:
+    """(period, changes, why none) for per-bar signatures (None = the part is silent that bar); see the module docstring.
+    A period needs at least MIN_PAIRS pairs of playing bars at it; with fewer at every period, (None, None, why). Bars in
     `changes` are 1-based within the section."""
     n = len(sigs)
+    tried = False
     for p in PERIODS:
         if n < 2 * p:
             break
         pairs = [i for i in range(p, n) if sigs[i] is not None and sigs[i - p] is not None]
-        if pairs and sum(sigs[i] == sigs[i - p] for i in pairs) / len(pairs) >= REPEAT_SHARE:
-            return p, [i + 1 for i in pairs if sigs[i] != sigs[i - p]]
-    return None, [i + 1 for i in range(1, n) if sigs[i] is not None and sigs[i - 1] is not None and sigs[i] != sigs[i - 1]]
+        if len(pairs) < MIN_PAIRS:
+            continue
+        tried = True
+        if sum(sigs[i] == sigs[i - p] for i in pairs) / len(pairs) >= REPEAT_SHARE:
+            return p, [i + 1 for i in pairs if sigs[i] != sigs[i - p]], None
+    if not tried:
+        return None, None, "repeat: too few playing bars (fewer than %d bar pairs at any period)" % MIN_PAIRS
+    return None, [i + 1 for i in range(1, n) if sigs[i] is not None and sigs[i - 1] is not None and sigs[i] != sigs[i - 1]], \
+        "repeat: no period of 1, 2, 4 or 8 bars repeats in 75 % of the bar pairs"
 
 
 # ---- per section
@@ -452,10 +514,10 @@ def bass_section(sec, placed, pitches, playing, sounding, tonic) -> dict:
         out["duty"] = round(float(np.mean(d)), 2)
         out["style"] = "stabby" if out["duty"] < STABBY else "continuous" if out["duty"] >= CONTINUOUS else "between"
         sigs = [(per_bar[b], pcs_of.get(b)) if b in per_bar else None for b in _bars_of(sec)]
-        out["repeat_bars"], out["changes_at_bars"] = repeat(sigs)
+        out["repeat_bars"], out["changes_at_bars"], why = repeat(sigs)
         out["_root_of"] = root_of
-        if out["repeat_bars"] is None:
-            out["notes"].append("repeat: no period of 1, 2, 4 or 8 bars repeats in 75 % of the bar pairs")
+        if why:
+            out["notes"].append(why)
     return out
 
 
@@ -504,8 +566,9 @@ def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict
         out["bars_per_chord"] = float(np.median(lengths)) if len(runs) > 1 else None
         if len(runs) == 1:
             out["notes"].append("one chord through the section: no chord change")
-        if share == 1.0 and len(seq) >= 2 * k and k > 1:
-            out["loop_bars"] = int(sum(r[1] for r in runs[:k]))
+        if share is not None and out["bars_per_chord"]:
+            out["loop_bars"] = round(k * out["bars_per_chord"], 1)     # k chords at the median run: a section that
+            #                                                              starts mid-chord does not shorten it
         if share is not None and share < 1.0:
             out["notes"].append("progression: the loop that fits %d %% of the chord changes; every change is in runs"
                                 % round(100 * share))
@@ -522,29 +585,23 @@ def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict
         if tonic is not None:
             out["drone"]["degrees"] = [degree(int(i), tonic) for i in held]
     sigs = [(label[i], per_bar.get(b)) if b in per_bar else None for i, b in enumerate(bars)]
-    out["repeat_bars"], out["changes_at_bars"] = repeat(sigs)
-    if out["repeat_bars"] is None:
-        out["notes"].append("repeat: no period of 1, 2, 4 or 8 bars repeats in 75 % of the bar pairs")
+    out["repeat_bars"], out["changes_at_bars"], why = repeat(sigs)
+    if why:
+        out["notes"].append(why)
     return out
 
 
-def vocal_section(sec, y, sr, t0, bar_s, playing, loud_bar_db) -> dict:
-    """Bars with the vocal, the share of the section, and the phrase starts (bar and beat within the section)."""
-    bars = [b for b in _bars_of(sec) if b < len(playing) and playing[b]]
-    out = {"bars_playing": len(bars), "share": round(len(bars) / sec["bars"], 2),
-           "bars_with_vocal": bar_ranges([b - sec["start_bar"] + 1 for b in bars]) or None,
-           "phrase_starts": None, "phrase_start_beats": None, "notes": []}
-    if not bars:
-        out["notes"].append("silent in this section")
-        return out
+def vocal_phrases(y, sr, t0: float, bar_s: float, n_bars: int, loud_bar_db: float) -> list[int]:
+    """The beats (from bar 0, 0-based) on which a vocal phrase starts, over the whole track, so a phrase that runs on
+    over a section line is not started again there: a phrase is 2 or more beats within 15 dB of the vocal's loud bar
+    level (the level sections.py calls playing), a one-beat gap inside it a breath."""
     beat_s = bar_s / drummod.BEATS_PER_BAR
-    first = sec["start_bar"] * drummod.BEATS_PER_BAR
-    nb = sec["bars"] * drummod.BEATS_PER_BAR
+    nb = n_bars * drummod.BEATS_PER_BAR
     c = np.concatenate([[0.0], np.cumsum(np.asarray(y, dtype=np.float64) ** 2)])
-    edges = np.clip(np.round((t0 + (first + np.arange(nb + 1)) * beat_s) * sr).astype(np.int64), 0, len(y))
+    edges = np.clip(np.round((t0 + np.arange(nb + 1) * beat_s) * sr).astype(np.int64), 0, len(y))
     db = 10.0 * np.log10((c[edges[1:]] - c[edges[:-1]]) / np.maximum(np.diff(edges), 1) + 1e-12)
-    on = list(db >= loud_bar_db - 15.0)               # the level sections.py calls playing, per beat
-    for i in range(1, nb - 1):                          # a one-beat breath inside a phrase is part of it
+    on = list(db >= loud_bar_db - 15.0)
+    for i in range(1, nb - 1):
         if not on[i] and on[i - 1] and on[i + 1]:
             on[i] = True
     starts, i = [], 0
@@ -554,14 +611,30 @@ def vocal_section(sec, y, sr, t0, bar_s, playing, loud_bar_db) -> dict:
             while j < nb and on[j]:
                 j += 1
             if j - i >= 2:
-                starts.append({"bar": i // 4 + 1, "beat": i % 4 + 1})
+                starts.append(i)
             i = j
         else:
             i += 1
+    return starts
+
+
+def vocal_section(sec, playing, phrase_beats: list[int]) -> dict:
+    """Bars with the vocal, the share of the section, and the phrases that start in it (bar and beat within the
+    section; a phrase begun in the section before is not counted again)."""
+    bars = [b for b in _bars_of(sec) if b < len(playing) and playing[b]]
+    out = {"bars_playing": len(bars), "share": round(len(bars) / sec["bars"], 2),
+           "bars_with_vocal": bar_ranges([b - sec["start_bar"] + 1 for b in bars]) or None,
+           "phrase_starts": None, "phrase_start_beats": None, "notes": []}
+    if not bars:
+        out["notes"].append("silent in this section")
+        return out
+    first, nb = sec["start_bar"] * drummod.BEATS_PER_BAR, sec["bars"] * drummod.BEATS_PER_BAR
+    starts = [{"bar": (b - first) // 4 + 1, "beat": (b - first) % 4 + 1} for b in phrase_beats if first <= b < first + nb]
     out["phrase_starts"] = starts
     out["phrase_start_beats"] = dict(sorted(Counter(s["beat"] for s in starts).items())) if starts else None
     if not starts:
-        out["notes"].append("no phrase of 2 beats or more within 15 dB of the vocal's loud level")
+        out["notes"].append("no phrase starts in this section (a phrase of 2 beats or more within 15 dB of the vocal's "
+                            "loud level; one begun in the section before is counted there)")
     return out
 
 
@@ -570,12 +643,15 @@ def drum_section(sec, drums: dict | None) -> dict | None:
     accent field (null: drums.json has no per-hit levels). None when there is no drums.json."""
     if not drums:
         return None
-    plan = drums.get("grid", {}).get("sections") or []
+    plan = (drums.get("grid") or {}).get("sections") or []
+    if not plan:
+        return {"drums_section": None, "roles": [], "notes": ["drums.json has no grid sections: its roles cannot be placed "
+                                                              "in a section (re-run roadie drums)"]}
     idx = next((i for i, p in enumerate(plan) if p["start_bar"] <= sec["start_bar"] < p["start_bar"] + p["bars"]), None)
-    if idx is None and plan:
+    if idx is None:
         idx = len(plan) - 1 if sec["start_bar"] >= plan[-1]["start_bar"] else 0
-    out = {"drums_section": plan[idx]["name"] if idx is not None else None, "roles": [], "notes": []}
-    if idx is not None and plan[idx]["name"] != sec["name"]:
+    out = {"drums_section": plan[idx]["name"], "roles": [], "notes": []}
+    if plan[idx]["name"] != sec["name"]:
         out["notes"].append("drums.json joins sections under %d bars: these roles are those of %r"
                             % (drumsections.MIN_SECTION_BARS, plan[idx]["name"]))
     for kind, st in (drums.get("stems") or {}).items():
@@ -680,6 +756,14 @@ def micro(stems_dir, key: dict | None = None) -> dict:
     chroma = None
     if "synths" in meas and meas["synths"]["loud"] is not None:
         chroma = chroma_bars(meas["synths"]["y"], SR, t0, bar_s, n_bars)
+    phrase_beats = None
+    if "vocals" in meas and meas["vocals"]["loud"] is not None:
+        v = meas["vocals"]
+        c = np.concatenate([[0.0], np.cumsum(np.asarray(v["y"], dtype=np.float64) ** 2)])
+        edges = np.clip(np.round((t0 + np.arange(n_bars + 1) * bar_s) * SR).astype(np.int64), 0, len(v["y"]))
+        bdb = 10.0 * np.log10((c[edges[1:]] - c[edges[:-1]]) / np.maximum(np.diff(edges), 1) + 1e-12)
+        loud_bar = float(np.percentile(bdb[bdb > -50.0], 95)) if (bdb > -50.0).sum() >= 4 else float(bdb.max())
+        phrase_beats = vocal_phrases(v["y"], SR, t0, bar_s, n_bars, loud_bar)
     out_secs = []
     for sec in secs:
         rec = {k: sec[k] for k in ("index", "name", "file_bar", "start_bar", "bars")}
@@ -701,17 +785,13 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             rec["synths"]["level_by_16th_db"] = _level(meas["synths"], sec, t0, bar_s)
         else:
             rec["synths"] = None
-        if "vocals" in meas and meas["vocals"]["loud"] is not None:
-            v = meas["vocals"]
-            c = np.concatenate([[0.0], np.cumsum(np.asarray(v["y"], dtype=np.float64) ** 2)])
-            edges = np.clip(np.round((t0 + np.arange(n_bars + 1) * bar_s) * SR).astype(np.int64), 0, len(v["y"]))
-            bdb = 10.0 * np.log10((c[edges[1:]] - c[edges[:-1]]) / np.maximum(np.diff(edges), 1) + 1e-12)
-            loud_bar = float(np.percentile(bdb[bdb > -50.0], 95)) if (bdb > -50.0).sum() >= 4 else float(bdb.max())
-            rec["vocals"] = vocal_section(sec, v["y"], SR, t0, bar_s, v["playing"], loud_bar)
+        if phrase_beats is not None:
+            rec["vocals"] = vocal_section(sec, meas["vocals"]["playing"], phrase_beats)
         else:
             rec["vocals"] = None
         rec["drums"] = drum_section(sec, drums)
         out_secs.append(rec)
+    phase_loops(out_secs)
     return {"kind": KIND, "version": VERSION, "made": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "grid": {"tempo": grid["tempo"], "t0": round(t0, 4), "beats_per_bar": drummod.BEATS_PER_BAR,
                      "downbeat_s": grid["downbeat_s"], "downbeat_verdict": grid["verdict"],
@@ -750,8 +830,11 @@ def micro_of(stems_dir, write: bool = True) -> dict:
         rec = micro(stems_dir)
         if write:
             tmp = stems_dir / ".micro.json.tmp"
-            tmp.write_text(json.dumps(rec, indent=2) + "\n")
-            os.replace(tmp, stems_dir / "micro.json")
+            try:
+                tmp.write_text(json.dumps(rec, indent=2) + "\n")
+                os.replace(tmp, stems_dir / "micro.json")
+            finally:
+                tmp.unlink(missing_ok=True)
             rec["written"] = str(stems_dir / "micro.json")
         return rec
     names = _rclone("lsf", "--files-only", remote).splitlines()
