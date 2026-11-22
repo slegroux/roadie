@@ -682,8 +682,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
              "end": end, "room": nxt - o, "status": "grouped", "reason": None, "group": None, "distance": None}
         hits.append(h)
         cut = x[o:end]
-        if float(np.abs(cut).max()) <= 0:
-            h["status"], h["reason"] = "silent", "the cut holds only zeros"
+        if not len(cut) or float(np.abs(cut).max()) <= 0:
+            h["status"], h["reason"] = "silent", "the cut is empty (the next hit starts within the guard) or holds only zeros"
             continue
         h["level_db"] = _db_rms(cut, sr)
         a = max(0, o - lead_end - lead_len)
