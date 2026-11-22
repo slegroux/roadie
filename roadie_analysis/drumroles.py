@@ -98,12 +98,15 @@ from __future__ import annotations
 
 import math
 import pathlib
+import sys
 
 import numpy as np
 
+from roadie_analysis import cache as hitcache
 from roadie_analysis import oneshot
 from sideman.listen import GRID_LEAD_S, check_channels, check_sections, load
 
+CACHE_VERSION = 1        # bump when the detection or the grouping changes what `_detect` returns for the same audio and settings (the cached hits and groups); a changed constant of this module or of oneshot changes the key by itself
 THRESHOLD = 1.5          # average-linkage distance (spectral_distance, mel) at which groups stop merging
 MAX_CUT_S = 0.5          # a hit's cut is at most this long
 END_GUARD_S = 0.002      # a cut ends this long before the next hit's onset
@@ -565,17 +568,148 @@ def _assign_overlapped(x: np.ndarray, sr: int, hits: list, found: list, threshol
             dict(found)[gid]["assigned"].append(h["id"])
 
 
+def cache_settings() -> dict:
+    """What every cached result of this module's and drumsections' readings is keyed by besides the audio: CACHE_VERSION and the constants."""
+    return {"version": CACHE_VERSION, "constants": _constants()}
+
+
+def _constants() -> dict:
+    """Every number and string constant of this module and of oneshot's: what the detection and the grouping read, so a changed
+    threshold invalidates the cache without anyone remembering to bump CACHE_VERSION."""
+    return {"%s.%s" % (m.__name__.rsplit(".", 1)[-1], k): v for m in (sys.modules[__name__], oneshot) for k, v in sorted(vars(m).items())
+            if k.isupper() and isinstance(v, (int, float, str))}
+
+
+def _pack(d: dict) -> dict:
+    """The detection's result as JSON (a group's `distance` has hit ids as keys)."""
+    return {**d, "groups": [{**g, "distance": [[i, v] for i, v in g["distance"].items()]} for g in d["groups"]]}
+
+
+def _unpack(d) -> dict | None:
+    """What `_pack` made, back; None for anything that is not that (an entry of another shape is a miss)."""
+    try:
+        return {**d, "groups": [{**g, "distance": {int(i): v for i, v in g["distance"]}} for g in d["groups"]]}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _detect(x: np.ndarray, sr: int, ref_power, max_cut_s: float, threshold: float, sample: int, max_groups: int,
+            stability_runs: int, grid: tuple | None) -> dict:
+    """The part of `hit_groups` that reads the audio and not the grid: {"hat_like", "grid_hits", "hits", "groups", "notes"}.
+    `x` is the DC-corrected stem. The hits carry their cut, level, lead, `room` and status; the grid's fields ("bar", "step",
+    "offset_ms", "on_grid", "through") are placeholders for `hit_groups` to fill. The groups (in the order of their ids) hold
+    members, medoid, distances, assigned hits, stability and separation. `grid` is (t0, 16th in seconds), given only for
+    `grid_onsets`, which also looks for hits at the grid's lines: then the result depends on the grid and is not cached."""
+    notes = []
+    hat_like = round(_hat_like(x, sr), 4)
+    segs = oneshot._segments(x, sr, ref_power)
+    onsets = [(oneshot._hit_onset(x[s:e], sr) if s == 0 else _onset_after_tail(x, sr, s), "segment") for s, e in segs]
+    grid_hits = 0
+    if grid is not None:
+        t0, step_s = grid
+        onsets = sorted(onsets + [(o, "grid") for o in _grid_onsets(x, sr, [o for o, _ in onsets], t0, step_s)])
+        grid_hits = sum(src == "grid" for _, src in onsets)
+        if hat_like < 0.5:
+            notes.append("grid_onsets is meant for hat-like stems and this one reads hat_like %.2f: the %d hits it added "
+                         "are bleed, tails or the phase of a low tone as often as hits" % (hat_like, grid_hits))
+    guard, lead_end, lead_len = (int(round(v * sr)) for v in (END_GUARD_S, 0.001, LEAD_WINDOW_S))
+    hits, cuts, keys = [], [], []
+    for k, (o, source) in enumerate(onsets):
+        last = k + 1 == len(onsets)
+        nxt = len(x) if last else onsets[k + 1][0]
+        end = min(nxt if last else nxt - guard, o + int(round(max_cut_s * sr)))
+        h = {"id": k, "source": source, "onset_s": o / sr, "bar": 0, "step": 0, "offset_ms": 0.0,
+             "on_grid": False, "level_db": None, "lead_db": None, "through": 0, "start": o,
+             "end": end, "room": nxt - o, "status": "grouped", "reason": None, "group": None, "distance": None}
+        hits.append(h)
+        cut = x[o:end]
+        if not len(cut):                                # the next hit starts within END_GUARD_S: nothing to measure
+            h["status"], h["reason"] = "silent", "no room: the next hit starts within %.0f ms" % (1000 * END_GUARD_S)
+            continue
+        if float(np.abs(cut).max()) <= 0:
+            h["status"], h["reason"] = "silent", "the cut holds only zeros"
+            continue
+        h["level_db"] = _db_rms(cut, sr)
+        a = max(0, o - lead_end - lead_len)
+        if o - lead_end - a >= lead_len // 2:           # something of the stem lies before the hit
+            before = float((x[a:o - lead_end] ** 2).mean())
+            h["lead_db"] = round(10.0 * math.log10(max(before, 1e-12)) - h["level_db"], 1)
+        if nxt - o < int(round(MIN_CUT_S * sr)):
+            h["status"], h["reason"] = "too_short", "the next hit starts %.0f ms after it (under %.0f ms)" % (
+                1000 * (nxt - o) / sr, 1000 * MIN_CUT_S)
+        elif h["lead_db"] is None:
+            h["status"], h["reason"] = "no_lead", (
+                "it starts within %.0f ms of the start of the stem: a tail or bed under it cannot be ruled out"
+                % (1000 * (lead_end + lead_len // 2) / sr))
+        elif h["lead_db"] > OVERLAP_DB:
+            h["status"], h["reason"] = "overlapped", (
+                "it starts out of a tail or bed only %.0f dB under its own loudest ms (it needs %.0f)"
+                % (-h["lead_db"], -OVERLAP_DB))
+    for h in hits:
+        if h["status"] != "grouped":
+            continue
+        around = hits[max(0, h["id"] - NEIGHBOURS):h["id"]] + hits[h["id"] + 1:h["id"] + NEIGHBOURS + 1]
+        near = [a["level_db"] for a in around if a["level_db"] is not None]
+        if len(near) >= 3 and h["level_db"] < float(np.median(near)) - FAINT_DB:
+            h["status"], h["reason"] = "faint", (
+                "%.0f dB under the hits around it (over %.0f dB): bed, bleed or a ghost note; it is counted in "
+                "`unmeasured_pattern`" % (float(np.median(near)) - h["level_db"], FAINT_DB))
+        else:
+            h["_cut"] = len(cuts)
+            cuts.append(x[h["start"]:h["end"]])
+            keys.append(h["start"])
+    index = {h["_cut"]: h["id"] for h in hits if "_cut" in h}
+    seen, pitch = {}, {}
+
+    def cluster(shift: float):
+        groups, rest = group_cuts(cuts, keys, sr, threshold, sample, max_groups, shift, seen)
+        for g in groups:                                  # from cut numbers to hit ids
+            g["members"] = sorted(index[i] for i in g["members"])
+            g["medoid"] = index[g["medoid"]]
+            g["distance"] = {index[i]: d for i, d in g["distance"].items()}
+        return _split_by_pitch(x, sr, hits, groups, pitch), [index[c] for c in rest]
+
+    groups, rest = cluster(0.0) if cuts else ([], [])
+    movable = len(cuts) > sample                   # with no more measured hits than the sample every regrouping is the same
+    runs = [cluster((r + 1) / (stability_runs + 1))[0] for r in range(stability_runs)] if cuts and movable else []
+    if stability_runs and cuts and not movable:
+        notes.append("stability is not measured: %d measured hits are no more than the sample (%d), so the sample "
+                            "cannot move: every group is stable by construction (the grouping is exact average linkage and "
+                            "no regrouping can differ)" % (len(cuts), sample))
+    groups.sort(key=lambda g: (-len(g["members"]), g["members"][0]))
+    found = list(enumerate(groups))
+    for gid, g in found:
+        g["assigned"] = []
+        shares = []
+        for other in runs:
+            best = max(other, key=lambda o: len(set(o["members"]) & set(g["members"])))
+            both = len(set(best["members"]) & set(g["members"]))
+            shares.append(both / (len(g["members"]) + len(best["members"]) - both))
+        g["stability"] = round(float(np.mean(shares)), 3) if shares and len(g["members"]) >= TENTATIVE_N else None
+        g["stability_status"] = ("measured" if g["stability"] is not None else "not asked for" if not stability_runs
+                                 else "stable by construction" if not movable else "not measured")
+        for i, d in g["distance"].items():
+            hits[i]["group"], hits[i]["distance"] = gid, d
+    for i in rest:
+        hits[i]["status"], hits[i]["reason"] = "ungrouped", "more than %d distinct sounds: not forced into a group" % max_groups
+    _separation(x, sr, hits, found)
+    _assign_overlapped(x, sr, hits, found, threshold)
+    for h in hits:
+        h.pop("_cut", None)
+    return {"hat_like": hat_like, "grid_hits": grid_hits, "hits": hits, "groups": [g for _, g in found], "notes": notes}
+
+
 def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: int | None = None,
                beats_per_bar: int = 4, threshold: float = THRESHOLD, max_cut_s: float = MAX_CUT_S,
                sample: int = SAMPLE_HITS, max_groups: int = MAX_GROUPS, grid_onsets: bool = False,
-               stability_runs: int = STABILITY_RUNS, ref_power: float | None = None) -> dict:
+               stability_runs: int = STABILITY_RUNS, ref_power: float | None = None, cache: bool = False) -> dict:
     """Every hit in one drum stem, with its place on the grid, grouped by how alike the hits sound (see the module
     docstring for the choices). `stem` is a path or an array [n] / [n, channels] with its rate in `sr`; bar 0 starts
     at `t0` seconds, 16ths are a quarter of a beat of `tempo` (4 * beats_per_bar to a bar); `sections` are
     {name, start_bar, bars} (as reference_profile takes them). `grid_onsets` (off by default) also looks for hits at
     16th lines that `oneshot._segments` cannot see, and is meant for hat-like stems (see `hat_like`): on a kick, snare or
     toms stem it reports bleed and tails as hits (118-355 of them on the Flare stems). `stability_runs` is the number of
-    regroupings with a shifted sample that `stability` is measured against (0: not measured). `ref_power` is for a slice of a longer stem: the peak power of the whole stem's envelope (`oneshot.envelope_peak`), so that hits are found against the stem's loudest 5 ms and not the slice's own (a slice with nothing within 40 dB of it has no hits).
+    regroupings with a shifted sample that `stability` is measured against (0: not measured). `ref_power` is for a slice of a longer stem: the peak power of the whole stem's envelope (`oneshot.envelope_peak`), so that hits are found against the stem's loudest 5 ms and not the slice's own (a slice with nothing within 40 dB of it has no hits). `cache` (off by default) stores the detected hits and their groups on disk (`roadie_analysis/cache.py`), keyed by the samples, the rate and every setting above that reads the audio, and reuses them when the same samples come again: the grid (`tempo`, `t0`, `sections`, `beats_per_bar`) is applied afterwards and is not part of the key. Not used with `grid_onsets`. `ROADIE_NO_CACHE=1` turns it off.
 
     Returns {"sample_rate", "tempo", "t0", "threshold", "linkage": "average", "max_cut_s", "grid_onsets", "hat_like"
     (the share of the stem's energy above 4 kHz), "grid_hits" (hits found by `grid_onsets`), "hits", "groups",
@@ -644,6 +778,7 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
         x = np.asarray(stem)
         x = x[:, None] if x.ndim == 1 else x
     check_channels(x)
+    raw = x
     x = np.asarray(x, dtype=np.float64)
     if not np.isfinite(x).all():
         raise ValueError("the stem holds NaN or infinite samples")
@@ -656,114 +791,40 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
     if not len(x) or float(np.abs(x).max()) <= 0:
         out["notes"].append("the stem is silent: no hits")
         return out
-    out["hat_like"] = round(_hat_like(x, sr), 4)
-    segs = oneshot._segments(x, sr, ref_power)
-    onsets = [(oneshot._hit_onset(x[s:e], sr) if s == 0 else _onset_after_tail(x, sr, s), "segment") for s, e in segs]
     step_s, steps = 60.0 / tempo / 4.0, 4 * beats_per_bar
-    if grid_onsets:
-        onsets = sorted(onsets + [(o, "grid") for o in _grid_onsets(x, sr, [o for o, _ in onsets], t0, step_s)])
-        out["grid_hits"] = sum(src == "grid" for _, src in onsets)
-        if out["hat_like"] < 0.5:
-            out["notes"].append("grid_onsets is meant for hat-like stems and this one reads hat_like %.2f: the %d hits it added "
-                                "are bleed, tails or the phase of a low tone as often as hits" % (out["hat_like"], out["grid_hits"]))
-    guard, lead_end, lead_len = (int(round(v * sr)) for v in (END_GUARD_S, 0.001, LEAD_WINDOW_S))
-    hits, cuts, keys, tails = [], [], [], {}
+    settings = {"max_cut_s": max_cut_s, "threshold": threshold, "sample": sample, "max_groups": max_groups,
+                "stability_runs": stability_runs, "ref_power": ref_power, **cache_settings()}
+    store = cache and not grid_onsets and hitcache.enabled()          # grid_onsets looks at the grid: its hits are not the audio's alone
+    ckey = hitcache.key(raw, sr, settings) if store else None
+    found_cached = _unpack(hitcache.get(ckey)) if store else None
+    if found_cached is None:
+        found_cached = _detect(x, sr, ref_power, max_cut_s, threshold, sample, max_groups, stability_runs,
+                               (t0, step_s) if grid_onsets else None)
+        if store:
+            hitcache.put(ckey, _pack(found_cached))
+    out["hat_like"], out["grid_hits"] = found_cached["hat_like"], found_cached["grid_hits"]
+    out["notes"] += found_cached["notes"]
+    hits, found = found_cached["hits"], list(enumerate(found_cached["groups"]))
+    tails = {}
     frame, glead = max(1, int(round(0.001 * sr))), int(round(GRID_LEAD_S * sr))
-    for k, (o, source) in enumerate(onsets):
-        last = k + 1 == len(onsets)
-        nxt = len(x) if last else onsets[k + 1][0]
-        end = min(nxt if last else nxt - guard, o + int(round(max_cut_s * sr)))
-        rel = o / sr - t0
+    for h in hits:                                      # what depends on the grid: where each hit sits, and what its tail sounds through
+        rel = h["start"] / sr - t0
         line = int(round(rel / step_s))
-        bar, step = divmod(line, steps)
+        h["bar"], h["step"] = divmod(line, steps)
         off = rel - line * step_s
-        h = {"id": k, "source": source, "onset_s": o / sr, "bar": bar, "step": step, "offset_ms": round(1000 * off, 2),
-             "on_grid": abs(off) <= GRID_LEAD_S, "level_db": None, "lead_db": None, "through": 0, "start": o,
-             "end": end, "room": nxt - o, "status": "grouped", "reason": None, "group": None, "distance": None}
-        hits.append(h)
-        cut = x[o:end]
-        if not len(cut):                                # the next hit starts within END_GUARD_S: nothing to measure
-            h["status"], h["reason"] = "silent", "no room: the next hit starts within %.0f ms" % (1000 * END_GUARD_S)
+        h["offset_ms"], h["on_grid"] = round(1000 * off, 2), abs(off) <= GRID_LEAD_S
+        if h["status"] == "silent":
             continue
-        if float(np.abs(cut).max()) <= 0:
-            h["status"], h["reason"] = "silent", "the cut holds only zeros"
-            continue
-        h["level_db"] = _db_rms(cut, sr)
-        a = max(0, o - lead_end - lead_len)
-        if o - lead_end - a >= lead_len // 2:           # something of the stem lies before the hit
-            before = float((x[a:o - lead_end] ** 2).mean())
-            h["lead_db"] = round(10.0 * math.log10(max(before, 1e-12)) - h["level_db"], 1)
+        cut = x[h["start"]:h["end"]]
         loud = oneshot._loudest_ms(cut, sr) ** 2
         for n in range(line + 1, line + steps + 1):
-            i = int(round((t0 + n * step_s) * sr)) - o
+            i = int(round((t0 + n * step_s) * sr)) - h["start"]
             if i + frame > len(cut) - glead:
                 break
             at_line = float((cut[i:i + frame] ** 2).mean())
             if i > glead and at_line >= loud * 10 ** (-THROUGH_DB / 10):
                 h["through"] += 1
-                tails.setdefault(k, []).append((n, round(10.0 * math.log10(max(at_line, 1e-12)), 1)))
-        if nxt - o < int(round(MIN_CUT_S * sr)):
-            h["status"], h["reason"] = "too_short", "the next hit starts %.0f ms after it (under %.0f ms)" % (
-                1000 * (nxt - o) / sr, 1000 * MIN_CUT_S)
-        elif h["lead_db"] is None:
-            h["status"], h["reason"] = "no_lead", (
-                "it starts within %.0f ms of the start of the stem: a tail or bed under it cannot be ruled out"
-                % (1000 * (lead_end + lead_len // 2) / sr))
-        elif h["lead_db"] > OVERLAP_DB:
-            h["status"], h["reason"] = "overlapped", (
-                "it starts out of a tail or bed only %.0f dB under its own loudest ms (it needs %.0f)"
-                % (-h["lead_db"], -OVERLAP_DB))
-    for h in hits:
-        if h["status"] != "grouped":
-            continue
-        around = hits[max(0, h["id"] - NEIGHBOURS):h["id"]] + hits[h["id"] + 1:h["id"] + NEIGHBOURS + 1]
-        near = [a["level_db"] for a in around if a["level_db"] is not None]
-        if len(near) >= 3 and h["level_db"] < float(np.median(near)) - FAINT_DB:
-            h["status"], h["reason"] = "faint", (
-                "%.0f dB under the hits around it (over %.0f dB): bed, bleed or a ghost note; it is counted in "
-                "`unmeasured_pattern`" % (float(np.median(near)) - h["level_db"], FAINT_DB))
-        else:
-            h["_cut"] = len(cuts)
-            cuts.append(x[h["start"]:h["end"]])
-            keys.append(h["start"])
-    index = {h["_cut"]: h["id"] for h in hits if "_cut" in h}
-    seen, pitch = {}, {}
-
-    def cluster(shift: float):
-        groups, rest = group_cuts(cuts, keys, sr, threshold, sample, max_groups, shift, seen)
-        for g in groups:                                  # from cut numbers to hit ids
-            g["members"] = sorted(index[i] for i in g["members"])
-            g["medoid"] = index[g["medoid"]]
-            g["distance"] = {index[i]: d for i, d in g["distance"].items()}
-        return _split_by_pitch(x, sr, hits, groups, pitch), [index[c] for c in rest]
-
-    groups, rest = cluster(0.0) if cuts else ([], [])
-    movable = len(cuts) > sample                   # with no more measured hits than the sample every regrouping is the same
-    runs = [cluster((r + 1) / (stability_runs + 1))[0] for r in range(stability_runs)] if cuts and movable else []
-    if stability_runs and cuts and not movable:
-        out["notes"].append("stability is not measured: %d measured hits are no more than the sample (%d), so the sample "
-                            "cannot move: every group is stable by construction (the grouping is exact average linkage and "
-                            "no regrouping can differ)" % (len(cuts), sample))
-    groups.sort(key=lambda g: (-len(g["members"]), g["members"][0]))
-    found = list(enumerate(groups))
-    for gid, g in found:
-        g["assigned"] = []
-        shares = []
-        for other in runs:
-            best = max(other, key=lambda o: len(set(o["members"]) & set(g["members"])))
-            both = len(set(best["members"]) & set(g["members"]))
-            shares.append(both / (len(g["members"]) + len(best["members"]) - both))
-        g["stability"] = round(float(np.mean(shares)), 3) if shares and len(g["members"]) >= TENTATIVE_N else None
-        g["stability_status"] = ("measured" if g["stability"] is not None else "not asked for" if not stability_runs
-                                 else "stable by construction" if not movable else "not measured")
-        for i, d in g["distance"].items():
-            hits[i]["group"], hits[i]["distance"] = gid, d
-    for i in rest:
-        hits[i]["status"], hits[i]["reason"] = "ungrouped", "more than %d distinct sounds: not forced into a group" % max_groups
-    _separation(x, sr, hits, found)
-    _assign_overlapped(x, sr, hits, found, threshold)
-    for h in hits:
-        h.pop("_cut", None)
+                tails.setdefault(h["id"], []).append((n, round(10.0 * math.log10(max(at_line, 1e-12)), 1)))
     out["hits"] = hits
     if not hits:
         return out
@@ -788,6 +849,8 @@ def hit_groups(stem, tempo: float, t0: float, sections: list | None = None, sr: 
 
 
 # ---------------------------------------------------------------- role names
+
+
 
 def _use(result: dict, g: dict) -> dict:
     """How a group plays on the grid, from its measured and assigned hits that sit on it: "counts" (hits per 16th), "n"

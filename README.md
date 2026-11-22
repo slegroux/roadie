@@ -256,6 +256,7 @@ The MCP tool `arrangement_compare` takes the same arguments.
 roadie drums Glacier               # a study or a stems folder: table per stem and section, writes drums.json and drum_roles/*.wav
 roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the fast cores)
 roadie drums Glacier --no-write    # the table only
+roadie drums Glacier --no-cache    # detect every hit again (see "The cache of detected hits" below)
 roadie drums Glacier --json        # the drums.json record
 ```
 
@@ -321,6 +322,27 @@ The numbers come from 108 role-sorted one-shots and the Flare replica. Where eac
 comes from, and the known misnames (a rim rule that also names some hats, "tom" meaning
 "pitched, in the toms stem", what bleed cannot catch), are in
 [`docs/DRUMROLES.md`](docs/DRUMROLES.md).
+
+## The cache of detected hits
+
+Finding the hits of a stem and grouping them by sound is most of a drum analysis (about 135 s of 186 s on
+Glacier 3000), and it reads only the audio: the tempo, `t0` and the section lines decide where each hit sits on
+the grid afterwards. So `roadie drums` keeps, for each (stem, section) slice, the hits and their groups, and the
+sound readings the matching of sections starts from, in a folder on disk. The next analysis of the same audio
+(another grid, the stability check's seven runs, a re-run after a rename) finds them there. Glacier 3000's
+second `roadie drums --no-write` took 41 s against 200 s, with the same record apart from `made`, `seconds`,
+`stage_seconds` and `jobs`; the stability check's seven runs took 5 min 32 s (one cold run: about 190 s).
+
+- **Where:** `~/Library/Caches/roadie/drum-hits/` (`ROADIE_CACHE_DIR=<folder>` moves it), one `.json.gz` file
+  per entry. A track takes about 0.2 MB.
+- **How much:** at most 300 MB (`ROADIE_CACHE_MAX_MB=<n>`). Over the limit, the entries used longest ago are
+  removed first.
+- **What makes an entry:** the slice's samples, the sample rate and channel count, the detector's settings and
+  constants, and a version number in `roadie_analysis/drumroles.py` (`CACHE_VERSION`). Different audio, a changed
+  setting or a new version never finds an old entry. A file that cannot be read counts as not there.
+- **Bypass:** `roadie drums <study> --no-cache`, `python -m roadie_analysis.drumstability <stems> --no-cache`, or
+  `ROADIE_NO_CACHE=1` for everything (nothing is read or written).
+- **Clear it:** delete the folder (`rm -r ~/Library/Caches/roadie/drum-hits`); it is made again on the next run.
 
 ## Heavy jobs queue
 

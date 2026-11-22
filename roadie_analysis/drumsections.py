@@ -31,6 +31,7 @@ import math
 import numpy as np
 import soundfile as sf
 
+from roadie_analysis import cache as hitcache
 from roadie_analysis import drumroles, oneshot
 
 MIN_SECTION_BARS = 8
@@ -148,7 +149,7 @@ def slice_quantum(sr: int) -> int:
     return base * max(1, int(round(QUANTUM_S * sr / base)))
 
 
-def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | None = None) -> dict:
+def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | None = None, cache: bool = True) -> dict:
     """hit_groups on one section of one stem file. Returns {"res", "offset_s" (where the slice starts in the file), "sr",
     "reps" (group id -> the audio that stands for the group when sections are matched)}, or {"res": None} when the
     section holds no audio."""
@@ -165,7 +166,7 @@ def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | Non
     if b <= a:
         return {"res": None, "sr": sr}
     x, _ = sf.read(str(path), start=a, stop=b, dtype="float32", always_2d=True)
-    res = drumroles.hit_groups(x, tempo, start_t - a / sr, None, sr=sr, ref_power=ref_power)
+    res = drumroles.hit_groups(x, tempo, start_t - a / sr, None, sr=sr, ref_power=ref_power, cache=cache)
     xu = oneshot._undc(np.asarray(x, dtype=np.float64), sr)
     reps = {}
     for g in res["groups"]:
@@ -270,9 +271,22 @@ def cut_reading(cut: np.ndarray, sr: int) -> dict | None:
     return out
 
 
-def group_reading(cuts: list, sr: int) -> dict | None:
+def group_reading(cuts: list, sr: int, cache: bool = False) -> dict | None:
     """The medians of `cut_reading` over a group's kept cuts: {"cuts", "decay_ms", "drop60_db", "centroid_hz", "pitched" (share of the cuts
-    oneshot could read that are pitched, None without any), "fall_20_ms" (median over the complete ones, None without any)}."""
+    oneshot could read that are pitched, None without any), "fall_20_ms" (median over the complete ones, None without any)}.
+    With `cache` the reading is kept on disk by the cuts' samples (it reads nothing else), so the second analysis of the same audio does not read them again."""
+    ckey = hitcache.key([np.asarray(c) for c in cuts], sr, {"what": "group_reading", **drumroles.cache_settings()}) if cache and cuts and hitcache.enabled() else None
+    if ckey is not None:
+        got = hitcache.get(ckey)
+        if isinstance(got, dict) and "found" in got:
+            return got["found"]
+    found = _group_reading(cuts, sr)
+    if ckey is not None:
+        hitcache.put(ckey, {"found": found})
+    return found
+
+
+def _group_reading(cuts: list, sr: int) -> dict | None:
     rs = [r for r in (cut_reading(c, sr) for c in cuts) if r]
     if not rs:
         return None
@@ -463,7 +477,7 @@ def _echoes(groups: list, hits: list, tempo: float, share: float = None, spread:
 
 
 def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float = drumroles.THRESHOLD, merge: bool = True,
-               exclude=frozenset()) -> dict:
+               exclude=frozenset(), cache: bool = True) -> dict:
     """One `hit_groups`-shaped result for a stem from its sections' `section_job` outputs (aligned with `plan`). Bars are
     the track's (bar 0 at `t0`); every hit of every slice is in `hits` (`owned` says whether the section keeps it), and
     only owned hits are in a group. `sections_of` gives, per group, its section index and local id. With `merge` False the groups are not
@@ -525,7 +539,7 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
     for mem, asg, cl in built:
         stab, status = _stability([entries[k] for k in cl], owned_ids)
         steady.append(status == "stable by construction" or (stab is not None and stab >= drumroles.NAME_STABILITY))
-    readings = [group_reading([c for k in cl for c in outs[entries[k][0]]["cuts"][entries[k][1]["id"]]], sr) if len(mem) >= MERGE_MIN_HITS else None
+    readings = [group_reading([c for k in cl for c in outs[entries[k][0]]["cuts"][entries[k][1]["id"]]], sr, cache) if len(mem) >= MERGE_MIN_HITS else None
                 for mem, asg, cl in built]
     out["merge_readings"] = readings
     if merge:
