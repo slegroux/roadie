@@ -102,7 +102,7 @@ rate); no clean hit, no file. A run writes the new clips first, then `drums.json
 **Steadiness.** `python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare]` re-runs the analysis with the grid
 moved by tempo +-0.001 and +-0.005 bpm and t0 +-1 ms (nothing written) and compares, hit by hit, which role each hit lands in
 (`kept`: the share of a base role's hits in its best-matching role; `agreement`: the same over all roles of 4 or more hits).
-The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: see the stability report). What is
+The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: agreement 1.0 in 11, 0.995 in one, nothing absorbed, worst purity 0.99). What is
 not steady is a **name that rests on a threshold the pattern sits on**: the patterns are made from the hits within 20 ms of a
 16th line, and a hat whose offsets spread to the edge (Glacier's `hh 16th`: 60 of 1600 hat hits lie within 3 ms of it) loses or
 gains a few hits when the grid moves, which moves its hits a bar on the odd 16ths across the 4.0 the `hh 16th` rule asks for
