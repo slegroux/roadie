@@ -385,13 +385,13 @@ def test_groups_on_the_same_steps_that_take_turns_and_sound_alike_become_one_rol
     b = [(b, s, 0.0) for b in range(10, 18) for s in (4, 12)]                # ...and the same steps in bars 10-17: never at the same time
     hits, built = _fake_groups(a, b)
     close, far = np.array([[0, 1.6], [1.6, 0]]), np.array([[0, 1.9], [1.9, 0]])
-    got, stats, info = drumsections._merge_alike(built, hits, close, [True, True])
+    got, stats, info, _ = drumsections._merge_alike(built, hits, close, [True, True])
     assert len(got) == 1 and sorted(got[0][0]) == list(range(32)) and [(m["hits"], m["bars"]) for m in info[0]] == [(16, [[0, 7]]), (16, [[10, 17]])]
-    got, _, info = drumsections._merge_alike(built, hits, far, [True, True])                 # sounds different: two roles
+    got, _, info, _ = drumsections._merge_alike(built, hits, far, [True, True])                 # sounds different: two roles
     assert len(got) == 2 and info == [None, None]
-    got, _, _ = drumsections._merge_alike(built, hits, close, [True, False])                 # one has no clean hit: the sound cannot be compared
+    got, _, _, _ = drumsections._merge_alike(built, hits, close, [True, False])                 # one has no clean hit: the sound cannot be compared
     assert len(got) == 2
-    got, _, _ = drumsections._merge_alike(built, hits, close, [True, True], [True, False])   # one is not a steady group (a piece of a continuum)
+    got, _, _, _ = drumsections._merge_alike(built, hits, close, [True, True], [True, False])   # one is not a steady group (a piece of a continuum)
     assert len(got) == 2
 
 
@@ -440,3 +440,34 @@ def test_an_echo_in_a_stem_is_labelled_with_its_gap_and_takes_no_name_of_its_own
     assert echo[0]["name"] == "echo of " + echo[0]["echo_of"] and echo[0]["hits"] == 32
     parent = [r for r in roles if r["name"] == echo[0]["echo_of"]]
     assert len(parent) == 1 and parent[0]["hits"] == 32
+
+
+def _reading(decay, pitched):
+    return {"cuts": 12, "decay_ms": decay, "drop60_db": -10.0, "centroid_hz": 1000.0, "pitched": pitched, "fall_20_ms": None, "fall_n": 0}
+
+
+def test_a_long_pitched_sound_and_a_short_click_on_the_same_steps_stay_two_roles():
+    """Taking turns, on the same steps, with clean hits 1.6 apart: the distance alone would merge them (Flare's kick and a click)."""
+    from roadie_analysis import drumsections
+    a = [(b, s, 0.0) for b in range(0, 8) for s in (0, 4, 8, 12)]
+    b = [(b, s, 0.0) for b in range(10, 18) for s in (0, 4, 8, 12)]
+    hits, built = _fake_groups(a, b)
+    close = np.array([[0, 1.6], [1.6, 0]])
+    kick, click = _reading(1162.0, 1.0), _reading(26.0, 0.16)
+    assert len(drumsections._merge_alike(built, hits, close, [True, True], [True, True], [kick, click])[0]) == 2
+    assert len(drumsections._merge_alike(built, hits, close, [True, True], [True, True], [kick, _reading(1100.0, 0.9)])[0]) == 1
+    assert len(drumsections._merge_alike(built, hits, close, [True, True], [True, True], [_reading(30.0, 0.1), _reading(55.0, 0.3)])[0]) == 1   # 1.8 x: one sound
+    assert len(drumsections._merge_alike(built, hits, close, [True, True], [True, True], [_reading(30.0, 0.1), _reading(75.0, 0.3)])[0]) == 2   # 2.5 x: two
+
+
+def test_two_groups_that_pass_everything_but_have_no_clean_hit_are_reported_not_merged():
+    from roadie_analysis import drumsections
+    a = [(b, s, 0.0) for b in range(0, 8) for s in (2, 6, 10, 14)]
+    b = [(b, s, 0.0) for b in range(10, 18) for s in (2, 6, 10, 14)]
+    hits, built = _fake_groups(a, b)
+    close = np.array([[0, 1.4], [1.4, 0]])
+    like = [_reading(32.0, 0.08), _reading(29.0, 0.08)]
+    got, stats, _, maybe = drumsections._merge_alike(built, hits, close, [True, False], [True, True], like)
+    assert len(got) == 2 and maybe == [(0, 1)] and stats[(0, 1)]["distance"] is None
+    got, _, _, maybe = drumsections._merge_alike(built, hits, close, [True, True], [True, True], like)
+    assert len(got) == 1 and maybe == []

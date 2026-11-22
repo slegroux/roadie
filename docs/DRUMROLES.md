@@ -124,15 +124,21 @@ rate); no clean hit, no file. A run writes the new clips first, then `drums.json
 
 - **Merge.** Groups of at least 4 measured hits become one role when all hold: they play the same 16th steps (cosine of their
   hits-per-16th at least 0.8, the naming's own `SAME_PATTERN`), they take turns (at most 5 % of the smaller group's hits lie within
-  30 ms of a hit of the other: two sounds that play together are two sounds), and they sound alike: the mean spectral distance of
-  their sections' clean hits is at most **1.73** (1.15 times the 1.5 grouping threshold: the bound the naming already uses for
-  "possibly one sound", set on Flare, where distinct snare groups held at 1.77 to 1.82). Only entries with a clean hit count, as in
-  the bleed test: two groups of which one has no complete hit are not compared, so they are not merged. Both must be steady groups (the
-  naming's own gate: stability measured and at least 0.75, or stable by construction): a group the grouping cuts differently with a shifted
-  sample is a piece of a continuum, and merging it made Glacier's `hh 16th` flip with the grid. A group joins another only
-  when it fits every member (closest first). The role keeps the parts in `merged_from`: each part's hits and the bars it plays in,
-  because which part plays where is arrangement information. The naming then runs on the merged role.
-- **Echo.** A group of at least 4 measured hits is the **echo** of another when at least 90 % of its hits follow the nearest
+  30 ms of a hit of the other: two sounds that play together are two sounds), both are steady groups (the naming's own gate:
+  stability measured and at least 0.75, or stable by construction: a group the grouping cuts differently with a shifted sample is a
+  piece of a continuum, and merging one made Glacier's `hh 16th` flip with the grid), their **readings agree**, and they sound alike:
+  the mean spectral distance of their sections' clean hits is at most **1.73** (1.15 times the 1.5 grouping threshold: the bound the
+  naming already uses for "possibly one sound", set on Flare, where distinct snare groups held at 1.77 to 1.82). The readings need no
+  complete hit: from up to 12 cuts of each group, the decay (the time constant the level 60 ms after the onset implies) must agree
+  within a factor of **2** and the shares of cuts read as pitched must differ by at most **0.65**. Measured: pairs that should merge
+  have decay ratios 1.0 to 1.7 and pitched shares within 0.45; Flare's kick pair (a pitched 45 Hz kick and an unpitched click that
+  the distance alone merged) has a ratio of 45 and shares 1.0 and 0.16; groups that are plainly different (a 136 ms and a 28 ms
+  snare group) 4.9; the factor and the bound sit in those gaps. The distance is only compared between groups that have a clean hit, as
+  in the bleed test. **A pair that passes everything else but has no clean hit on one side is not merged and is not hidden**: both roles
+  carry `may_be_one_sound_with` (the other role) and `may_be_note` ("not compared: no clean hit on one side"); Glacier's two main hat
+  groups are such a pair. A group joins another only when it fits every member. The role keeps the parts in `merged_from`: each part's
+  hits and the bars it plays in, because which part plays where is arrangement information. The naming then runs on the merged role.
+- **Echo.** A group of at least 8 measured hits (a few hits each let two small groups pass for an echo) is the **echo** of another when at least 90 % of its hits follow the nearest
   earlier hit of that group by the same gap (within 15 ms either side of the median: an onset is found to about 10 ms and a gap is
   the difference of two), the gap is between 30 ms and 600 ms (a second hit under 30 ms later is one hit detected twice), and the gap
   is not within 20 ms of a multiple of a 16th (a gap the grid explains is two parts on the grid, such as the offbeat hat after the
@@ -144,10 +150,12 @@ hits) play the same steps (cosine 0.99), never within 30 ms of each other (0 of 
 hat groups (710 and 193 hits) also play the same steps (0.94), also never coincide, share 22 bars, and are **1.52** apart: no
 distance bound separates the two cases (the hats are closer). What keeps the hats apart is that the smaller hat group has no
 complete hit (every hit of it is cut by the next hit), so the sound comparison cannot be made, as in the bleed test.
-That is a measurement gap, not a finding that they sound different: a hat pair with clean hits, steady, and a distance under 1.73 would
-merge. **Known failure:** the distance compares two clean hits over the shorter of the two, so a short click-like group can look like the
-attack of a long kick; on Flare a 117-hit unpitched kick-stem group (falls 20 dB in 40 ms) merged into the 633-hit pitched kick (172 ms) and the
-merged role lost its name; the readings (pitched or not, decay) say they are two sounds, and are not part of the rule.
+That is a measurement gap, not a finding that they sound different, so it is said (`may_be_one_sound_with`). And the readings that need no complete hit
+do not support the user's ear for those two hat groups: decay 32.6 and 29.4 ms (ratio 1.11), centroid 9160 and 9298 Hz, pitched shares 0.08 and 0.08, fall
+in 57 and 54 ms: measurably the same on all of them, closer than the snare pair (decay 15.7 and 21.5 ms, ratio 1.37). The two groups may differ in what the
+readings cannot see; the numbers do not say they are two sounds. The false merge the readings stop: on Flare a 117-hit unpitched kick-stem group (falls 20 dB
+in 40 ms) was merged into the 633-hit pitched kick (172 ms) because the distance compares two clean hits over the shorter of the two, so a short click looks like
+the attack of a long kick; the merged role lost its name.
 
 **Steadiness.** `python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare]` re-runs the analysis with the grid
 moved by tempo +-0.001 and +-0.005 bpm and t0 +-1 ms (nothing written) and compares, hit by hit, which role each hit lands in

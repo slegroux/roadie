@@ -385,6 +385,10 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             rec["merged_from"] = merged
         if r.get("echo_of") is not None:
             rec["echo_of"], rec["echo_ms"], rec["echo_bars"] = r["echo_of"], r["echo_ms"], r["echo_bars"]
+        maybe = sorted({group_role[og] for gid in r["groups"] for og in by_id[gid].get("may_be_one_sound_with", [])
+                        if og in group_role and group_role[og] != r["name"]})
+        if maybe and r.get("echo_of") is None:
+            rec["may_be_one_sound_with"], rec["may_be_note"] = maybe, "not compared: no clean hit on one side"
         if variants and r.get("echo_of") is None:
             why = _steadiness(r["groups"], r["name"], r["named"], variants)
             rec["name_steady"], rec["name_steady_note"] = why is None, why
@@ -447,6 +451,8 @@ def format_table(record: dict) -> str:
                 flags.append("echo of %s, %+.0f ms later" % (r["echo_of"], r["echo_ms"]))
             if r.get("merged_from"):
                 flags.append("%d groups merged" % len(r["merged_from"]))
+            if r.get("may_be_one_sound_with"):
+                flags.append("may be one sound with %s (%s)" % (", ".join(r["may_be_one_sound_with"]), r["may_be_note"]))
             lvl = "%.1f dB" % r["level_db"] if r["level_db"] is not None else "-"
             lines.append("  %-14s %5d  %-19s %7s  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
                                                           lvl, ", ".join(flags)))
