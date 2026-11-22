@@ -26,6 +26,8 @@ Choices:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import soundfile as sf
 
@@ -126,8 +128,13 @@ def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | Non
     info = sf.info(str(path))
     sr, bar_s = info.samplerate, 60.0 / tempo * 4
     start_t = t0 + sec["start_bar"] * bar_s
-    a = 0 if sec["first"] else max(0, int(round((start_t - PRE_S) * sr)))
-    b = info.frames if sec["to_end"] else min(info.frames, int(round((start_t + sec["bars"] * bar_s + POST_S) * sr)))
+    # The slice starts and ends on a multiple of `quantum` samples: the detector reads the audio on a 1 ms grid and the DC
+    # offset on 10 ms blocks, both anchored at the slice start, so a slice that begins a few samples later (a grid that moved
+    # by 0.001 bpm moves a section line by about a millisecond) finds hits a few samples apart and groups them differently.
+    # With a fixed anchor the same audio gives the same hits and groups whatever the grid says.
+    quantum = math.lcm(max(1, int(round(0.001 * sr))), max(1, int(round(0.010 * sr))))
+    a = 0 if sec["first"] else max(0, int((start_t - PRE_S) * sr) // quantum * quantum)
+    b = info.frames if sec["to_end"] else min(info.frames, -(-int((start_t + sec["bars"] * bar_s + POST_S) * sr) // quantum) * quantum)
     if b <= a:
         return {"res": None, "sr": sr}
     x, _ = sf.read(str(path), start=a, stop=b, dtype="float32", always_2d=True)

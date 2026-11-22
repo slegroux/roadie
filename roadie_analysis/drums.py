@@ -91,7 +91,8 @@ def _file_record(p: Path) -> dict:
 
 
 def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, sections: list | None = None,
-               out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None) -> dict:
+               out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None,
+               hit_times: bool = False) -> dict:
     """The roles of every drum stem in `stems_dir`, as the `drums.json` record. Each stem is analysed section by section
     (drumsections.py: sections shorter than 8 bars join their neighbour, no sections means the whole track as one) and the
     groups of the sections are matched by sound, so one role keeps one identity and name over the track; `mark_bleed` and
@@ -112,7 +113,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     stems_dir = Path(stems_dir)
     remote = keymod.pcloud_remote(stems_dir)
     if remote is not None:
-        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs)
+        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs, hit_times)
     stems = find_stems(stems_dir)
     if not stems:
         raise ValueError("no drum stems (drums_<kind>.flac or .wav) in %s" % stems_dir)
@@ -177,7 +178,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
               "legend": LEGEND, "notes": notes, "stems": {}}
     clips = []
     for kind, nm in zip(stems, named):
-        record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s)
+        record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s, hit_times)
         clips += more
     if write:
         base = Path(out) if out else stems_dir
@@ -209,7 +210,7 @@ def _rclone(*args) -> str:
         raise OSError("rclone %s failed: %s" % (args[0], (e.stderr or "").strip() or "exit %s" % e.returncode))
 
 
-def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs) -> dict:
+def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs, hit_times=False) -> dict:
     """`drum_roles` for a study on the pCloud mount, which is never read or written through the FUSE mount (that fills a local
     cache with audio and writes into the archive through a mount): the drum stems, alignment.json and sections.json are copied
     to a temp folder with rclone, analysed there, and the results go back with rclone: the new clips, then drums.json, then
@@ -228,7 +229,7 @@ def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write
                 old = json.loads(_rclone("cat", "%s/drums.json" % remote))
             except ValueError:
                 old = None
-        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs)
+        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs, hit_times)
         if write and not out:
             clips = sorted({r["clip"] for s in rec["stems"].values() for r in s["roles"] if r["clip"]})
             for c in clips:
@@ -285,7 +286,8 @@ def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
     return [len({h["bar"] for h in on if h["step"] == s}) / len(own) if own else 0.0 for s in range(16)], len(own)
 
 
-def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, plan: list, t0: float, bar_s: float):
+def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, plan: list, t0: float, bar_s: float,
+                 hit_times: bool = False):
     by_id = {g["id"]: g for g in res["groups"]}
     info = {g["id"]: g for g in named["groups"]}
     hits = res["hits"]
@@ -323,6 +325,8 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
                "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
+        if hit_times:                                  # onset seconds of the role's hits, for roadie_analysis/drumstability.py
+            rec["hit_times"] = sorted(round(hits[i]["onset_s"], 4) for i in ids)
         roles.append(rec)
         if clip:
             clips.append((kind, rec, np.asarray(clip["audio"], dtype=np.float32), res["sample_rate"]))

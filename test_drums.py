@@ -234,3 +234,18 @@ def test_a_pcloud_study_is_analysed_in_a_temp_folder_and_uploaded_by_rclone_neve
     tmp_used = pathlib.Path(stems_copied[0][2]).parent
     assert not tmp_used.exists()                                                # and the temp folder is gone
     assert sorted(p.name for p in d.iterdir()) == ["alignment.json", "drum_roles", "drums.json", "drums_kick.flac"]
+
+
+def test_roles_do_not_move_when_the_grid_moves_by_a_few_thousandths_of_a_bpm_or_a_millisecond(tmp_path):
+    """The same audio under tempo +-0.005 bpm and t0 +-1 ms: the same roles, and every hit in the same role."""
+    from roadie_analysis import drumstability
+    d = make_stems(tmp_path)
+    for f in ("drums_kick.flac", "drums_toms.flac"):
+        (d / f).unlink()                                                    # one stem is enough: the hats, with three sections
+    runs = drumstability.run(d, ["hh"], jobs=1, only=["tempo+0.005", "tempo-0.005", "t0+0.001", "t0-0.001"])
+    assert len(runs) == 5
+    base = runs.pop("base")
+    for label, rec in runs.items():
+        c = drumstability.compare(base, rec, "hh")
+        assert c["agreement"] == 1.0 and c["named_same"], (label, c)
+        assert all(r["kept"] == 1.0 for r in c["roles"]), (label, c)
