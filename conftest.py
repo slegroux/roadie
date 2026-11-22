@@ -16,8 +16,21 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: takes over 6 s (real audio through hit_groups with regrouping); "
-                                       "deselect with -m \"not slow\", runs by default")
+    config.addinivalue_line("markers", "slow: setup plus call of 5 s or more in CI (real audio through the analysis); "
+                                       "plain pytest runs it, CI selects with -m slow / -m \"not slow\"")
+
+
+# test_drums.py is being edited by another change, so it is marked slow here, by file name, not in the
+# file. Move the mark into the file later (`pytestmark = pytest.mark.slow`) and delete this hook.
+# Its module fixture `made` alone takes about 40 s in CI, and the file is 244 s of the 877 s serial run
+# (CI run 45002429822). test_analysis_drumroles.py already marks its own slow tests.
+_SLOW_FILES = {"test_drums.py"}
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if os.path.basename(str(item.fspath)) in _SLOW_FILES:
+            item.add_marker(pytest.mark.slow)
 
 
 @pytest.fixture(autouse=True)

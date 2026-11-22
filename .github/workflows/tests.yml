@@ -1,21 +1,74 @@
 name: tests
 
-# Docs-only changes skip the suite. Safe because main has no branch protection
-# requiring the `pytest` check (GitHub API: "Branch not protected"); a required
-# check that never runs would block a docs pull request forever. If protection
-# is added later, replace paths-ignore with a job that always runs and skips
-# the heavy steps.
+# Two suites, one job definition (a matrix):
+#   fast  `-m "not slow"`  every push, pull request and night. Whole job under 5 minutes.
+#   slow  `-m slow`        push to main, nightly, and a pull request whose changed files touch code
+#                          the slow tests cover (the `plan` job below decides).
+# Locally a plain `pytest` still runs everything; see "Running the tests" in README.md.
+#
+# Docs-only changes skip everything. Safe because main has no branch protection requiring the
+# `pytest` check (GitHub API: "Branch not protected"); a required check that never runs would
+# block a docs pull request forever. If protection is added later, replace paths-ignore with a
+# job that always runs and skips the heavy steps.
 on:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
     paths-ignore: ["**/*.md", "docs/**"]
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
-  pytest:
+  # Chooses the matrix. A pull request gets the slow suite only when a changed file is one the slow
+  # test files import (directly or through another module, found with an import walk of
+  # test_drums, test_analysis_drumroles, test_analysis_profile, test_bench_roles,
+  # test_analysis_equivalence, test_roadie_mcp and test_sections), their golden data, the
+  # requirements, conftest.py, this workflow, or a test file that holds slow tests. Wide on
+  # purpose: when in doubt it runs. A new module imported by a slow test must be added here.
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the suites
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # min_ran is the guard's floor: tests that actually ran (not skipped), about 10 % under
+          # the count when set (fast 901 ran of 908, slow 94).
+          fast='{"suite":"fast","marker":"not slow","min_ran":800,"timeout":8}'
+          slow='{"suite":"slow","marker":"slow","min_ran":85,"timeout":25}'
+          run_slow=yes
+          if [ "$EVENT" = pull_request ]; then
+            files=$(git diff --name-only "origin/$BASE_REF"...HEAD) || files=ALL
+            echo "changed files:"; echo "$files"
+            if [ "$files" != ALL ] && ! echo "$files" | grep -Eq '^(roadie_analysis/|analysis_golden/|mcp_golden/|\.github/|requirements[a-z-]*\.txt$|conftest\.py$|roadie$|(arrangement|als_writer|batch|beat_aligner|bench_roles|benchmark|fake_live|keyfill|live_batch|roadie_drums|roadie_mcp|sections|session_view|stems2live|study|studyrename)\.py$|test_(drums|analysis_drumroles|analysis_profile|bench_roles|analysis_equivalence|roadie_mcp|sections)\.py$)'; then
+              run_slow=no
+            fi
+          fi
+          echo "slow suite: $run_slow"
+          if [ "$run_slow" = yes ]; then
+            echo "matrix={\"include\":[$fast,$slow]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[$fast]}" >> "$GITHUB_OUTPUT"
+          fi
+
+  pytest:
+    needs: plan
+    name: pytest (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -76,9 +129,11 @@ jobs:
           uv pip install --python .venv/bin/python --no-build-isolation \
             "madmom @ git+https://github.com/CPJKU/madmom"
 
-      # pytest-xdist, one worker per core (4 on a public repo's runner; nproc is printed).
+      # pytest-xdist, one worker per core: `nproc --all`, because plain `nproc` honours
+      # OMP_NUM_THREADS=1 (set below) and returned 1. A public repo's runner has 4.
       # --dist loadfile sends every test of a file to one worker: the files load modules by
-      # path, patch sys.modules and share module-level helpers, so a file stays together.
+      # path, patch sys.modules and share module-level helpers and module fixtures (test_drums.py
+      # builds a 40 s `made` fixture once), so a file stays together.
       # --max-worker-restart=0: a worker that dies (a numba segfault did, once) ends the run
       # with the crash in the log instead of being replaced and dragging to the time limit.
       # --durations=40 prints the slowest tests at the end. xdist merges all workers into the
@@ -86,15 +141,17 @@ jobs:
       # One thread per worker: numpy/BLAS/OpenMP/numba each start a pool the size of the
       # machine, and 4 workers x 4 threads oversubscribe 4 cores. Each worker also gets its
       # own numba cache (conftest.py), because a shared cold cache crashed workers.
-      - name: Run tests
+      - name: Run tests (${{ matrix.suite }})
         env:
           OMP_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
           NUMBA_NUM_THREADS: "1"
+          MARKER: ${{ matrix.marker }}
         run: |
-          echo "runner cores: $(nproc)"
-          .venv/bin/python -m pytest -q -rs -n "$(nproc)" --dist loadfile --max-worker-restart=0 --durations=40 --junitxml=junit.xml
+          cores=$(nproc --all)
+          echo "runner cores: $cores"
+          .venv/bin/python -m pytest -q -rs -n "$cores" --dist loadfile --max-worker-restart=0 --durations=40 -m "$MARKER" --junitxml=junit.xml
 
       # THE POINT OF THIS STEP. Every test here is gated on something — the real
       # stems, aubiotrack, madmom — so a missing dependency does not fail the
@@ -103,6 +160,8 @@ jobs:
       # a vacuously green CI is the same failure in a different costume.
       - name: Guard against a vacuously green run
         if: always()
+        env:
+          MIN_RAN: ${{ matrix.min_ran }}
         run: |
           python3 - <<'PY'
           import os, sys, xml.etree.ElementTree as ET
@@ -117,7 +176,7 @@ jobs:
           skipped = int(ts.get("skipped", 0))
           ran = total - skipped
           print(f"{ran} ran, {skipped} skipped, {total} collected")
-          MIN_RAN = 140          # a floor, not the count: only the stem- and madmom-gated tests may skip
+          MIN_RAN = int(os.environ["MIN_RAN"])   # per suite, from the matrix: a floor, not the count. A marker typo that deselects everything fails here
           if ran < MIN_RAN:
               sys.exit(f"::error::only {ran} tests actually ran (expected >= {MIN_RAN}). "
                        "A dependency is missing and the suite is passing by default.")

@@ -1235,8 +1235,25 @@ measures the tempo from the audio; do not feed the filename BPM back in as
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q                      # everything
+.venv/bin/python -m pytest -q -m "not slow"        # fast tests only
+.venv/bin/python -m pytest -q -m slow              # slow tests only
+.venv/bin/python -m pytest -q -n 4 --dist loadfile # in parallel (pytest-xdist; keep each file on one worker)
 ```
+
+A test is marked `slow` (`@pytest.mark.slow`, or `pytestmark` for a whole file) when its
+setup plus call took 5 s or more in CI: real audio through the analysis. A plain `pytest`
+runs both kinds. What CI runs (`.github/workflows/tests.yml`):
+
+| Event | Fast | Slow |
+|---|---|---|
+| Pull request that changes only `*.md` or `docs/` | skipped | skipped |
+| Pull request | always | only if a changed file is code the slow tests import, their golden data, the requirements, `conftest.py`, the workflow or a slow test file |
+| Push to `main`, and nightly at 03:17 UTC | yes | yes |
+
+When you add a module that a slow test imports, add it to the filter in the workflow's
+`plan` job. When you add a slow test, mark it; the job's floor on tests actually run
+catches a marker typo that deselects everything.
 
 The real-stem tests need a split of a reference track, which is not
 redistributable and never committed. Point `ROADIE_REF_STEMS` at a stems folder

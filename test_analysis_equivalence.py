@@ -24,7 +24,11 @@ import sys
 import tempfile
 
 import numpy as np
+import pytest
 import soundfile as sf
+
+# Slow throughout (a module fixture or the analyses dominate): CI runs this file in the slow job.
+pytestmark = pytest.mark.slow
 
 HERE = pathlib.Path(__file__).resolve().parent
 GOLDEN = HERE / "analysis_golden"
