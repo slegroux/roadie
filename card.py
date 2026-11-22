@@ -118,7 +118,8 @@ def transition_lines(transitions, bar_of, flag=""):
     for t in transitions:
         where = "- Bar %s%s, the bar before **%s**" % (_fmt_bar(bar_of(t["bar"])), flag, t["into"])
         if t["kind"] == "fill" and t.get("median_hits") == 0:
-            out.append("%s: drums come in (%d hits; the section had none in its usual bar)." % (where, t["last_hits"]))
+            out.append("%s: drums come in (%d hit%s; the section had none in its usual bar)." % (
+                where, t["last_hits"], "" if t["last_hits"] == 1 else "s"))
         elif t["kind"] == "fill":
             out.append("%s: a fill: %s the drum hits of the section's usual bar." % (where, _ratio(t["ratio"])))
         else:
