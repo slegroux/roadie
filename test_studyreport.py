@@ -6,6 +6,7 @@ import os
 import sys
 
 import pytest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -137,14 +138,34 @@ def test_a_fresh_micro_json_has_no_caveat_and_a_changed_input_makes_it_stale(tmp
     assert any("micro.json is stale" in c and "re-run roadie micro" in c for c in d["caveats"])
 
 
+def test_micro_stale_reads_drums_json_through_read_text_not_the_study_record(tmp_path, monkeypatch):
+    folder = make_study(tmp_path, micro=dict(micro_record(), drums_made="2026-11-20T09:00:00+0100"))
+    st = study.load_study(str(folder), tmp_path)
+    st.layers["drums"].data = {"made": "2026-11-20T09:00:00+0100"}      # what a lagging mount would show: no change
+    read = []
+    real = studyreport.read_text
+
+    def spy(path):
+        read.append(Path(path).name)
+        return json.dumps({"made": "2026-11-21T10:00:00+0100"}) if Path(path).name == "drums.json" else real(path)
+
+    monkeypatch.setattr(studyreport, "read_text", spy)
+    why = studyreport.micro_stale(st, json.loads((folder / "Track_124bpm_stems" / "micro.json").read_text()))
+    assert "drums.json" in read and any("older drums.json" in w and "2026-11-21T10:00:00" in w for w in why)
+
+
 def test_an_empty_cell_says_why(tmp_path, capsys):
     mc = micro_record()
     mc["sections"][0]["bass"] = dict(mc["sections"][0]["bass"], rhythm=None, rhythm_steps=None, rhythm_share=None,
                                      bars_with_onsets=0, on_step1_share=None, on_offbeat_8ths_share=None, repeat_bars=None,
                                      changes_at_bars=None, notes=["no onset on the grid in the bars it plays",
                                                                   "repeat: too few playing bars"])
+    mc["sections"][1]["synths"] = dict(mc["sections"][1]["synths"], rhythm=None, rhythm_share=None, bars_with_onsets=0,
+                                       notes=["the synths stem holds leads and pads together", "no onset on the grid in "
+                                              "the bars it plays"])
     md = report(make_study(tmp_path, micro=mc), capsys)
     assert "| - (no onset on the grid in the bars it plays) | - |" in md and "- (too few playing bars)" in md
+    assert "| Breakdown | 8 of 8 | - (no onset on the grid in the bars it plays) |" in md     # not the stem-wide synths note
     assert "- Drop 1: no onset on the grid in the bars it plays; repeat: too few playing bars" in md
 
 

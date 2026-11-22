@@ -396,8 +396,9 @@ def micro_markdown(mc: dict | None) -> list[str]:
     # synths
     L += ["", "### Synths", "", "Leads and pads are one stem: the rhythm and the chords are of both together.", "",
           "Chords change when the root does (VII, VII5 and VIIsus2 in a row are one VII). The progression is a loop of 2 to 4 "
-          "chords, written on the same phase in every section, with the share of the changes that follow it when that is "
-          "not all of them; with no loop, every change in order.", "",
+          "chords, with the share of the changes that follow it when that is not all of them; with no loop, every change in "
+          "order. A loop is written on the phase most sections of the track start it on, so it need not begin on a "
+          "section's first chord (micro.json keeps the section's own rotation as section_progression).", "",
           "| Section | Bars playing | Rhythm (share of bars with onsets) | Onsets/bar | Level dips | Progression | Bars per chord | Chords "
           "| Held (90 % of bars) | Repeat |", "|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
@@ -459,7 +460,8 @@ DIP_DB = 6.0
 def _rhythm(x, f) -> str:
     """The rhythm cell: the pattern, its share and of how many bars, or `-` with the reason."""
     if not x.get("rhythm"):
-        return "- (%s)" % ((x.get("notes") or ["no rhythm"])[0])
+        why = [n for n in x.get("notes") or [] if n.startswith(("no onset", "silent"))]
+        return "- (%s)" % (why or ["no rhythm"])[0]
     return "%s%s (%s of %s)" % (_code(x["rhythm"]), f, _pct(x["rhythm_share"]), x.get("bars_with_onsets", "?"))
 
 
