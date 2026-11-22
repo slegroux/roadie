@@ -6,8 +6,9 @@
 #   roadie open <stems_dir> [opts]   new Live project from stems       (stems2als.sh)
 #   roadie sections <stems> [opts]   detect song sections              (sections.py)
 #   roadie drums <study | stems_dir> [--jobs N] [--json] [--no-write]  drum roles per stem and section (roadie_drums.py)
-#   roadie study list | show <name> [--json] | tag <name> --key K  studies and their saved analyses (study.py)
+#   roadie study list | show <name> [--json] | tag <name> --key K | report <name> [--write] [--json]  studies, their saved analyses, one study's report (study.py, studyreport.py)
 #   roadie key <study|stems> [--json]  estimate the key from the bass and synths stems (roadie_analysis/key.py)
+#   roadie micro <study|stems> [--json] [--no-write]  bass, synths, vocal and drum patterns per section (roadie_analysis/micro.py)
 #   roadie scenes <stems_dir> [opts] build a Session View grid         (session_view.py)
 #   roadie als <stems_dir> [opts]    write a Live project file, no Live needed (als_writer.py)
 #   roadie arrangement read --scenes A-B [--json] [--metrics] | ref <study>   Session scenes as an arrangement table; a study's structure (arrangement.py)
@@ -134,7 +135,7 @@ case "$cmd" in
   open)     run_logged open     "$(first_dir "$@")" "$REPO/stems2als.sh" "$@" ;;
   sections) run_logged sections "$(first_dir "$@")" "$REPO/sections.py" "$@" ;;
   study)
-    # Read-only except `tag`, which writes one study.json; not logged.
+    # Read-only except `tag`, which writes one study.json, and `report --write`, which writes report.md; not logged.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
     exec "$PY" "$REPO/study.py" "$@" ;;
   drums)
@@ -145,6 +146,10 @@ case "$cmd" in
     # Read-only (a pCloud study's two stems are copied to a temp folder and deleted); not logged.
     PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
     exec "$PY" "$REPO/roadie_analysis/key.py" "$@" ;;
+  micro)
+    # Writes micro.json into the stems folder (a pCloud study's stems are copied to a temp folder and deleted); not logged.
+    PY="$REPO/.venv/bin/python"; [[ -x "$PY" ]] || PY=python3
+    exec "$PY" "$REPO/roadie_analysis/micro.py" "$@" ;;
   scenes)   run_logged scenes   "$(first_dir "$@")" "$REPO/session_view.py" "$@" ;;
   als)      run_logged als      "$(first_dir "$@")" "$REPO/als_writer.py" "$@" ;;
   arrangement) run_logged arrangement "" "$REPO/arrangement.py" "$@" ;;
