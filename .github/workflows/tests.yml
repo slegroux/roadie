@@ -20,7 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # enable-cache keeps uv's download and built-wheel cache between runs, keyed on the
+      # requirements files. Cuts the dependency install and the madmom build (a git source
+      # built into a wheel); the cache is restored on pull requests from this repo's branches.
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
 
       - name: Set up Python 3.13
         run: uv python install 3.13
