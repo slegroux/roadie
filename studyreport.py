@@ -584,7 +584,9 @@ def track_row(st: studymod.Study, d: dict) -> dict:
     bass = [(s["bass"], s["bars"]) for s in msecs if s.get("bass") and s["bass"].get("bars_playing")]
     row.update(bass_movement=_majority((b["movement"], b["bars_playing"]) for b, _ in bass),
                bass_style=_majority((b["style"], b["bars_playing"]) for b, _ in bass),
-               bass_duty=_median([b["duty"] for b, _ in bass]),
+               bass_duty=(round(sum(b["duty"] * b["bars_playing"] for b, _ in bass if b["duty"] is not None)
+                               / sum(b["bars_playing"] for b, _ in bass if b["duty"] is not None), 2)
+                          if any(b["duty"] is not None for b, _ in bass) else None),     # weighted by the bars it plays
                bass_onsets=_median([b["onsets_per_bar"] for b, _ in bass]),
                bass_on1=_median([b["on_step1_share"] for b, _ in bass]),
                bass_rhythm=max(bass, key=lambda x: x[0].get("bars_with_onsets") or 0)[0]["rhythm"] if bass else None)
@@ -603,6 +605,8 @@ def track_row(st: studymod.Study, d: dict) -> dict:
             if r.get("named"):
                 roles.setdefault(r["role"], set()).add(r["pattern"])
     row["drum_roles"] = {k: sorted(v) for k, v in roles.items()}
+    row["has_drums"] = any(s.get("drums") is not None for s in msecs)
+    row["key_reliable"] = bool(d["key"]) and (d["key"] or {}).get("source") != "detected"
     row["missing"] = d["missing"]
     row["caveats"] = [c for c in d["caveats"] if c.startswith("micro:")]
     return row
@@ -642,7 +646,7 @@ def artist_data(artist: str, roots=None) -> dict:
             st = studymod.load_study(str(r.root), roots)
             mc, why = read_micro(st)
             rows.append(track_row(st, report_data(st, mc, why)))
-        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.CalledProcessError) as e:
             unreadable.append({"title": r.title, "why": "%s: %s" % (type(e).__name__, e)})
     for row in rows:
         row["n_sections"] = len(row["sections"]) or None
@@ -662,53 +666,78 @@ def artist_data(artist: str, roots=None) -> dict:
         if x["camelot"]:
             keys.setdefault(x["camelot"], []).append(x["title"])
     return {"kind": ARTIST_KIND, "version": 1, "artist": refs[0].artist, "folder": str(refs[0].root.parent),
-            "rule": BAR1_RULE, "rows": rows, "aggregates": aggs, "keys": keys, "shared": shared_patterns(rows),
+            "rule": BAR1_RULE, "rows": rows, "aggregates": aggs, "keys": keys, "patterns": pattern_kinds(rows),
             "unreadable": unreadable}
 
 
-def shared_patterns(rows: list[dict]) -> list[dict]:
-    """Patterns at least 2 tracks share: [{scope, kind, pattern, tracks, bar1}], bar-1-dependent ones (16-step lines)
-    from tracks with a reliable grid only."""
-    groups, shown = {}, {}
+def _kick_class(bars):
+    return next(n for lo, n in reversed(KICKOUT_CLASSES) if bars >= lo)
 
-    def add(scope, kind, pattern, title, bar1=False, as_written=None):
-        groups.setdefault((scope, kind, pattern, bar1), []).append(title)
-        if as_written:
-            shown.setdefault(pattern, []).append(as_written)
 
-    for x in rows:
-        t = x["title"]
-        if x["bass_before_drop"] is not None:
-            add("macro", "bass entry", "bass in before Drop 1" if x["bass_before_drop"] else "bass held until Drop 1", t)
-        if x["kickout_bars"] is not None:
-            add("macro", "longest kick-out", next(n for lo, n in reversed(KICKOUT_CLASSES) if x["kickout_bars"] >= lo), t)
-        if x["drop_ratio"] is not None:
-            r = x["drop_ratio"]
-            add("macro", "Drop 2 / Drop 1", "Drop 2 shorter (under 0.9)" if r < 0.9 else "Drop 2 longer (over 1.1)" if r > 1.1
-                else "about equal (0.9-1.1)", t)
-        seen = set()
-        for loop in x["loops"]:
-            rot = micro_rotation(loop.split())
-            if rot not in seen:
-                seen.add(rot)
-                add("micro", "chord loop (numerals, any rotation)", rot, t, as_written=loop)
-        if x["bars_per_chord"] is not None:
-            add("micro", "bars per chord (median)", "%g" % x["bars_per_chord"], t)
-        if x["bass_movement"]:
-            add("micro", "bass type", "%s, %s" % (x["bass_movement"], x["bass_style"]), t)
-        for role, lines in x["drum_roles"].items():
-            add("micro", "drum role", role, t)
-            if x["reliable"]:
-                for line in lines:
-                    add("micro", "drum role pattern", "%s `%s`" % (role, line), t, True)
-        if x["reliable"] and x["bass_rhythm"]:
-            add("micro", "bass rhythm", "`%s`" % x["bass_rhythm"], t, True)
-    def name(p):                                        # a loop as most of its tracks write it, not its sorting key
-        return max(set(shown[p]), key=lambda w: (shown[p].count(w), w)) if p in shown else p
+def _drop_class(r):
+    return "Drop 2 shorter (under 0.9)" if r < 0.9 else "Drop 2 longer (over 1.1)" if r > 1.1 else "about equal (0.9-1.1)"
 
-    out = [{"scope": sc, "kind": k, "pattern": name(p), "tracks": sorted(set(ts)), "bar1": b}
-           for (sc, k, p, b), ts in groups.items() if len(set(ts)) >= 2]
-    return sorted(out, key=lambda g: (g["scope"], g["kind"], -len(g["tracks"]), g["pattern"]))
+
+# (scope, kind, the layer a track needs, needs a reliable grid, needs a reliable key, several values a track, value(s))
+PATTERN_KINDS = (
+    ("macro", "bass entry", "activity", False, False, False,
+     lambda x: None if x["bass_before_drop"] is None else
+     "bass in before Drop 1" if x["bass_before_drop"] else "bass held until Drop 1"),
+    ("macro", "longest kick-out", "activity", False, False, False,
+     lambda x: None if x["kickout_bars"] is None else _kick_class(x["kickout_bars"])),
+    ("macro", "Drop 2 / Drop 1", "Drop 1 and Drop 2 labels", False, False, False,
+     lambda x: None if x["drop_ratio"] is None else _drop_class(x["drop_ratio"])),
+    ("micro", "chord loop (numerals, any rotation)", "micro", False, True, True,
+     lambda x: None if not x["micro"] else (sorted({micro_rotation(lp.split()) for lp in x["loops"]}) or ["no loop"])),
+    ("micro", "bars per chord (median)", "micro", False, False, False,
+     lambda x: None if x["bars_per_chord"] is None else "%g" % x["bars_per_chord"]),
+    ("micro", "bass type", "micro", False, False, False,
+     lambda x: "%s, %s" % (x["bass_movement"], x["bass_style"]) if x["bass_movement"] else None),
+    ("micro", "drum role", "drums", False, False, True,
+     lambda x: sorted(x["drum_roles"]) or ["no named role"] if x["has_drums"] else None),
+    ("micro", "drum role pattern (16 steps)", "drums", True, False, True,
+     lambda x: sorted("%s `%s`" % (r, ln) for r, lines in x["drum_roles"].items() for ln in lines) or ["no named role"]
+     if x["has_drums"] else None),
+    ("micro", "bass rhythm (16 steps)", "micro", True, False, False,
+     lambda x: "`%s`" % x["bass_rhythm"] if x["bass_rhythm"] else None),
+)
+
+
+def pattern_kinds(rows: list[dict]) -> list[dict]:
+    """Each kind of pattern across the tracks, as a full distribution: {scope, kind, of (the tracks that qualify: with the
+    layer, and a reliable grid or key where the kind needs one), values [{pattern, tracks}] by count, left_out {reason:
+    [titles]}, qualifiers}. A 16-step line needs a reliable grid; a chord loop in numerals a key that is not only
+    detected (a detected key is to harmony what a chance-level downbeat is to bar 1)."""
+    out = []
+    for scope, kind, layer, grid, key, multi, value in PATTERN_KINDS:
+        left = {"no %s" % layer: [], "unreliable grid": [], "detected or no key": []}
+        vals, of = {}, []
+        shown = {}
+        for x in rows:
+            v = value(x)
+            if v is None:
+                left["no %s" % layer].append(x["title"])
+                continue
+            if grid and not x["reliable"]:
+                left["unreliable grid"].append(x["title"])
+                continue
+            if key and not x["key_reliable"]:
+                left["detected or no key"].append(x["title"])
+                continue
+            of.append(x["title"])
+            for p in (v if multi else [v]):
+                vals.setdefault(p, []).append(x["title"])
+            if kind.startswith("chord loop"):
+                for lp in x["loops"]:
+                    shown.setdefault(micro_rotation(lp.split()), []).append(lp)
+        name = (lambda p: max(set(shown[p]), key=lambda w: (shown[p].count(w), w)) if p in shown else p)
+        quals = ["tracks with %s" % layer] + (["a reliable grid"] if grid else []) + (["a key that is not only detected"]
+                                                                                       if key else [])
+        out.append({"scope": scope, "kind": kind, "of": len(of), "qualifiers": ", ".join(quals), "multi": multi,
+                    "values": sorted(({"pattern": name(p), "tracks": sorted(ts)} for p, ts in vals.items()),
+                                     key=lambda g: (-len(g["tracks"]), g["pattern"])),
+                    "left_out": {k: v for k, v in left.items() if v}})
+    return out
 
 
 def micro_rotation(loop: list[str]) -> str:
@@ -719,6 +748,7 @@ def micro_rotation(loop: list[str]) -> str:
 
 def artist_markdown(a: dict) -> str:
     rows = a["rows"]
+    unread = ", %d unreadable" % len(a["unreadable"]) if a["unreadable"] else ""
     L = ["# %s: artist report" % a["artist"], "",
          "Generated by `roadie study report --artist` from the %d analysed studies' records; a rebuild overwrites it "
          "(notes go to the vault). Each track's own report is `report.md` in its folder." % len(rows), "", a["rule"], "",
@@ -751,19 +781,29 @@ def artist_markdown(a: dict) -> str:
             left.append("unreliable grid: " + ", ".join(g["left_out_grid"]))
         if g["no_value"]:
             left.append("no value: " + ", ".join(g["no_value"]))
-        L.append("| %s | %s | %s | %s | %d of %d | %s |" % (
+        L.append("| %s | %s | %s | %s | %d of %d%s | %s |" % (
             g["name"], "bar-1-dependent" if g["bar1"] else "shift-invariant",
             _num(g["median"], fmt) if g["used"] else "- (no track)",
             ("%s-%s" % (_num(g["min"], fmt), _num(g["max"], fmt))) if g["used"] else "-",
-            g["used"], g["of"], "; ".join(left) or "-"))
+            g["used"], g["of"], unread, "; ".join(left) or "-"))
     L += ["", "Keys: " + ", ".join("%s (%s)" % (cam, ", ".join(ts)) for cam, ts in sorted(a["keys"].items())) if a["keys"] else "Keys: none recorded"]
-    L += ["", "## Shared patterns", "", "Patterns two or more tracks share. Drum-role names and chord loops are compared "
-          "on every track; 16-step lines (drum patterns, bass rhythms) only on tracks with a reliable grid.", "",
-          "| Scope | Kind | Pattern | Tracks |", "|---|---|---|---|"]
-    if not a["shared"]:
-        L.append("| - | - | none shared by 2 tracks | - |")
-    for g in a["shared"]:
-        L.append("| %s | %s | %s | %d: %s |" % (g["scope"], g["kind"], g["pattern"], len(g["tracks"]), ", ".join(g["tracks"])))
+    L += ["", "## Patterns across tracks", "",
+          "Each kind in full, out of the tracks that qualify for it (the layer it needs, and a reliable grid for 16-step "
+          "lines, a key that is not only detected for chord numerals). With this few tracks a coarse kind (two to five "
+          "classes) puts two tracks in one class by construction: a class is a finding only against the library's rate "
+          "for it.", "", "| Scope | Kind | Out of | Distribution | Left out |", "|---|---|---|---|---|"]
+    for g in a["patterns"]:
+        left = "; ".join("%s: %s" % (k, ", ".join(v)) for k, v in g["left_out"].items()) or "-"
+        if g["of"] < 2:
+            dist = "fewer than 2 tracks qualify (%d): not compared" % g["of"]
+        elif not g["multi"] and len(g["values"]) == 1:
+            dist = "all %d: %s" % (g["of"], g["values"][0]["pattern"])
+        else:
+            dist = "; ".join("%s: all %d" % (v["pattern"], g["of"]) if len(v["tracks"]) == g["of"] else
+                             "%s: %d of %d (%s)" % (v["pattern"], len(v["tracks"]), g["of"], ", ".join(v["tracks"]))
+                             for v in g["values"])
+        L.append("| %s | %s | %d of %d%s (%s) | %s | %s |" % (
+            g["scope"], g["kind"], g["of"], len(rows), unread, g["qualifiers"], dist, left))
     L += ["", "## Missing layers", ""]
     miss = [(x["title"], m) for x in rows for m in x["missing"]]
     if miss:

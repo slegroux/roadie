@@ -272,16 +272,57 @@ def test_artist_medians_leave_out_unreliable_grids_only_for_bar_1_dependent_fiel
     assert "Bar-1-dependent ones" in md and "| Three (old stems) | 124 | Am 8A (online) | chance-level † |" in md
 
 
-def test_artist_shared_patterns_say_which_tracks(artist_root):
-    shared = {(g["kind"], g["pattern"]): g for g in studyreport.artist_data("Artist")["shared"]}
-    loops = [g for (k, p), g in shared.items() if k == "chord loop (numerals, any rotation)"]
-    assert [(g["pattern"] in ("i VI", "VI i"), g["tracks"]) for g in loops] == [(True, ["One", "Two"])]   # two rotations
-    assert shared[("longest kick-out", "8-15 bars")]["tracks"] == ["Four", "One", "Three", "Two"]
-    assert shared[("bass entry", "bass held until Drop 1")]["tracks"] == ["Four", "One", "Three", "Two"]
-    assert shared[("drum role", "hh offbeat")]["tracks"] == ["One", "Three", "Two"]          # a name: every track
-    line = shared[("drum role pattern", "hh offbeat `..x. ..x. ..x. ..x.`")]
-    assert line["tracks"] == ["One", "Two"] and line["bar1"]                                  # a 16-step line: reliable only
-    assert shared[("bass rhythm", "`o..o o... o..o o...`")]["tracks"] == ["One", "Two"]
+def _kinds(a):
+    return {g["kind"]: g for g in a["patterns"]}
+
+
+def test_artist_patterns_give_every_class_out_of_the_tracks_that_qualify(artist_root):
+    k = _kinds(studyreport.artist_data("Artist"))
+    loops = k["chord loop (numerals, any rotation)"]
+    assert loops["of"] == 3 and [(v["pattern"] in ("i VI", "VI i"), v["tracks"]) for v in loops["values"]] == [
+        (True, ["One", "Two"]), (False, ["Three"])]                          # the 1-track class is listed too
+    assert loops["left_out"] == {"no micro": ["Four"]}
+    assert k["longest kick-out"]["of"] == 4 and k["longest kick-out"]["values"] == [
+        {"pattern": "8-15 bars", "tracks": ["Four", "One", "Three", "Two"]}]
+    assert k["drum role"]["of"] == 3 and k["drum role"]["left_out"] == {"no drums": ["Four"]}
+    line = k["drum role pattern (16 steps)"]
+    assert line["of"] == 2 and line["left_out"]["unreliable grid"] == ["Three"] and line["values"][0]["tracks"] == ["One", "Two"]
+
+
+def test_a_detected_key_leaves_a_track_out_of_the_chord_loops(artist_root):
+    marker = artist_root / "Artist" / "Two [124 Am 8A]" / "study.json"
+    marker.write_text(json.dumps({"kind": "study_marker", "key": "A minor", "key_source": "detected", "key_confidence": 0.07}))
+    loops = _kinds(studyreport.artist_data("Artist"))["chord loop (numerals, any rotation)"]
+    assert loops["of"] == 2 and loops["left_out"]["detected or no key"] == ["Two"]
+    assert [v["tracks"] for v in loops["values"]] == [["One"], ["Three"]]
+
+
+def test_artist_markdown_states_denominators_and_too_few_to_compare(artist_root):
+    md = studyreport.artist_markdown(studyreport.artist_data("Artist"))
+    assert "| macro | longest kick-out | 4 of 4 (tracks with activity) | all 4: 8-15 bars | - |" in md
+    assert "| micro | drum role pattern (16 steps) | 2 of 4 (tracks with drums, a reliable grid) |" in md
+    assert "unreliable grid: Three; no drums: Four" in md or "no drums: Four; unreliable grid: Three" in md
+    assert ": 2 of 3 (One, Two)" in md and "by construction" in md
+    (artist_root / "Artist" / "One [124 Am 8A]" / "Track_124bpm_stems" / "alignment.json").write_text(json.dumps({"result": {
+        "bpm": 124.0, "downbeat_sec": 0.5, "downbeat_verdict": "chance-level", "downbeat_confidence": 0.3}}))
+    md = studyreport.artist_markdown(studyreport.artist_data("Artist"))
+    assert "fewer than 2 tracks qualify (1): not compared" in md
+
+
+def test_an_rclone_failure_in_one_study_does_not_stop_the_artist_report(artist_root, monkeypatch):
+    import subprocess
+    real = studyreport.read_micro
+
+    def flaky(st):
+        if st.title == "Two":
+            raise subprocess.CalledProcessError(1, ["rclone", "cat"], stderr="pcloud: timeout")
+        return real(st)
+
+    monkeypatch.setattr(studyreport, "read_micro", flaky)
+    a = studyreport.artist_data("Artist")
+    assert [u["title"] for u in a["unreadable"]] == ["Two"] and len(a["rows"]) == 3
+    md = studyreport.artist_markdown(a)
+    assert "3 of 3, 1 unreadable" in md and "Two: could not be read" in md
 
 
 def test_artist_report_lists_missing_layers_and_writes_artist_md(artist_root, capsys):

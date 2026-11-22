@@ -389,9 +389,15 @@ was made from) and to re-run `roadie micro`.
 puts every analysed study of an artist side by side in `<Artist>/_artist.md`, written like `report.md` (rclone and a
 read-back on pCloud). It has one row per track (bpm, key and source, grid verdict, length, sections, Drop 2 / Drop 1,
 the longest kick-out, the bass entry, and from micro.json the bass type and duty, the synth loop with bars per chord,
-and the vocal share), then medians and ranges, then the patterns two or more tracks share (bass held until Drop 1 or
-not, the kick-out's length class, Drop 2 against Drop 1, chord loops as numerals up to rotation, bars per chord, the
-bass type, drum-role names), each with its tracks, and the layers each track lacks with the command that makes them.
+and the vocal share), then medians and ranges, then each kind of pattern in full across the tracks (bass held until
+Drop 1 or not, the kick-out's length class, Drop 2 against Drop 1, chord loops as numerals up to rotation, bars per
+chord, the bass type, drum-role names and lines, bass rhythms): every class with `N of M` and its tracks, `M` being the
+tracks that qualify (the layer it needs, a reliable grid for 16-step lines, a key that is not only `detected` for chord
+numerals: a detected key is to harmony what a chance-level downbeat is to bar 1; the key module has no confidence
+threshold, so every detected key counts as one), the tracks left out and why, and "not compared" when fewer than 2
+qualify. With a handful of tracks a coarse kind puts two in one class by construction: a class is a finding only
+against the library's rate. Then the layers each track lacks, with the command that makes them; a study that cannot be
+read is listed and counted (`N of M, K unreadable`).
 Aggregates are of two kinds. **Bar-1-dependent** ones leave out tracks with an unreliable grid (chance-level
 downbeat, warp map, no alignment.json): where section boundaries fall in their 8-bar phrase, 16-step patterns (bass
 rhythms, drum-role lines), the bass's share on step 1, vocal phrases on beat 1. **Shift-invariant** ones use every
@@ -399,7 +405,8 @@ track, since a downbeat a beat or two off does not move them: section and kick-o
 chord, onsets per bar, duty, pedal or moving, chord loops as numerals, and positions given as a share of the track
 (they move by under a bar). Every row says how many tracks it used and which it left out.
 
-Known limits: a section that switches from one chord loop to another halfway gets one progression (the one that fits
+Known limits: the artist report counts study folders, so the same song kept under two folders (a re-split beside the
+original) counts twice; a section that switches from one chord loop to another halfway gets one progression (the one that fits
 best, or every change); drums.json joins sections under 8 bars, so both rows of a joined pair show the same drum
 roles (count them once when adding up); pyin's frames are 186 ms and centred, so a note's pitch is read with up to
 68 ms of the note before it in the first frames (the median over the note damps it).
