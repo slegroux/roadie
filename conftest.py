@@ -71,3 +71,21 @@ def _own_heavy_job_lock(tmp_path_factory):
     mp.delenv("ROADIE_NO_QUEUE", raising=False)
     yield
     mp.undo()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _own_hit_cache_for_the_session(tmp_path_factory):
+    """Module- and session-scoped fixtures run before any test's own folder exists: they get one temp cache for the
+    session, never ~/Library/Caches/roadie/drum-hits. `ROADIE_NO_CACHE` is cleared so a developer's shell cannot turn the cache off under the tests."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("ROADIE_CACHE_DIR", str(tmp_path_factory.mktemp("hitcache")))
+    mp.delenv("ROADIE_NO_CACHE", raising=False)
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _own_hit_cache(tmp_path, monkeypatch):
+    """Each test gets its own cache of detected hits, so no test reads another's entries or the real cache (workers the test
+    spawns inherit the variable)."""
+    monkeypatch.setenv("ROADIE_CACHE_DIR", str(tmp_path / "hit-cache"))

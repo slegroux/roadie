@@ -10,7 +10,7 @@ and `mark_bleed` marks the groups that are another stem's sound leaking in.
 
 ## Running it: `roadie drums`
 
-    roadie drums <study name | stems_dir> [--jobs N] [--json] [--no-write]
+    roadie drums <study name | stems_dir> [--jobs N] [--json] [--no-write] [--no-cache]
 
 `roadie_analysis.drums.drum_roles` analyses every `drums_<kind>` stem of a stems folder (`drums.flac`, the sum, is not
 one) **section by section** and writes the roles. The MCP tool `drum_roles(stems, tempo, t0, sections, out, jobs,
@@ -21,6 +21,23 @@ hits, the run takes minutes on one core, and the grouping moves with the sample 
 as eleven groups, none stable enough to name). A section holds a few dozen to a few hundred hits: it is grouped on its own
 (a section of at most 32 hits of a stem is grouped exactly: "stable by construction"), and the (stem, section) jobs run in
 a process pool (`--jobs N`, default the fast cores: the performance cores on macOS, every core elsewhere).
+
+**The cache.** What a (stem, section) job finds depends only on its slice's samples, the sample rate and the detector's
+settings: the hits (onsets, cuts, levels, leads, statuses), their groups (members, medoids, distances, stability,
+separation, overlapped hits assigned to a group) and, at the matching, each group's sound reading (`group_reading`).
+The tempo, `t0` and the section lines enter only afterwards, in what `hit_groups` does with the grid: each hit's bar,
+16th, offset and `on_grid`, the tails that sound through grid lines, the patterns, and the clean hit of each group, which are
+recomputed every time. Slices start and end on a multiple of a fixed quantum of samples (see below), so the same audio gives a
+sample-identical slice for any grid that does not move a section line over a quantum boundary. `grid_onsets` looks for hits at
+the grid's lines, so a run with it is never cached. The records of a cold and a warm run are equal apart from the timing fields.
+Entries live in `~/Library/Caches/roadie/drum-hits/` (`ROADIE_CACHE_DIR` moves it), at most 300 MB (`ROADIE_CACHE_MAX_MB`; the
+least recently used go first), as gzipped JSON, written by temp file and rename, so several workers may write at once and an
+unreadable file is a miss. The key is a sha256 over the samples, the rate, the channels, the settings, a
+`CACHE_VERSION` constant in `drumroles.py` and a sha256 of the source text of `drumroles.py`, `oneshot.py` and `sideman/listen.py`
+(read once per process), so any edit to the detector, a tuned threshold included, starts a fresh set of entries, in every checkout that
+shares the folder; `CACHE_VERSION` is there to mark a change of the cached shape on purpose. `--no-cache` (on `roadie drums` and on `drumstability`; `cache=False` on `drums.drum_roles`) or `ROADIE_NO_CACHE=1`
+skips reads and writes; clear the cache by deleting the folder. Glacier 3000, all stems: 186 s cold, 54 s with the hits cached
+alone, 41 s with the readings cached too; the stability check's seven runs 5 min 32 s.
 
 **How the sections are cut and merged** (`roadie_analysis/drumsections.py` has the choices):
 

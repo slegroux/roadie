@@ -112,7 +112,7 @@ def default_jobs() -> int:
 
 def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, sections: list | None = None,
                out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None,
-               hit_times: bool = False) -> dict:
+               hit_times: bool = False, cache: bool = True) -> dict:
     """The roles of every drum stem in `stems_dir`, as the `drums.json` record. Each stem is analysed section by section
     (drumsections.py: sections shorter than 8 bars join their neighbour, no sections means the whole track as one) and the
     groups of the sections are matched by sound, so one role keeps one identity and name over the track; `mark_bleed` and
@@ -121,7 +121,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     `jobs` processes run the (stem, section) jobs, the matching and the naming (default: `default_jobs()`, the fast cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
     `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
-    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
+    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `cache` (default on; `ROADIE_NO_CACHE=1` also turns it off) reuses the hits and groups detected in a slice of a stem that an earlier analysis of the same audio found (`roadie_analysis/cache.py`); the record is the same either way. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
     already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
@@ -133,7 +133,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     stems_dir = Path(stems_dir)
     remote = keymod.pcloud_remote(stems_dir)
     if remote is not None:
-        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs, hit_times)
+        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs, hit_times, cache)
     stems = find_stems(stems_dir)
     if not stems:
         raise ValueError("no drum stems (drums_<kind>.flac or .wav) in %s" % stems_dir)
@@ -173,15 +173,15 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         stages["levels"] = time.monotonic() - t
         t = time.monotonic()
         keys = [(k, si) for k in stems for si in range(len(plan))]
-        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k]) for k, si in keys], pool, deadline)
+        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k], cache) for k, si in keys], pool, deadline)
         stages["sections"] = time.monotonic() - t
         t = time.monotonic()
         sec_outs = {k: [outs[i] for i, (k2, _) in enumerate(keys) if k2 == k] for k in stems}
-        unmerged = dict(zip(stems, _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, False) for k in stems],
+        unmerged = dict(zip(stems, _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, False, frozenset(), cache) for k in stems],
                                         pool, deadline)))
         bleed0 = drumroles.mark_bleed(unmerged)             # a group that is bleed is never merged: found before merging, on the unmerged groups
         merged = _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, True,
-                                                 frozenset(g for g, b in bleed0[k].items() if b["bleed"])) for k in stems], pool, deadline)
+                                                 frozenset(g for g, b in bleed0[k].items() if b["bleed"]), cache) for k in stems], pool, deadline)
         results = dict(zip(stems, merged))
         stages["matching"] = time.monotonic() - t
         t = time.monotonic()
@@ -245,7 +245,7 @@ def _rclone(*args) -> str:
         raise OSError("rclone %s failed: %s" % (args[0], (e.stderr or "").strip() or "exit %s" % e.returncode))
 
 
-def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs, hit_times=False) -> dict:
+def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs, hit_times=False, cache=True) -> dict:
     """`drum_roles` for a study on the pCloud mount, which is never read or written through the FUSE mount (that fills a local
     cache with audio and writes into the archive through a mount): the drum stems, alignment.json and sections.json are copied
     to a temp folder with rclone, analysed there, and the results go back with rclone: the new clips, then drums.json, then
@@ -264,7 +264,7 @@ def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write
                 old = json.loads(_rclone("cat", "%s/drums.json" % remote))
             except ValueError:
                 old = None
-        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs, hit_times)
+        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs, hit_times, cache)
         if write and not out:
             clips = sorted({r["clip"] for s in rec["stems"].values() for r in s["roles"] if r["clip"]})
             for c in clips:

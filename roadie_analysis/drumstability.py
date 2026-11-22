@@ -1,6 +1,6 @@
 """How steady are the drum roles when the grid moves by an amount no ear would notice?
 
-    python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare] [--jobs N] [--only tempo+0.001,t0-0.001]
+    python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare] [--jobs N] [--only tempo+0.001,t0-0.001] [--no-cache]
 
 Runs `drums.drum_roles` (nothing written) at the folder's grid and at perturbed grids (tempo +-0.001 and +-0.005 bpm, t0
 +-1 ms), then compares, hit by hit (hits matched by onset time within MATCH_S), which role each hit lands in. Role names
@@ -87,7 +87,7 @@ def compare(base: dict, other: dict, stem: str, match_s: float = MATCH_S, min_hi
             "named_base": sorted(named_b), "named_other": sorted(named_o)}
 
 
-def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None) -> dict:
+def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None, cache=True) -> dict:
     """The base run and the perturbed runs of `stems` ({name: record}); `stems` limits the drum stems analysed (a scratch
     folder of links is made, so nothing is written into `stems_dir`)."""
     from roadie_analysis import drums
@@ -111,7 +111,7 @@ def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None) -> dic
                 continue
             tt = tempo + kw.get("tempo", 0.0)
             t = t0 + kw.get("t0", 0.0)
-            out[label] = drums.drum_roles(tmp, tempo=tt, t0=t, write=False, jobs=jobs, hit_times=True)
+            out[label] = drums.drum_roles(tmp, tempo=tt, t0=t, write=False, jobs=jobs, hit_times=True, cache=cache)
     return out
 
 
@@ -122,6 +122,7 @@ def main(argv=None) -> int:
     ap.add_argument("--jobs", type=int, default=None)
     ap.add_argument("--only", default=None, help="comma separated perturbations to run, e.g. tempo+0.001,t0-0.001")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-cache", action="store_true", help="detect every hit in every run: do not use the cache of detected hits")
     args = ap.parse_args(argv)
     from roadie_analysis import drums
     try:
@@ -140,7 +141,7 @@ def main(argv=None) -> int:
         sys.exit("drumstability: --only %s matches no perturbation (they are: %s)" % (args.only, ", ".join(labels)))
     try:
         with heavy_job("roadie drumstability %s" % args.stems_dir):     # the seven runs are one job in the machine's queue
-            runs = run(args.stems_dir, stems, args.jobs, only)
+            runs = run(args.stems_dir, stems, args.jobs, only, cache=not args.no_cache)
     except ValueError as e:
         sys.exit("drumstability: %s" % e)
     report = {}
