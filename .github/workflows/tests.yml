@@ -1,19 +1,32 @@
 name: tests
 
+# Docs-only changes skip the suite. Safe because main has no branch protection
+# requiring the `pytest` check (GitHub API: "Branch not protected"); a required
+# check that never runs would block a docs pull request forever. If protection
+# is added later, replace paths-ignore with a job that always runs and skips
+# the heavy steps.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**/*.md", "docs/**"]
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
 
+      # enable-cache keeps uv's download and built-wheel cache between runs, keyed on the
+      # requirements files. Cuts the dependency install and the madmom build (a git source
+      # built into a wheel); the cache is restored on pull requests from this repo's branches.
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
 
       - name: Set up Python 3.13
         run: uv python install 3.13
@@ -63,8 +76,25 @@ jobs:
           uv pip install --python .venv/bin/python --no-build-isolation \
             "madmom @ git+https://github.com/CPJKU/madmom"
 
+      # pytest-xdist, one worker per core (4 on a public repo's runner; nproc is printed).
+      # --dist loadfile sends every test of a file to one worker: the files load modules by
+      # path, patch sys.modules and share module-level helpers, so a file stays together.
+      # --max-worker-restart=0: a worker that dies (a numba segfault did, once) ends the run
+      # with the crash in the log instead of being replaced and dragging to the time limit.
+      # --durations=40 prints the slowest tests at the end. xdist merges all workers into the
+      # one junit.xml the guard below reads.
+      # One thread per worker: numpy/BLAS/OpenMP/numba each start a pool the size of the
+      # machine, and 4 workers x 4 threads oversubscribe 4 cores. Each worker also gets its
+      # own numba cache (conftest.py), because a shared cold cache crashed workers.
       - name: Run tests
-        run: .venv/bin/python -m pytest -q -rs --junitxml=junit.xml
+        env:
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          NUMBA_NUM_THREADS: "1"
+        run: |
+          echo "runner cores: $(nproc)"
+          .venv/bin/python -m pytest -q -rs -n "$(nproc)" --dist loadfile --max-worker-restart=0 --durations=40 --junitxml=junit.xml
 
       # THE POINT OF THIS STEP. Every test here is gated on something — the real
       # stems, aubiotrack, madmom — so a missing dependency does not fail the
