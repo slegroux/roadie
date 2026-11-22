@@ -56,6 +56,7 @@ import arrangement
 import roadie_drums
 import study
 from roadie_analysis import drums, oneshot, profile
+from roadie_analysis.jobqueue import heavy_job
 
 mcp = MCPServer(
     "roadie",
@@ -145,9 +146,10 @@ def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
         folder = os.path.abspath(os.path.expanduser(stems.strip()))
         if not os.path.isdir(folder):
             folder = str(roadie_drums.stems_dir_of(stems))
-        rec = drums.drum_roles(folder, tempo, t0, sections,
-                               os.path.abspath(os.path.expanduser(out)) if out else None,
-                               write=write, deadline=time.monotonic() + timeout_s, jobs=jobs)
+        with heavy_job("roadie drums %s (mcp)" % folder):    # waiting for the machine does not use up timeout_s
+            rec = drums.drum_roles(folder, tempo, t0, sections,
+                                   os.path.abspath(os.path.expanduser(out)) if out else None,
+                                   write=write, deadline=time.monotonic() + timeout_s, jobs=jobs)
     except TimeoutError as e:
         raise AnalysisError("drum_roles ran out of time (%g s): %s; nothing was written" % (timeout_s, e))
     except MemoryError:

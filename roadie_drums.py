@@ -18,6 +18,7 @@ sys.path.insert(0, str(HERE))
 
 import study  # noqa: E402
 from roadie_analysis import drums  # noqa: E402
+from roadie_analysis.jobqueue import heavy_job  # noqa: E402
 
 
 def stems_dir_of(arg: str) -> Path:
@@ -41,8 +42,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         sd = stems_dir_of(args.target)
-        t = time.monotonic()
-        rec = drums.drum_roles(sd, write=not args.no_write, jobs=args.jobs)
+        with heavy_job("roadie drums %s" % args.target):
+            t = time.monotonic()
+            rec = drums.drum_roles(sd, write=not args.no_write, jobs=args.jobs)
     except (ValueError, OSError, KeyError, TypeError) as e:
         print("drums: %s" % e, file=sys.stderr)
         return 1

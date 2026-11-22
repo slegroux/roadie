@@ -17,3 +17,10 @@ def _no_held_live_connection():
     if S is not None and getattr(S, "_LIVE", None) is not None:
         S._LIVE[1].close()
         S._LIVE = None
+
+
+@pytest.fixture(autouse=True)
+def _own_heavy_job_lock(tmp_path, monkeypatch):
+    """No test takes the real machine-wide lock (~/Library/Caches/roadie), which another job may hold."""
+    monkeypatch.setenv("ROADIE_QUEUE_LOCK", str(tmp_path / "heavy-job.lock"))
+    monkeypatch.delenv("ROADIE_NO_QUEUE", raising=False)
