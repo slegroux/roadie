@@ -249,3 +249,12 @@ def test_roles_do_not_move_when_the_grid_moves_by_a_few_thousandths_of_a_bpm_or_
         c = drumstability.compare(base, rec, "hh")
         assert c["agreement"] == 1.0 and c["named_same"], (label, c)
         assert all(r["kept"] == 1.0 for r in c["roles"]), (label, c)
+
+
+def test_a_name_that_changes_with_the_on_grid_tolerance_is_flagged_unsteady():
+    named = lambda n: {"roles": [{"groups": [0, 2], "name": n, "named": not n.startswith("hh 3")}]}  # noqa: E731
+    assert drums._steadiness([2, 0], "hh 16th", True, (named("hh 16th"), named("hh 16th"))) is None
+    assert drums._steadiness([0], "hh 3", False, (named("hh 3"), named("hh 3"))) is None
+    why = drums._steadiness([0, 2], "hh 16th", True, (named("hh 3"), named("hh 16th")))
+    assert "tighter tolerance (-3 ms): not named" in why and "looser" not in why
+    assert "named 'hh 16th'" in drums._steadiness([0, 2], "hh 3", False, (named("hh 3"), named("hh 16th")))

@@ -32,6 +32,8 @@ KIND, VERSION = "drum_roles", 1
 AUDIO = (".flac", ".wav")
 BEATS_PER_BAR = 4
 X_SHARE, O_SHARE = 0.5, 0.10   # pattern line: x = the role plays at that 16th in at least half of its bars, o = at least a tenth
+STEADY_MARGIN_S = 0.003    # a name is steady when it holds with the 20 ms on-grid tolerance 3 ms tighter and 3 ms looser (about what
+                           # 0.001 bpm moves the last section's bar line by: 160 bars of 1.97 s)
 LEGEND = "x = most of the bars the role plays in (50 % or more), o = some of them (10 to 50 %), . = fewer"
 MIN_SHOWN = 4              # the table and `study show` list a role of fewer measured hits as one line (all stay in drums.json)
 
@@ -101,7 +103,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
     `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
-    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
+    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
     already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
@@ -166,6 +168,12 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         t = time.monotonic()
         named = _run(drumroles.name_roles, [(results[k], k, bleed[k]) for k in stems], pool, deadline)
         stages["naming"] = time.monotonic() - t
+        t = time.monotonic()
+        tight = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S - STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+                     pool, deadline)
+        loose = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S + STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+                     pool, deadline)
+        stages["steadiness"] = time.monotonic() - t
     finally:
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -177,8 +185,8 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
               "by": "section", "inputs": [_file_record(p) for p in list(stems.values()) + g["files"]],
               "legend": LEGEND, "notes": notes, "stems": {}}
     clips = []
-    for kind, nm in zip(stems, named):
-        record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s, hit_times)
+    for kind, nm, tg, lo in zip(stems, named, tight, loose):
+        record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s, hit_times, (tg, lo))
         clips += more
     if write:
         base = Path(out) if out else stems_dir
@@ -286,8 +294,27 @@ def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
     return [len({h["bar"] for h in on if h["step"] == s}) / len(own) if own else 0.0 for s in range(16)], len(own)
 
 
+def _with_grid_tol(res: dict, tol: float) -> dict:
+    """`res` with each hit's `on_grid` judged against `tol` seconds instead of the core's 20 ms (groups are unchanged: only the
+    patterns the naming rules read move)."""
+    out = dict(res)
+    out["hits"] = [dict(h, on_grid=abs(h["offset_ms"]) <= tol * 1000.0) for h in res["hits"]]
+    return out
+
+
+def _steadiness(role_groups: list, name: str, named: bool, variants: tuple) -> str | None:
+    """None when the role keeps its name (or stays neutral) under both on-grid tolerances, else a sentence saying what changes."""
+    seen = []
+    for label, v in zip(("tighter", "looser"), variants):
+        other = next((x for x in v["roles"] if sorted(x["groups"]) == sorted(role_groups)), None)
+        got = other["name"] if other and other["named"] else None
+        if (got is not None) != named or (named and got != name):
+            seen.append("%s tolerance (%+d ms): %s" % (label, -3 if label == "tighter" else 3, "named %r" % got if got else "not named"))
+    return None if not seen else "the name depends on hits near the 20 ms on-grid edge: with a " + "; with a ".join(seen)
+
+
 def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, plan: list, t0: float, bar_s: float,
-                 hit_times: bool = False):
+                 hit_times: bool = False, variants: tuple | None = None):
     by_id = {g["id"]: g for g in res["groups"]}
     info = {g["id"]: g for g in named["groups"]}
     hits = res["hits"]
@@ -325,6 +352,9 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
                "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
+        if variants:
+            why = _steadiness(r["groups"], r["name"], r["named"], variants)
+            rec["name_steady"], rec["name_steady_note"] = why is None, why
         if hit_times:                                  # onset seconds of the role's hits, for roadie_analysis/drumstability.py
             rec["hit_times"] = sorted(round(hits[i]["onset_s"], 4) for i in ids)
         roles.append(rec)
@@ -369,6 +399,8 @@ def format_table(record: dict) -> str:
                 flags.append("separation %.2f" % r["separation"])
             if r["variants"]:
                 flags.append("%d variants" % len(r["variants"]))
+            if r.get("name_steady") is False:
+                flags.append("name unsteady")
             lvl = "%.1f dB" % r["level_db"] if r["level_db"] is not None else "-"
             lines.append("  %-14s %5d  %-19s %7s  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
                                                           lvl, ", ".join(flags)))
@@ -376,6 +408,8 @@ def format_table(record: dict) -> str:
                 lines.append("      why neutral: %s" % r["reason"])
             if r["note"]:
                 lines.append("      note: %s" % r["note"])
+            if r.get("name_steady") is False:
+                lines.append("      unsteady: %s" % r["name_steady_note"])
             for v in r["per_section"] if len(r["per_section"]) > 1 else []:
                 lines.append("      %-22s %4d  %s" % (v["section"][:22], v["hits"], " ".join(v["line"][i:i + 4] for i in range(0, 16, 4))))
             if r["clip"]:
