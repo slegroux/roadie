@@ -1,9 +1,16 @@
 name: tests
 
+# Docs-only changes skip the suite. Safe because main has no branch protection
+# requiring the `pytest` check (GitHub API: "Branch not protected"); a required
+# check that never runs would block a docs pull request forever. If protection
+# is added later, replace paths-ignore with a job that always runs and skips
+# the heavy steps.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**/*.md", "docs/**"]
 
 jobs:
   pytest:
@@ -63,8 +70,14 @@ jobs:
           uv pip install --python .venv/bin/python --no-build-isolation \
             "madmom @ git+https://github.com/CPJKU/madmom"
 
+      # pytest-xdist, one worker per core (4 on a public repo's runner).
+      # --dist loadfile sends every test of a file to one worker: the files load
+      # modules by path, patch sys.modules and share module-level helpers, so a
+      # file is the unit that stays together. --durations=40 prints the slowest
+      # tests (and fixtures) at the end of the log. xdist merges all workers into
+      # the one junit.xml the guard below reads.
       - name: Run tests
-        run: .venv/bin/python -m pytest -q -rs --junitxml=junit.xml
+        run: .venv/bin/python -m pytest -q -rs -n auto --dist loadfile --durations=40 --junitxml=junit.xml
 
       # THE POINT OF THIS STEP. Every test here is gated on something — the real
       # stems, aubiotrack, madmom — so a missing dependency does not fail the
