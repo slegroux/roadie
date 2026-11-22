@@ -1270,8 +1270,8 @@ measures the tempo from the audio; do not feed the filename BPM back in as
 A test is `slow` when CI runs it in the slow suite: the whole file for `test_drums.py`,
 `test_bench_roles.py`, `test_roadie_mcp.py` and `test_analysis_equivalence.py`, and single tests
 (`@pytest.mark.slow`) elsewhere, chosen from CI timings (about 7 s or more, or a full alignment
-of synthetic audio). A plain `pytest` runs both kinds. CI also fails the fast job if a fast test
-takes over 10 s (after the numba cache is warm): mark it slow or shorten it. What CI runs
+of synthetic audio). A plain `pytest` runs both kinds. CI warns when a fast test
+takes over 10 s and fails the fast job over 60 s (under that it may be one-off compile time): mark it slow or shorten it. What CI runs
 (`.github/workflows/tests.yml`, decided by its `plan` job, which writes the reason to the run summary):
 
 | Event | Fast | Slow |
