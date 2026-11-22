@@ -258,3 +258,32 @@ def test_a_name_that_changes_with_the_on_grid_tolerance_is_flagged_unsteady():
     why = drums._steadiness([0, 2], "hh 16th", True, (named("hh 3"), named("hh 16th")))
     assert "tighter tolerance (-3 ms): not named" in why and "looser" not in why
     assert "named 'hh 16th'" in drums._steadiness([0, 2], "hh 3", False, (named("hh 3"), named("hh 16th")))
+
+
+def _record(*roles):
+    """A hand-made record with one stem `hh`: roles are (name, named, [hit times])."""
+    return {"stems": {"hh": {"roles": [{"name": n, "named": nm, "hit_times": t, "measured": len(t)} for n, nm, t in roles]}}}
+
+
+def test_the_stability_check_sees_a_merge_not_only_a_split():
+    from roadie_analysis import drumstability
+    a, b = [1.0 + 0.1 * i for i in range(10)], [5.0 + 0.1 * i for i in range(6)]
+    base = _record(("hh 1", False, a), ("hh 2", False, b))
+    same = drumstability.compare(base, _record(("hh 1", False, a), ("hh 2", False, b)), "hh")
+    assert same["agreement"] == 1.0 and not any(r["absorbed"] for r in same["roles"])
+    merged = drumstability.compare(base, _record(("hh 1", False, a + b)), "hh")           # two roles became one
+    rows = {r["name"]: r for r in merged["roles"]}
+    assert rows["hh 1"]["kept"] == rows["hh 2"]["kept"] == 1.0                            # no hit left its role's match...
+    assert rows["hh 2"]["absorbed"] and rows["hh 2"]["purity"] == 0.375 and not rows["hh 1"]["absorbed"]
+    assert merged["agreement"] == 0.625                                                   # ...but the six hits of hh 2 do not count
+    split = drumstability.compare(base, _record(("hh 1", False, a[:5]), ("hh 3", False, a[5:]), ("hh 2", False, b)), "hh")
+    assert split["agreement"] == 0.688 and split["roles"][0]["split"] == 2
+
+
+def test_the_stability_check_refuses_stems_that_are_not_there_and_perturbations_that_do_not_exist(tmp_path, capsys):
+    from roadie_analysis import drumstability
+    (tmp_path / "drums_hh.flac").write_bytes(b"")
+    with pytest.raises(SystemExit, match="none of the stems snare"):
+        drumstability.main([str(tmp_path), "--stems", "snare"])
+    with pytest.raises(SystemExit, match="matches no perturbation"):
+        drumstability.main([str(tmp_path), "--stems", "hh,snare", "--only", "tempo+0.5"])
