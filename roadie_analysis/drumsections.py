@@ -43,12 +43,14 @@ SHIFT_WINDOW_MS = 3.0     # ...from the densest cluster of offsets, this wide ei
 SHIFT_SUPPORT = 0.4      # ...and the densest window must hold at least this share of them (40 %: a cluster that is not a minority of two)
 SHIFT_DRIFT_MS = 15.0    # a section's phase may differ from the track-wide one by this much (the drift of 0.005 bpm over a track is 13 ms)
 MERGE_MIN_HITS = 4       # one sound, one role: groups of at least this many measured hits are compared
-MERGE_COINCIDE_S = 0.030 # two groups "take turns" when no hit of one lies within this of a hit of the other (the bleed test's 25 ms and a little)
-MERGE_COINCIDE_SHARE = 0.05  # ...beyond this share of the smaller group's hits (chance)
+MERGE_SHARED_BARS = 0.5  # one sound, one role: the parts take turns over the track: they share at most this share of the smaller one's bars (Glacier's backbeat parts share 18 of 62)
+MERGE_MIN_CLEAN = 3      # a distance is a comparison only when each side has at least this many clean entries (sections' clean hits) ...
+MERGE_CLEAN_SHARE = 0.25 # ... and at least this share of its entries: one complete hit among 193 is not a measurement
 MERGE_DISTANCE = drumroles.NEAR_SEPARATION * drumroles.THRESHOLD   # ...and they sound alike: the mean spectral distance of their clean hits is at most this (1.73: the bound the naming already uses for "possibly one sound", measured on Flare, where distinct snare groups held at 1.77 to 1.82)
 ECHO_MIN_HITS = 8        # an echo needs at least this many measured hits (4 let two groups of a few hits each be "echoes")...
 ECHO_SHARE = 0.90        # ...this share of them following a hit of one other role by the same gap...
 ECHO_SPREAD_S = 0.015    # ...the same to within this either side of the median gap (an onset is found to about 10 ms, a gap is the difference of two: 10 ms x 1.4)
+ECHO_FORWARD = 0.5       # ...the gap to the earlier hit must be at most this share of the gap the other way (the parent's hit to the echo's earlier hit), and of the parent's own median interval
 ECHO_MIN_S = 0.030       # ...a gap over the 25 ms the bleed test calls one event and the 20 ms grid tolerance (under it: one hit detected twice)...
 ECHO_MAX_S = 0.600       # ...and under about a beat
 MERGE_DECAY_RATIO = 2.0  # ...and their decay agrees within this factor (measured: groups to merge 1.0 to 1.7, groups that are not one sound 2.6 and over)
@@ -304,11 +306,11 @@ def readings_agree(ra: dict | None, rb: dict | None) -> tuple[bool, dict]:
 
 
 def _pair_stats(built: list, hits: list, raw: np.ndarray, clean: list) -> dict:
-    """{(a, b): numbers} for each pair of groups (indices into `built`) of at least MERGE_MIN_HITS measured hits: "cosine" of
-    the hits-per-16th vectors (do they play the same steps), "coincide" (hits of the smaller group with a hit of the other within
-    MERGE_COINCIDE_S) and its share, "distance" (mean spectral distance of their sections' clean hits: only entries that have a clean hit
-    count, as in the bleed test, so two groups of which one has no complete hit are not compared: None), "shared_bars". `clean[k]` says
-    whether each entry (index into `raw`) has a clean hit."""
+    """{(a, b): numbers} for each pair of groups (indices into `built`) of at least MERGE_MIN_HITS measured hits: "cosine" of the
+    hits-per-16th vectors (do they play the same steps: counts, so a stray 16th weighs little), "bars" (bars each plays in), "shared_bars"
+    and "shared" (their share of the smaller one's bars: do they take turns over the track), "distance" (mean spectral distance of their
+    sections' clean hits, or None when a side has fewer than MERGE_MIN_CLEAN clean entries, or fewer than MERGE_CLEAN_SHARE of its entries:
+    the sound cannot be compared). `clean[k]` says whether each entry (index into `raw`) has a clean hit."""
     out = {}
     for a in range(len(built)):
         for b in range(a + 1, len(built)):
@@ -318,36 +320,39 @@ def _pair_stats(built: list, hits: list, raw: np.ndarray, clean: list) -> dict:
             va, vb = (np.bincount([hits[i]["step"] for i in (built[k][0] + built[k][1]) if hits[i]["on_grid"]], minlength=STEPS).astype(float)
                       for k in (a, b))
             cos = float(va @ vb / (np.linalg.norm(va) * np.linalg.norm(vb))) if va.any() and vb.any() else 0.0
-            ta = np.array(sorted(hits[i]["onset_s"] for i in ma + built[a][1]))
-            tb = np.array(sorted(hits[i]["onset_s"] for i in mb + built[b][1]))
-            small, big = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
-            j = np.searchsorted(big, small)
-            near = np.minimum(np.abs(small - big[np.minimum(j, len(big) - 1)]), np.abs(small - big[np.maximum(j - 1, 0)]))
-            coincide = int((near <= MERGE_COINCIDE_S).sum())
-            pairs = [raw[i, k] for i in built[a][2] for k in built[b][2] if clean[i] and clean[k]]
-            dist = float(np.mean(pairs)) if pairs else None
+            ea, eb = built[a][2], built[b][2]
+            ca, cb = [i for i in ea if clean[i]], [k for k in eb if clean[k]]
+            enough = all(len(c) >= min(MERGE_MIN_CLEAN, len(e)) and len(c) >= MERGE_CLEAN_SHARE * len(e) and c for c, e in ((ca, ea), (cb, eb)))
+            dist = float(np.mean([raw[i, k] for i in ca for k in cb])) if enough else None
             bars_a = {hits[i]["bar"] for i in ma + built[a][1]}
             bars_b = {hits[i]["bar"] for i in mb + built[b][1]}
-            out[(a, b)] = {"cosine": round(cos, 3), "coincide": coincide, "coincide_share": round(coincide / len(small), 3),
-                           "distance": None if dist is None else round(dist, 3), "shared_bars": len(bars_a & bars_b), "hits": (len(ma), len(mb))}
+            shared = len(bars_a & bars_b)
+            out[(a, b)] = {"cosine": round(cos, 3), "bars": (len(bars_a), len(bars_b)), "shared_bars": shared,
+                           "shared": round(shared / max(1, min(len(bars_a), len(bars_b))), 3),
+                           "distance": None if dist is None else round(dist, 3), "hits": (len(ma), len(mb))}
     return out
 
 
 def _merge_alike(built: list, hits: list, raw: np.ndarray, clean: list, steady: list | None = None,
-                 readings: list | None = None) -> tuple[list, dict, list, list]:
+                 readings: list | None = None, exclude=frozenset()) -> tuple[list, dict, list, list]:
     """One sound, one role: groups of a stem that play the same 16th steps (cosine of their hits-per-16th at least
-    drumroles.SAME_PATTERN), take turns (at most MERGE_COINCIDE_SHARE of the smaller one's hits within MERGE_COINCIDE_S of a hit of
-    the other) and sound alike (distance at most MERGE_DISTANCE) become one; both must also be steady groups (`steady[k]`: the naming's own
-    gate, stability measured and at least 0.75 or stable by construction): a group the grouping cuts differently with a shifted sample
-    is a piece of a continuum, and merging it makes the outcome as unsteady as the group. Their readings must agree too (`readings`, see
-    `readings_agree`: decay within a factor of 2, pitched or not). Pairs that pass everything but the sound comparison, because one has no
-    clean hit, are returned as `maybe` (pairs of group indices, before merging): not merged, but said. Returns (the groups, the pair stats, `merged_from`
-    for each group: None, or [{hits, bars}] of the groups it was made from)."""
+    drumroles.SAME_PATTERN), take turns over the track (they share at most MERGE_SHARED_BARS of the smaller one's bars: two sounds that
+    alternate on the same steps in the same bars are two sounds) and sound alike (clean-hit distance at most MERGE_DISTANCE) become one;
+    both must also be steady groups (`steady[k]`: the naming's own gate, stability measured and at least 0.75 or stable by construction):
+    a group the grouping cuts differently with a shifted sample is a piece of a continuum, and merging it makes the outcome as unsteady as the
+    group. Their readings must agree too (`readings`, see `readings_agree`: decay within a factor of 2, pitched or not). A group in `exclude`
+    (a bleed group) is never merged. Pairs that pass everything but the sound comparison, because a side has too few clean hits, are returned
+    as `maybe` (pairs of group indices after merging): not merged, but said. Ties are broken by group number, so the same groups in the same
+    order always give the same roles. Returns (the groups, the pair stats, for each group None or the parts it was made from: [{hits, bars,
+    ids, decay_ms, pitched, against: [{part, distance, cosine, shared_bars, decay_ratio, pitched_diff}]}], maybe)."""
     stats = _pair_stats(built, hits, raw, clean)
+
     def rest(pair, st):
-        """every condition but the sound comparison: same steps, take turns, steady, readings agree"""
+        """every condition but the sound comparison: same steps, take turns, steady, readings agree, not bleed"""
         a, b = pair
-        if not (st["cosine"] >= drumroles.SAME_PATTERN and st["coincide_share"] <= MERGE_COINCIDE_SHARE):
+        if a in exclude or b in exclude:
+            return False
+        if not (st["cosine"] >= drumroles.SAME_PATTERN and st["shared"] <= MERGE_SHARED_BARS):
             return False
         if steady is not None and not (steady[a] and steady[b]):
             return False
@@ -365,7 +370,7 @@ def _merge_alike(built: list, hits: list, raw: np.ndarray, clean: list, steady: 
                 good.add(pair)
     comps = {i: [i] for i in range(len(built))}
     where = list(range(len(built)))
-    for a, b in sorted(good, key=lambda pr: stats[pr]["distance"]):       # closest first; a group joins another only when it fits every member
+    for a, b in sorted(good, key=lambda pr: (stats[pr]["distance"], pr)):   # closest first, ties by number; a group joins another only when it fits every member
         ca, cb = where[a], where[b]
         if ca != cb and all((min(x, y), max(x, y)) in good for x in comps[ca] for y in comps[cb]):
             comps[ca] += comps.pop(cb)
@@ -373,56 +378,96 @@ def _merge_alike(built: list, hits: list, raw: np.ndarray, clean: list, steady: 
                 where[x] = ca
     merged, info, roots = [], [], []
     for root, ids in comps.items():
+        ids = sorted(ids)
         mem = sorted(i for k in ids for i in built[k][0])
         asg = sorted(i for k in ids for i in built[k][1])
         cl = [k for i in ids for k in built[i][2]]
         merged.append((mem, asg, cl))
         roots.append(root)
-        info.append(None if len(ids) == 1 else [{"hits": len(built[k][0]) + len(built[k][1]),
-                                                  "bars": _runs([hits[i]["bar"] for i in built[k][0] + built[k][1]])} for k in ids])
+        parts = []
+        for pi, k in enumerate(ids):
+            rd = readings[k] if readings is not None else None
+            parts.append({"hits": len(built[k][0]) + len(built[k][1]), "bars": _runs([hits[i]["bar"] for i in built[k][0] + built[k][1]]),
+                          "ids": built[k][0] + built[k][1], "decay_ms": None if not rd else round(rd["decay_ms"], 1),
+                          "pitched": None if not rd or rd["pitched"] is None else round(rd["pitched"], 2),
+                          "against": [{"part": qi, "distance": stats.get((min(k, j), max(k, j)), {}).get("distance"),
+                                       "cosine": stats.get((min(k, j), max(k, j)), {}).get("cosine"),
+                                       "shared_bars": stats.get((min(k, j), max(k, j)), {}).get("shared_bars"),
+                                       "decay_ratio": stats.get((min(k, j), max(k, j)), {}).get("decay_ratio"),
+                                       "pitched_diff": stats.get((min(k, j), max(k, j)), {}).get("pitched_diff")}
+                                      for qi, j in enumerate(ids) if j != k]})
+        info.append(None if len(ids) == 1 else parts)
     order = sorted(range(len(merged)), key=lambda m: (-len(merged[m][0]), (merged[m][0] + merged[m][1])[0]))
     final = {roots[m]: pos for pos, m in enumerate(order)}
     seen = {tuple(sorted((final[where[a]], final[where[b]]))) for a, b in maybe if where[a] != where[b]}
     return [merged[m] for m in order], stats, [info[m] for m in order], sorted(seen)
 
 
-def _echoes(groups: list, hits: list, tempo: float) -> None:
-    """Label the groups that are an echo of another: sets `echo_of` (the group id), `echo_ms` (the median gap) and `echo_bars` on
-    a group of at least ECHO_MIN_HITS measured hits when at least ECHO_SHARE of its hits follow the nearest earlier hit of one
-    other group (not itself an echo) by the same gap, within ECHO_SPREAD_S either side of the median, the median gap being
-    between ECHO_MIN_S and ECHO_MAX_S and not within the grid tolerance of a multiple of a 16th (a gap the grid explains is two
-    parts on the grid, such as the offbeat hat after the on-beat hat, not an echo). Groups are taken biggest first, so a
-    parent is never an echo."""
+def _gaps(tg: np.ndarray, tr: np.ndarray) -> np.ndarray:
+    """Gaps (s) from each hit of `tg` to the nearest earlier hit of `tr`, for those that have one."""
+    j = np.searchsorted(tr, tg, side="left") - 1
+    return tg[j >= 0] - tr[j[j >= 0]]
+
+
+def _constant_gap(gaps: np.ndarray, n: int, step_s: float, share: float = None, spread: float = None):
+    """(median gap, share within `spread` of it) when `gaps` (for n hits) is an echo-like gap, else None: at least ECHO_MIN_HITS gaps, the
+    share at least `share`, the median between ECHO_MIN_S and ECHO_MAX_S and further than the grid tolerance from a multiple of a 16th."""
+    share = ECHO_SHARE if share is None else share
+    spread = ECHO_SPREAD_S if spread is None else spread
+    if len(gaps) < ECHO_MIN_HITS:
+        return None
+    med = float(np.median(gaps))
+    got = float((np.abs(gaps - med) <= spread).sum() / n)
+    off = abs(med / step_s - round(med / step_s)) * step_s
+    return (med, got) if got >= share and ECHO_MIN_S <= med <= ECHO_MAX_S and off > drumroles.GRID_LEAD_S else None
+
+
+def _echoes(groups: list, hits: list, tempo: float, share: float = None, spread: float = None) -> None:
+    """Label the groups that are an echo of another: sets `echo_of` (the group id), `echo_ms` (the median gap) and `echo_bars` on a group
+    of at least ECHO_MIN_HITS measured hits when at least `share` (ECHO_SHARE) of its hits follow the nearest earlier hit of one other
+    group by the same gap, within `spread` (ECHO_SPREAD_S) either side of the median, the median gap being between ECHO_MIN_S and
+    ECHO_MAX_S and not within the grid tolerance of a multiple of a 16th (a gap the grid explains is two parts on the grid, such as the
+    offbeat hat after the on-beat hat, not an echo). The gap is read both ways: the other group's hits against the echo's earlier hits.
+    In an ordinary periodic rhythm both are constant (an offbeat after a beat is also a constant gap before the next beat), so the
+    forward gap must be at most ECHO_FORWARD of the gap the other way, and of the parent's median interval, or when the other way is not
+    constant at all; when neither is clearly the shorter, there is no echo. A parent that is itself an echo of something is never a
+    parent: the group is then not an echo (no echo of an echo; a chain of taps labels the second only)."""
     step_s = 60.0 / tempo / 4
     times = {g["id"]: np.array(sorted(hits[i]["onset_s"] for i in g["members"] + g["assigned_members"])) for g in groups}
-    for g in sorted(groups, key=lambda g: (-g["count"], g["id"])):
+    by_id = {g["id"]: g for g in groups}
+    for g in groups:
         g["echo_of"] = g["echo_ms"] = g["echo_bars"] = None
+    for g in sorted(groups, key=lambda g: (-g["count"], g["id"])):
         if g["count"] < ECHO_MIN_HITS:
             continue
         tg, best = times[g["id"]], None
         for r in groups:
-            if r["id"] == g["id"] or r.get("echo_of") is not None:
+            if r["id"] == g["id"] or r["echo_of"] is not None:          # a group already known to be an echo is no parent: resolves to the root
                 continue
             tr = times[r["id"]]
-            j = np.searchsorted(tr, tg, side="left") - 1
-            gaps = tg[j >= 0] - tr[j[j >= 0]]
-            if len(gaps) < ECHO_MIN_HITS:
+            fwd = _constant_gap(_gaps(tg, tr), len(tg), step_s, share, spread)
+            if fwd is None:
                 continue
-            med = float(np.median(gaps))
-            share = float((np.abs(gaps - med) <= ECHO_SPREAD_S).sum() / len(tg))
-            off = abs(med / step_s - round(med / step_s)) * step_s
-            if share >= ECHO_SHARE and ECHO_MIN_S <= med <= ECHO_MAX_S and off > drumroles.GRID_LEAD_S:
-                if best is None or share > best[0]:
-                    best = (share, r["id"], med)
+            back = _constant_gap(_gaps(tr, tg), len(tr), step_s, share, spread)
+            interval = float(np.median(np.diff(tr))) if len(tr) > 1 else float("inf")
+            if fwd[0] > ECHO_FORWARD * interval or (back is not None and fwd[0] > ECHO_FORWARD * back[0]):
+                continue
+            if best is None or fwd[1] > best[0]:
+                best = (fwd[1], r["id"], fwd[0])
         if best is not None:
             g["echo_of"], g["echo_ms"] = best[1], round(best[2] * 1000.0, 1)
             g["echo_bars"] = _runs([hits[i]["bar"] for i in g["members"] + g["assigned_members"]])
+    for g in groups:                                         # no echo of an echo: a group whose parent is an echo is not one
+        if g["echo_of"] is not None and by_id[g["echo_of"]]["echo_of"] is not None:
+            g["echo_of"] = g["echo_ms"] = g["echo_bars"] = None
 
 
-def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float = drumroles.THRESHOLD) -> dict:
+def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float = drumroles.THRESHOLD, merge: bool = True,
+               exclude=frozenset()) -> dict:
     """One `hit_groups`-shaped result for a stem from its sections' `section_job` outputs (aligned with `plan`). Bars are
     the track's (bar 0 at `t0`); every hit of every slice is in `hits` (`owned` says whether the section keeps it), and
-    only owned hits are in a group. `sections_of` gives, per group, its section index and local id."""
+    only owned hits are in a group. `sections_of` gives, per group, its section index and local id. With `merge` False the groups are not
+    merged; `exclude` is a set of group numbers of the unmerged result (bleed groups) that are never merged."""
     bar_s = 60.0 / tempo * 4
     live = [(si, o) for si, o in enumerate(outs) if o["res"] is not None]
     sr = live[0][1]["sr"] if live else 44100
@@ -483,7 +528,11 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
     readings = [group_reading([c for k in cl for c in outs[entries[k][0]]["cuts"][entries[k][1]["id"]]], sr) if len(mem) >= MERGE_MIN_HITS else None
                 for mem, asg, cl in built]
     out["merge_readings"] = readings
-    built, out["merge_stats"], merged_from, maybe = _merge_alike(built, hits, raw, [g["clean_hit"] is not None for _, g in entries], steady, readings)
+    if merge:
+        built, out["merge_stats"], merged_from, maybe = _merge_alike(built, hits, raw, [g["clean_hit"] is not None for _, g in entries],
+                                                                      steady, readings, exclude)
+    else:
+        out["merge_stats"], merged_from, maybe = {}, [None] * len(built), []
     real = [h["bar"] for h in hits if h["owned"] and h["status"] not in ("faint", "silent", "no_lead")]
     first, last = (min(real), max(real)) if real else (0, 0)
     nbars = last - first + 1

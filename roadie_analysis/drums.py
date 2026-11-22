@@ -26,6 +26,7 @@ import numpy as np
 import soundfile as sf
 
 from roadie_analysis import drumroles, drumsections
+from roadie_analysis.drumsections import _runs as _runs_of
 from roadie_analysis import key as keymod
 
 KIND, VERSION = "drum_roles", 1
@@ -158,8 +159,12 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k]) for k, si in keys], pool, deadline)
         stages["sections"] = time.monotonic() - t
         t = time.monotonic()
-        merged = _run(drumsections.merge_stem, [([outs[i] for i, (k2, _) in enumerate(keys) if k2 == k], plan, tempo, t0) for k in stems],
-                      pool, deadline)
+        sec_outs = {k: [outs[i] for i, (k2, _) in enumerate(keys) if k2 == k] for k in stems}
+        unmerged = dict(zip(stems, _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, False) for k in stems],
+                                        pool, deadline)))
+        bleed0 = drumroles.mark_bleed(unmerged)             # a group that is bleed is never merged: found before merging, on the unmerged groups
+        merged = _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, True,
+                                                 frozenset(g for g, b in bleed0[k].items() if b["bleed"])) for k in stems], pool, deadline)
         results = dict(zip(stems, merged))
         stages["matching"] = time.monotonic() - t
         t = time.monotonic()
@@ -357,7 +362,7 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
     for g in res["groups"]:
         if g.get("echo_of") is not None:
             parent = group_role.get(g["echo_of"], "%s %d" % (kind, g["echo_of"] + 1))
-            echoes.append({"name": "echo of %s" % parent, "named": False, "rule": None, "groups": [g["id"]], "count": g["count"],
+            echoes.append({"name": "echo of %s %+.0f ms" % (parent, g["echo_ms"]), "named": False, "rule": None, "groups": [g["id"]], "count": g["count"],
                            "assigned": g["assigned"], "level_db": g["level_db"], "pattern": g["pattern"], "note": None, "variants": None,
                            "possibly_also": [], "echo_of": parent, "echo_ms": g["echo_ms"], "echo_bars": g["echo_bars"]})
     roles, clips = [], []
@@ -380,15 +385,24 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
                "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
-        merged = [m for gid in r["groups"] for m in (by_id[gid].get("merged_from") or [])]
-        if merged:                                     # one sound the grouping had split: where each part plays is arrangement information
-            rec["merged_from"] = merged
+        if any(by_id[gid].get("merged_from") for gid in r["groups"]):    # one sound the grouping had split: each part with its evidence; the parts sum to the role's hits
+            parts = []
+            for gid in r["groups"]:
+                g_parts = by_id[gid].get("merged_from") or [{"hits": by_id[gid]["count"] + by_id[gid]["assigned"], "ids": by_id[gid]["members"] + by_id[gid]["assigned_members"],
+                                                             "bars": _runs_of([hits[i]["bar"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]])}]
+                for part in g_parts:
+                    part = dict(part, group=gid)
+                    ids_ = part.pop("ids")
+                    if hit_times:
+                        part["hit_times"] = sorted(round(hits[i]["onset_s"], 4) for i in ids_)
+                    parts.append(part)
+            rec["merged_from"] = parts
         if r.get("echo_of") is not None:
             rec["echo_of"], rec["echo_ms"], rec["echo_bars"] = r["echo_of"], r["echo_ms"], r["echo_bars"]
         maybe = sorted({group_role[og] for gid in r["groups"] for og in by_id[gid].get("may_be_one_sound_with", [])
                         if og in group_role and group_role[og] != r["name"]})
         if maybe and r.get("echo_of") is None:
-            rec["may_be_one_sound_with"], rec["may_be_note"] = maybe, "not compared: no clean hit on one side"
+            rec["may_be_one_sound_with"], rec["may_be_note"] = maybe, "not compared: too few clean hits on one side"
         if variants and r.get("echo_of") is None:
             why = _steadiness(r["groups"], r["name"], r["named"], variants)
             rec["name_steady"], rec["name_steady_note"] = why is None, why
