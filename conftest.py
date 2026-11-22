@@ -17,3 +17,14 @@ def _no_held_live_connection():
     if S is not None and getattr(S, "_LIVE", None) is not None:
         S._LIVE[1].close()
         S._LIVE = None
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _own_heavy_job_lock(tmp_path_factory):
+    """No test, whatever its fixtures' scope, takes the real machine-wide lock (~/Library/Caches/roadie),
+    which another job may hold. One temp lock file for the session; test_jobqueue.py sets its own per test."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("ROADIE_QUEUE_LOCK", str(tmp_path_factory.mktemp("queue") / "heavy-job.lock"))
+    mp.delenv("ROADIE_NO_QUEUE", raising=False)
+    yield
+    mp.undo()

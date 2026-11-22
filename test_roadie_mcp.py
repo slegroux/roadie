@@ -343,3 +343,19 @@ def test_arrangement_compare_reading_live_has_a_deadline_and_says_so(S, monkeypa
     assert "took over 0 s" in msg and "saved read" in msg
     tool = next(t for t in asyncio.run(S.mcp.list_tools()) if t.name == "arrangement_compare")
     assert tool.input_schema["properties"]["timeout_s"]["default"] == 240.0
+
+
+def test_drum_roles_says_the_machine_is_busy_instead_of_waiting_for_ever(S, tmp_path, monkeypatch):
+    """Another heavy job holds the queue: the tool waits QUEUE_WAIT_S, then fails naming the holder; nothing ran."""
+    code = ("import sys; sys.path.insert(0, %r)\nfrom roadie_analysis.jobqueue import heavy_job\n"
+            "with heavy_job('roadie split Glacier 3000.wav'):\n    print('held', flush=True); sys.stdin.read()\n"
+            % os.path.dirname(os.path.abspath(__file__)))
+    holder = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        monkeypatch.setattr(S, "QUEUE_WAIT_S", 0.5)
+        monkeypatch.setattr(S.drums, "drum_roles", lambda *a, **k: pytest.fail("ran while the machine was busy"))
+        with pytest.raises(S.AnalysisError, match=r"machine busy: roadie split Glacier 3000.wav \(pid %d, since .*retry later" % holder.pid):
+            S.drum_roles(str(tmp_path))
+    finally:
+        holder.kill()

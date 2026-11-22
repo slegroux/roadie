@@ -38,6 +38,11 @@ PRE_S = 0.040
 POST_S = 0.060
 OWN_S = 0.020
 STEPS = 16
+QUANTUM_S = 0.45         # a slice starts and ends on a multiple of about this many seconds (see section_job)
+SHIFT_WINDOW_MS = 3.0     # ...from the densest cluster of offsets, this wide either side
+SHIFT_SUPPORT = 0.4      # ...and the densest window must hold at least this share of them (40 %: a cluster that is not a minority of two)
+SHIFT_DRIFT_MS = 15.0    # a section's phase may differ from the track-wide one by this much (the drift of 0.005 bpm over a track is 13 ms)
+SHIFT_MIN_HITS = 8       # a section's grid phase is read from its hits' densest offsets when it has at least this many
 
 
 def plan_sections(sections: list | None) -> list[dict]:
@@ -121,6 +126,13 @@ def stem_peak(path, block_s: float = 10.0) -> float:
     return out
 
 
+def slice_quantum(sr: int) -> int:
+    """Samples a slice start and end are rounded to: a multiple of lcm(1 ms, 10 ms in samples), the grids the detector and the DC
+    offset are read on, about QUANTUM_S long at every sample rate (19,404 at 44.1 kHz, 21,600 at 48 kHz)."""
+    base = math.lcm(max(1, int(round(0.001 * sr))), max(1, int(round(0.010 * sr))))
+    return base * max(1, int(round(QUANTUM_S * sr / base)))
+
+
 def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | None = None) -> dict:
     """hit_groups on one section of one stem file. Returns {"res", "offset_s" (where the slice starts in the file), "sr",
     "reps" (group id -> the audio that stands for the group when sections are matched)}, or {"res": None} when the
@@ -132,7 +144,7 @@ def section_job(path, tempo: float, t0: float, sec: dict, ref_power: float | Non
     # offset on 10 ms blocks, both anchored at the slice start, so a slice that begins a few samples later (a grid that moved
     # by 0.001 bpm moves a section line by about a millisecond) finds hits a few samples apart and groups them differently.
     # With a fixed anchor the same audio gives the same hits and groups whatever the grid says.
-    quantum = math.lcm(max(1, int(round(0.001 * sr))), max(1, int(round(0.010 * sr))))
+    quantum = slice_quantum(sr)
     a = 0 if sec["first"] else max(0, int((start_t - PRE_S) * sr) // quantum * quantum)
     b = info.frames if sec["to_end"] else min(info.frames, -(-int((start_t + sec["bars"] * bar_s + POST_S) * sr) // quantum) * quantum)
     if b <= a:
@@ -154,6 +166,55 @@ def _owned(h_time: float, plan: dict, bar_s: float, t0: float) -> bool:
     lo = -np.inf if plan["first"] else t0 + plan["start_bar"] * bar_s - OWN_S
     hi = np.inf if plan["to_end"] else t0 + (plan["start_bar"] + plan["bars"]) * bar_s - OWN_S
     return lo <= h_time < hi
+
+
+def _dense_offset(off: np.ndarray, width_ms: float = SHIFT_WINDOW_MS) -> tuple[float, int]:
+    """(where most of the hits sit, how many hits are there): the offset (ms) with the most hits within `width_ms` either side
+    and the median of those hits, with their number. Not the median of all of them: a stem with two sounds that are detected
+    at different latencies has a median between them that is neither. It moves with the grid exactly (every offset shifts by
+    the same amount), which is what makes the counts that follow steady."""
+    count = np.array([(np.abs(off - x) <= width_ms).sum() for x in off])
+    centre = off[int(np.argmax(count))]
+    near = off[np.abs(off - centre) <= width_ms]
+    return float(np.median(near)), int(len(near))
+
+
+def _phase(off: list) -> float | None:
+    """The phase of a set of hit offsets (ms), or None when there is no cluster to read it from: at least SHIFT_MIN_HITS hits,
+    and the densest window must hold at least SHIFT_SUPPORT of them (scattered hits have no phase)."""
+    if len(off) < SHIFT_MIN_HITS:
+        return None
+    centre, n = _dense_offset(np.array(off))
+    return centre if n >= SHIFT_SUPPORT * len(off) else None
+
+
+def _rephase(hits: list, plan: list, tempo: float, t0: float) -> list:
+    """Measure every hit against its section's phase of the grid, and say what the phase was. The stem's track-wide phase (where
+    most of all its owned hits sit; SHIFT_SUPPORT of them must sit there, else 0) is the default. A section takes its own phase
+    (the same reading over its own hits) only when that is within SHIFT_DRIFT_MS of the track-wide one: the drift of a grid that
+    is a few thousandths of a bpm off is about 13 ms over a track, and a section may follow it. Where a section's own phase is
+    further away, or has no cluster, it falls back to the track-wide one: a part that plays deliberately late stays late
+    however many of its section's hits it makes. `bar`, `step`, `offset_ms` and `on_grid` (within drumroles.GRID_LEAD_S, the
+    core's 20 ms, unchanged) are recomputed against the lines moved by the phase; what a hit is measured from is the only thing
+    that changes, so counts at the edge of the tolerance no longer depend on where the grid happens to lie. The unshifted offset
+    stays in `offset_raw_ms` (against the aligner's grid). Returns the shift of each section (ms, by plan index)."""
+    step_s = 60.0 / tempo / 4
+    usable = [h for h in hits if h["owned"] and h["level_db"] is not None]
+    default = _phase([h["offset_ms"] for h in usable])
+    default = 0.0 if default is None else default
+    shifts = []
+    for si in range(len(plan)):
+        own = _phase([h["offset_ms"] for h in usable if h["section"] == si])
+        shifts.append(own if own is not None and abs(own - default) <= SHIFT_DRIFT_MS else default)
+    for h in hits:
+        h["offset_raw_ms"] = h["offset_ms"]
+        rel = h["onset_s"] - (t0 + shifts[h["section"]] / 1000.0)
+        line = int(round(rel / step_s))
+        h["bar"], h["step"] = divmod(line, STEPS)
+        off = rel - line * step_s
+        h["offset_ms"] = round(1000.0 * off, 2)
+        h["on_grid"] = abs(off) <= drumroles.GRID_LEAD_S
+    return [round(x, 2) for x in shifts]
 
 
 def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float = drumroles.THRESHOLD) -> dict:
@@ -184,6 +245,7 @@ def merge_stem(outs: list, plan: list, tempo: float, t0: float, threshold: float
         if res["hat_like"] is not None:
             out["hat_like"] = max(out["hat_like"] or 0.0, res["hat_like"])
         out["notes"] += [n for n in res["notes"] if n not in out["notes"]]
+    out["section_shift_ms"] = _rephase(hits, plan, tempo, t0)
     out["hits"] = hits
     entries = [(si, g) for si, o in live for g in o["res"]["groups"]]
     n = len(entries)

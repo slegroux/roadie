@@ -321,3 +321,41 @@ def test_the_drum_pass_is_on_with_stems_unless_D(tmp_path, flags, wants_drumsep)
                        cwd=str(tmp_path), check=False)
     asked = "missing: audio-separator" in r.stderr
     assert asked == wants_drumsep, r.stdout + r.stderr
+
+
+HOLD_LOCK = """
+import sys
+sys.path.insert(0, %r)
+from roadie_analysis.jobqueue import heavy_job
+with heavy_job("roadie drums Glacier 3000"):
+    print("held", flush=True)
+    sys.stdin.read()
+""" % HERE
+
+
+def test_split_waits_for_the_heavy_job_lock_and_help_does_not(tmp_path):
+    """`roadie split` takes the machine-wide lock before the separation, names the holder while it
+    waits, and goes on when the holder is done; --help and ROADIE_NO_QUEUE=1 never wait."""
+    src = tmp_path / "Artist - Track.wav"
+    src.write_bytes(b"RIFF")
+    env = _env()
+    env["ROADIE_LOG"] = ""
+    holder = subprocess.Popen([sys.executable, "-c", HOLD_LOCK], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True, env=env)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        assert subprocess.run([ROADIE, "split", "--help"], capture_output=True, text=True, timeout=30, env=env).returncode == 0
+        skip = subprocess.run([ROADIE, "split", str(src), "-o", str(tmp_path / "o1")], capture_output=True, text=True,
+                              timeout=30, env=dict(env, ROADIE_NO_QUEUE="1"), cwd=str(tmp_path))
+        assert "waiting" not in skip.stderr
+        waiter = subprocess.Popen([ROADIE, "split", str(src), "-o", str(tmp_path / "o2")], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, env=env, cwd=str(tmp_path))
+        first = waiter.stderr.readline()
+        assert "roadie drums Glacier 3000" in first and "pid %d" % holder.pid in first, first
+        assert waiter.poll() is None
+        holder.stdin.close()
+        holder.wait(timeout=10)
+        _out, err = waiter.communicate(timeout=60)
+        assert "lock acquired after waiting" in err
+    finally:
+        holder.kill()
