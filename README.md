@@ -341,6 +341,10 @@ next. The file's JSON (pid, command, start time) is only the note the waiting me
 holder starts (a worker process, `yt2stems.sh` with its children) shares the holder's turn and never
 waits for it. `ROADIE_NO_QUEUE=1` skips the queue.
 
+The command line waits as long as it takes. The MCP `drum_roles` tool waits 3 minutes, then fails with
+`machine busy: <job> (pid …, since …); retry later` and runs nothing. `roadie batch` waits for its turn before
+it starts a track's split, so the wait does not count against the split's timeout.
+
 ## Configuration
 
 Roadie reads one optional file, `~/.config/roadie/config` (`$XDG_CONFIG_HOME` is

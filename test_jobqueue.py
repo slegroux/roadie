@@ -74,6 +74,50 @@ def test_a_second_process_waits_for_the_first_and_names_it():
     assert lines[-1].startswith("roadie: lock acquired after waiting")
 
 
+def test_a_bounded_wait_gives_up_and_names_the_holder(monkeypatch):
+    h = holder("roadie drums Glacier 3000")
+    try:
+        t = time.monotonic()
+        with pytest.raises(jobqueue.QueueTimeout, match=r"machine busy: roadie drums Glacier 3000 \(pid %d, since .*\); retry later" % h.pid):
+            with jobqueue.heavy_job("late", poll=0.05, max_wait_s=0.5, stream=open(os.devnull, "w")):
+                pytest.fail("took the lock")
+        assert 0.4 < time.monotonic() - t < 3
+        assert jobqueue.HELD_ENV not in os.environ
+    finally:
+        release(h)
+    with jobqueue.heavy_job("after", poll=0.05, max_wait_s=0.5):     # nothing was left held by the failed wait
+        pass
+
+
+def test_a_failure_after_the_lock_is_taken_does_not_keep_it(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(jobqueue.os, "pwrite", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+        with jobqueue.heavy_job("note cannot be written", poll=0.05):      # the note is best effort
+            pass
+    real, calls = time.monotonic, []
+
+    def breaks_after_the_flock():                  # 1st call: the wait's start; 2nd: just after the flock
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real()
+    with monkeypatch.context() as m:
+        m.setattr(jobqueue.time, "monotonic", breaks_after_the_flock)
+        with pytest.raises(RuntimeError, match="boom"):
+            jobqueue.acquire("broken", poll=0.05)
+    out, err = spawn(TAKE, "next").communicate(timeout=10)             # the descriptor was closed: the lock is free
+    assert out.strip() == "done" and err == "", err
+    assert jobqueue.HELD_ENV not in os.environ
+
+
+def test_a_bare_file_name_is_a_lock_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ROADIE_QUEUE_LOCK", "heavy.lock")
+    with jobqueue.heavy_job("here", poll=0.05):
+        pass
+    assert (tmp_path / "heavy.lock").exists()
+
+
 def test_a_killed_holder_frees_the_lock():
     h = holder("doomed")
     h.send_signal(signal.SIGKILL)

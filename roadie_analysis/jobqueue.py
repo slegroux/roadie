@@ -87,8 +87,13 @@ class _Lock:
         self.fd = None
 
 
-def acquire(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None) -> _Lock:
-    """Take the lock, waiting for it. Prints who holds it to `stream` (stderr) once, then every `repeat` s."""
+class QueueTimeout(Exception):
+    """The lock stayed taken for `max_wait_s`. str() names the holder."""
+
+
+def acquire(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None, max_wait_s: float | None = None) -> _Lock:
+    """Take the lock, waiting for it (`max_wait_s` seconds at most; None: as long as it takes, then
+    QueueTimeout). Prints who holds it to `stream` (stderr) once, then every `repeat` s."""
     global _process_holds
     stream = stream or sys.stderr
     if bypassed():
@@ -97,7 +102,7 @@ def acquire(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None) -
         _local.depth += 1
         return _Lock(None, owns_depth=True)
     path = lock_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     t0 = time.monotonic()
     told = None                       # when the last waiting line went out
@@ -113,21 +118,26 @@ def acquire(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None) -
                 return _Lock(None)
             now = time.monotonic()
             info = _holder(fd)
+            if max_wait_s is not None and now - t0 >= max_wait_s:
+                raise QueueTimeout("machine busy: %s; retry later" % _holder_text(info))
             if told is None and (info.get("pid") or now - t0 > 2):   # a new holder writes its note a moment after locking
                 print("roadie: waiting for %s; ROADIE_NO_QUEUE=1 skips the queue" % _holder_text(info), file=stream, flush=True)
                 told = now
             elif told is not None and now - told >= repeat:
                 print("roadie: still waiting for %s (%s so far)" % (_holder_text(info), _span(now - t0)), file=stream, flush=True)
                 told = now
-            time.sleep(poll)
+            time.sleep(poll if max_wait_s is None else max(0.0, min(poll, max_wait_s - (now - t0))))
+        try:                          # the note only tells waiters who holds the lock: best effort
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, json.dumps({"pid": os.getpid(), "label": label, "started": time.time()}).encode(), 0)
+        except OSError:
+            pass
+        waited = time.monotonic() - t0
+        previous = os.environ.get(HELD_ENV)
+        os.environ[HELD_ENV] = path
     except BaseException:
-        os.close(fd)
+        os.close(fd)                  # closing drops the flock, so a failure never leaves it held
         raise
-    waited = time.monotonic() - t0
-    os.ftruncate(fd, 0)
-    os.pwrite(fd, json.dumps({"pid": os.getpid(), "label": label, "started": time.time()}).encode(), 0)
-    previous = os.environ.get(HELD_ENV)
-    os.environ[HELD_ENV] = path
     _process_holds += 1
     _local.depth = 1
     if told is not None:
@@ -136,8 +146,8 @@ def acquire(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None) -
 
 
 @contextlib.contextmanager
-def heavy_job(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None):
-    lock = acquire(label, repeat, poll, stream)
+def heavy_job(label: str, repeat: float = 60.0, poll: float = 0.25, stream=None, max_wait_s: float | None = None):
+    lock = acquire(label, repeat, poll, stream, max_wait_s)
     try:
         yield
     finally:

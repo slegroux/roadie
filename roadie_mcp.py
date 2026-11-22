@@ -56,7 +56,7 @@ import arrangement
 import roadie_drums
 import study
 from roadie_analysis import drums, oneshot, profile
-from roadie_analysis.jobqueue import heavy_job
+from roadie_analysis.jobqueue import QueueTimeout, heavy_job
 
 mcp = MCPServer(
     "roadie",
@@ -120,6 +120,9 @@ def _profile(source: str, hit: int | str | None) -> dict:
         raise AnalysisError("cannot measure %s: %s" % (path, e))
 
 
+QUEUE_WAIT_S = 180.0    # how long drum_roles waits for the machine before it says it is busy
+
+
 @mcp.tool()
 def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
                sections: list[dict[str, Any]] | None = None, out: str | None = None,
@@ -141,15 +144,19 @@ def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
     nothing. A study on the pCloud library is copied to a temp folder with rclone, analysed there and its results uploaded
     with rclone (never through the mount). It reads
     audio and takes minutes: `timeout_s` is a deadline checked as jobs finish, and passing it is a tool error that
-    writes nothing (jobs already started run on in the background). Local, except rclone for the pCloud library."""
+    writes nothing (jobs already started run on in the background). Heavy jobs queue for the machine: when another
+    `roadie split` or `roadie drums` holds it, this call waits up to 3 minutes, then fails with "machine busy"
+    naming the job and its pid, and nothing ran: retry later. Local, except rclone for the pCloud library."""
     try:
         folder = os.path.abspath(os.path.expanduser(stems.strip()))
         if not os.path.isdir(folder):
             folder = str(roadie_drums.stems_dir_of(stems))
-        with heavy_job("roadie drums %s (mcp)" % folder):    # waiting for the machine does not use up timeout_s
+        with heavy_job("roadie drums %s (mcp)" % folder, max_wait_s=QUEUE_WAIT_S):    # waiting does not use up timeout_s
             rec = drums.drum_roles(folder, tempo, t0, sections,
                                    os.path.abspath(os.path.expanduser(out)) if out else None,
                                    write=write, deadline=time.monotonic() + timeout_s, jobs=jobs)
+    except QueueTimeout as e:
+        raise AnalysisError(str(e))
     except TimeoutError as e:
         raise AnalysisError("drum_roles ran out of time (%g s): %s; nothing was written" % (timeout_s, e))
     except MemoryError:
