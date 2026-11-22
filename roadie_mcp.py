@@ -133,7 +133,7 @@ def drum_roles(stems: str, tempo: float | None = None, t0: float | None = None,
     files to bar 0, a bar line) and `sections` ({"name", "start_bar", "bars"}, bars counted from t0) default
     to the folder's alignment.json and sections.json. Each stem is analysed section by section (a section under 8 bars
     joins its neighbour; no sections: the whole track) and the sections' groups are matched by sound, so a role keeps
-    one name over the track and has a pattern per section (`per_section`); `jobs` processes run it (default: the cores).
+    one name over the track and has a pattern per section (`per_section`); `jobs` processes run it (default: the fast cores).
     A role name is a rule over pattern and measurements,
     never recognition: a group no rule fits keeps a neutral name (`hh 2`) with the reason; a group that is
     another stem's sound leaking in is listed under `bleed` and is not a role (docs/DRUMROLES.md).

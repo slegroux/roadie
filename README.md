@@ -254,7 +254,7 @@ The MCP tool `arrangement_compare` takes the same arguments.
 
 ```bash
 roadie drums Glacier               # a study or a stems folder: table per stem and section, writes drums.json and drum_roles/*.wav
-roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the cores)
+roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the fast cores)
 roadie drums Glacier --no-write    # the table only
 roadie drums Glacier --json        # the drums.json record
 ```
@@ -324,7 +324,8 @@ comes from, and the known misnames (a rim rule that also names some hats, "tom" 
 
 ## Heavy jobs queue
 
-`roadie split` (the separation) and `roadie drums` (also the MCP `drum_roles` tool) each take one
+`roadie split` (the separation), `roadie drums` (also the MCP `drum_roles` tool) and the drum stability check
+(`python -m roadie_analysis.drumstability`, its seven runs as one job) each take one
 machine-wide lock before the heavy part, so jobs started from several terminals or agents run one after
 another instead of fighting for the cores and the graphics memory. Nothing else queues: `--help`, `load`,
 `sections`, `key`, `study` and the other commands start at once.

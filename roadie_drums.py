@@ -37,7 +37,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roadie drums", description="Drum roles of a study's drum stems")
     ap.add_argument("target", help="a study (title or path) or a stems folder")
     ap.add_argument("--json", action="store_true", help="print the drums.json record instead of the table")
-    ap.add_argument("--jobs", type=int, default=None, metavar="N", help="processes for the (stem, section) jobs (default: the cores; 1: one process)")
+    ap.add_argument("--jobs", type=int, default=None, metavar="N", help="processes for the (stem, section) jobs (default: the fast cores; 1: one process)")
     ap.add_argument("--no-write", action="store_true", help="write no drums.json and no clips")
     args = ap.parse_args(argv)
     try:
