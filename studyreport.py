@@ -309,37 +309,43 @@ def micro_markdown(mc: dict | None) -> list[str]:
         return "- (%s)" % ((x or {}).get("notes") or [default])[-1] if x is not None else "- (no stem)"
 
     # bass
-    L += ["", "### Bass", "", "| Section | Bars playing | Rhythm (share of bars) | 16th steps | Onsets/bar | On 1 / on 8th offbeats "
-          "| Notes (degrees) | Register | Pedal or moving | Duty | Repeat |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+    L += ["", "### Bass", "", "Rhythm: the most common one-bar pattern, with its share of the bars that have an onset on the grid. "
+          "Level dips: the 16ths %g dB or more under the loudest (a sidechain or a gap)." % DIP_DB, "",
+          "| Section | Bars playing | Rhythm (share of bars with onsets) | 16th steps | Onsets/bar | On 1 / on 8th offbeats "
+          "| Level dips | Notes (degrees) | Register | Pedal or moving | Duty | Repeat |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
         b = s["bass"]
         if not b or not b["bars_playing"]:
-            L.append("| %s | 0 | %s | | | | | | | | |" % (s["name"], why(b)))
+            L.append("| %s | 0 | %s | | | | | | | | | |" % (s["name"], why(b)))
             continue
         degs = b["degrees"] or b.get("pitch_names")
         notes = ", ".join("%s %s" % (x.get("degree") or x["note"], _pct(x["share"])) for x in degs) if degs else "-"
-        L.append("| %s | %d of %d | %s%s (%s) | %s | %s | %s / %s | %s | %s (%s) | %s | %s %s | %s |" % (
-            s["name"], b["bars_playing"], s["bars"], _code(b["rhythm"]), f, _pct(b["rhythm_share"]),
+        L.append("| %s | %d of %d | %s%s (%s of %s) | %s | %s | %s / %s | %s | %s | %s (%s) | %s | %s %s | %s |" % (
+            s["name"], b["bars_playing"], s["bars"], _code(b["rhythm"]), f, _pct(b["rhythm_share"]), b.get("bars_with_onsets", "?"),
             ", ".join(map(str, b["rhythm_steps"] or [])) or "-", _num(b["onsets_per_bar"]),
-            _pct(b["on_step1_share"]), _pct(b["on_offbeat_8ths_share"]), notes, b["register"] or "-",
+            _pct(b["on_step1_share"]), _pct(b["on_offbeat_8ths_share"]), _dips(b.get("level_by_16th_db"), f), notes, b["register"] or "-",
             b.get("register_range") or "-",
             "%s (%s %s, %s classes)" % (b["movement"], b["top_pitch_class"], _pct(b["top_pitch_class_share"]), b["pitch_classes"])
             if b["movement"] else "-", _num(b["duty"], "%.2f"), b["style"] or "", _repeat(b, f)))
     # synths
     L += ["", "### Synths", "", "Leads and pads are one stem: the rhythm and the chords are of both together.", "",
-          "| Section | Bars playing | Rhythm (share of bars) | Onsets/bar | Progression | Bars per chord | Chords | Drone | Repeat |",
-          "|---|---|---|---|---|---|---|---|---|"]
+          "Chords change when the root does (VII, VII5 and VIIsus2 in a row are one VII); the progression is the shortest "
+          "cycle at which 75 % of the changes repeat, with that share when it is not all of them.", "",
+          "| Section | Bars playing | Rhythm (share of bars with onsets) | Onsets/bar | Level dips | Progression | Bars per chord | Chords "
+          "| Held (90 % of bars) | Repeat |", "|---|---|---|---|---|---|---|---|---|---|"]
     for s in secs:
         y = s["synths"]
         if not y or not y["bars_playing"]:
-            L.append("| %s | 0 | %s | | | | | | |" % (s["name"], why(y)))
+            L.append("| %s | 0 | %s | | | | | | | |" % (s["name"], why(y)))
             continue
         drone = y.get("drone") or {}
         held = ", ".join("%s%s %s" % (pc, " (%s)" % dg if dg else "", _pct(sh)) for pc, dg, sh in zip(
             drone.get("pitch_classes", []), drone.get("degrees", [None] * 12), drone.get("bars_share", []))) or "none"
-        L.append("| %s | %d of %d | %s%s (%s) | %s | %s%s | %s | %s | %s | %s |" % (
-            s["name"], y["bars_playing"], s["bars"], _code(y["rhythm"]), f, _pct(y["rhythm_share"]), _num(y["onsets_per_bar"]),
-            y["progression"] or "-", f, ("%g" % y["bars_per_chord"] + f) if y["bars_per_chord"] else
+        prog = (y["progression"] or "-") + f + (" (%s)" % _pct(y["progression_share"])
+                                                if y.get("progression_share") not in (None, 1.0) else "")
+        L.append("| %s | %d of %d | %s%s (%s of %s) | %s | %s | %s | %s | %s | %s | %s |" % (
+            s["name"], y["bars_playing"], s["bars"], _code(y["rhythm"]), f, _pct(y["rhythm_share"]), y.get("bars_with_onsets", "?"),
+            _num(y["onsets_per_bar"]), _dips(y.get("level_by_16th_db"), f), prog, ("%g" % y["bars_per_chord"] + f) if y["bars_per_chord"] else
             ("whole section" if y.get("runs") and len(y["runs"]) == 1 else "-"),
             ", ".join(y["distinct_chords"] or []) or "-", held, _repeat(y, f)
             + (", loop %d bars" % y["loop_bars"] if y.get("loop_bars") else "")))
@@ -354,7 +360,8 @@ def micro_markdown(mc: dict | None) -> list[str]:
         L.append("| %s | %s%s | %s | %s |" % (s["name"], v["bars_with_vocal"], f, _pct(v["share"]),
                                               (starts + f) if starts else "- (%s)" % (v["notes"] or ["none"])[-1]))
     # drums
-    L += ["", "### Drums", "", "Roles and patterns from drums.json (`x` most bars, `o` some, `.` fewer); not measured again here.", "",
+    L += ["", "### Drums", "", "Roles and patterns from drums.json (`x` most bars, `o` some, `.` fewer), the roles with 4 or more hits "
+          "in the section; not measured again here.", "",
           "| Section | Stem | Role | Pattern | Hits | Bars with | Hat accent |", "|---|---|---|---|---|---|---|"]
     for s in secs:
         dr = s["drums"]
@@ -374,6 +381,17 @@ def micro_markdown(mc: dict | None) -> list[str]:
     if notes:
         L += ["", "Micro notes:"] + ["- %s" % n for n in notes]
     return L
+
+
+DIP_DB = 6.0
+
+
+def _dips(levels, f) -> str:
+    """The 16ths (1-based) DIP_DB or more under the loudest, from level_by_16th_db."""
+    if not levels:
+        return "-"
+    low = [i + 1 for i, v in enumerate(levels) if v is None or v <= -DIP_DB]
+    return ("16ths %s%s" % (", ".join(map(str, low)), f)) if low else "none"
 
 
 def _repeat(x, f) -> str:

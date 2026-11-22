@@ -52,13 +52,13 @@ def make_study(root, verdict="confident", micro=None, mix=True, key=True):
 
 
 def micro_record(reliable=True):
-    bass = {"bars_playing": 8, "rhythm": "o..o o... o..o o...", "rhythm_steps": [1, 4, 5, 9, 12, 13], "rhythm_share": 0.75,
+    bass = {"bars_playing": 8, "bars_with_onsets": 8, "level_by_16th_db": [-12.0, -3.0] + [0.0] * 14, "rhythm": "o..o o... o..o o...", "rhythm_steps": [1, 4, 5, 9, 12, 13], "rhythm_share": 0.75,
             "onsets_per_bar": 6.0, "off_grid_share": 0.0, "on_step1_share": 0.17, "on_offbeat_8ths_share": 0.0,
             "degrees": [{"degree": "1", "note": "A", "share": 0.5}, {"degree": "b3", "note": "C", "share": 0.5}],
             "pitch_names": None, "pitched_share": 1.0, "pitch_classes": 2, "top_pitch_class": "A", "top_pitch_class_share": 0.5,
             "movement": "moving", "register": "A1", "register_range": "A1-C2", "duty": 0.3, "style": "stabby",
             "repeat_bars": 1, "changes_at_bars": [8], "notes": []}
-    synths = {"bars_playing": 8, "rhythm": "o... .... .... ....", "rhythm_steps": [1], "rhythm_share": 1.0, "onsets_per_bar": 1.0,
+    synths = {"bars_playing": 8, "bars_with_onsets": 8, "level_by_16th_db": [0.0] * 16, "progression_share": None, "rhythm": "o... .... .... ....", "rhythm_steps": [1], "rhythm_share": 1.0, "onsets_per_bar": 1.0,
               "off_grid_share": 0.0, "chords": ["i"] * 4 + ["VI"] * 4, "progression": "i VI", "bars_per_chord": 4.0,
               "loop_bars": None, "distinct_chords": ["i", "VI"], "drone": {"pitch_classes": [], "bars_share": [], "degrees": []},
               "repeat_bars": 1, "changes_at_bars": [5], "runs": [{"chord": "i", "bars": 4}, {"chord": "VI", "bars": 4}],
@@ -101,8 +101,8 @@ def test_known_grid_gives_the_section_map_kick_out_and_groove_blocks(tmp_path):
     assert "| Drop 1 | 1 | 9 | 8 | kick bass hats synths |" in md and "| 9 | 8 | Breakdown |" in md
     assert "A minor (Am, Camelot 8A), source online, https://example.org/track" in md
     assert studyreport.FLAG not in md
-    assert "`o..o o... o..o o...` (75 %)" in md and "1 50 %, b3 50 %" in md and "A1 (A1-C2)" in md
-    assert "| Drop 1 | 8 of 8 | `o... .... .... ....` (100 %) | 1 | i VI | 4 | i, VI |" in md
+    assert "`o..o o... o..o o...` (75 % of 8)" in md and "| 16ths 1 |" in md and "1 50 %, b3 50 %" in md and "A1 (A1-C2)" in md
+    assert "| Drop 1 | 8 of 8 | `o... .... .... ....` (100 % of 8) | 1 | none | i VI | 4 | i, VI |" in md
     assert "missing (no per-hit levels in drums.json)" in md and "- (silent in this section)" in md
     assert "missing: drums" in md and "missing: micro" not in md
 

@@ -101,6 +101,7 @@ def test_bass_rhythm_and_degrees_are_read_back(measured):
         assert b["register"] in ("A1", "C2") and b["register_range"] == "A1-C2"
         assert b["style"] == "stabby" and b["duty"] < 0.5
         assert b["repeat_bars"] == 1 and b["changes_at_bars"] == []
+        assert b["bars_with_onsets"] == 8 and len(b["level_by_16th_db"]) == 16 and max(b["level_by_16th_db"]) == 0.0
         assert s["reliable"] is True
 
 
@@ -184,3 +185,10 @@ def test_repeat_period_is_the_smallest_that_holds_in_75_percent():
     assert micro.repeat(["a", "b", "c", "d"] * 2 + ["a", "b", "c", "x"]) == (4, [12])
     assert micro.repeat(list("abcdefgh")) == (None, list(range(2, 9)))
     assert micro.repeat(["a", None, "a", "a"]) == (1, [])
+
+
+def test_progression_is_the_shortest_cycle_that_fits():
+    assert micro.cycle(["iv", "VI", "i", "VII"] * 3 + ["iv"]) == (4, 1.0, ["iv", "VI", "i", "VII"])
+    assert micro.cycle(list("abcabcabd")) == (3, 0.83, list("abc"))
+    assert micro.cycle("VI i VII iv VI i VII iv VI i VII i iv".split())[2] == ["VI", "i", "VII", "iv"]  # one extra i
+    assert micro.cycle(["i", "VI"]) == (2, None, ["i", "VI"])          # once through: no cycle to speak of

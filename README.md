@@ -346,16 +346,20 @@ constant tempo), the report says why at the top and marks each of those numbers 
 `roadie micro` uses the grid and sections of the stems folder, with bar 0 placed as `drums.json` places it (the
 downbeat moved back whole bars to the first bar line in the file). A stem plays in a bar by the rule
 `sections.json` uses; onsets count only there, and one within 30 % of a 16th of a line is on it (else off-grid,
-counted, never moved). Per section:
+counted, never moved); an onset is the start of the rise before a spectral-flux peak (librosa's backtrack), since
+the peak itself comes late on a slow attack. Per section:
 
 - **bass** (`bass.flac`): the most common one-bar rhythm (`o..o o... o..o o...`, with its 16th steps `1, 4, 5, 9, 12,
   13`) and its share of the bars, onsets per bar, the share of onsets on step 1 and on the 8th offbeats, the notes
   (pyin per onset) as scale degrees of the study's key with their shares, the median register and range, the
-  number of pitch classes and the top one's share (`pedal` at 75 % or more, else `moving`), and the duty (sounding
-  time per bar: `stabby` under 0.5, `continuous` from 0.8).
+  number of pitch classes and the top one's share (`pedal` at 75 % or more, else `moving`), the duty (sounding
+  time per bar: `stabby` under 0.5, `continuous` from 0.8), and its level at each 16th of the bar (the report lists
+  the 16ths 6 dB or more under the loudest: a sidechain dip shows there even when a continuous bass has no note
+  starts to count).
 - **synths** (`synths.wav`): the rhythm as for the bass, a chord per bar from chroma (major, minor, sus2, sus4, root
-  and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major), the progression, bars per
-  chord, the distinct chords, and the pitch classes held in 90 % of the bars (a drone, or a tone the chords share).
+  and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major); a chord lasts while its root
+  holds, so the progression (the shortest cycle of roots at which 75 % of the changes repeat, with that share), bars per
+  chord and the distinct chords follow the root, and the pitch classes held in 90 % of the bars (a drone, or a tone the chords share).
   **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
 - **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat
   (a pickup shows as `.4`).

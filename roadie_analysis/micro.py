@@ -28,6 +28,8 @@ Choices:
   near-ties go to the root of the bass's first note in that bar (sus2 on C and sus4 on G are the same notes). Named
   relative to the key: diatonic degrees of its scale plain (`i`, `VI`, `III`, `VII` in a minor key), others with b/#;
   upper case for major, lower for minor, a sus or root+5 chord in the case of the scale's own triad (`i5`, `Vsus4`).
+  A chord run lasts while the root holds; the progression is the shortest cycle of roots at which 75 % of the runs
+  equal the run that many before (coming round twice), else every run in order.
   The synths stem is leads and pads together: chords and rhythm are of the mix of both.
 - Drone: a pitch class at DRONE_LEVEL of the bar's strongest in at least 90 % of the bars the synths play. A common
   tone of the chords counts too: it is "held", not necessarily one sustained note.
@@ -44,6 +46,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -80,6 +83,8 @@ OFFBEAT_8THS = (2, 6, 10, 14)  # 0-based 16ths: the "and" of each beat
 AUDIO = (".flac", ".wav")
 STEMS = ("bass", "synths", "vocals")
 HAT_STEMS = ("hh", "ride")
+BASS_FMAX = 1000.0         # the bass's onsets are read below this: above it a separated bass is mostly artefacts
+FEW_ONSETS = 2.0           # a continuous bass with fewer onsets a bar than this moves in level, not in note starts
 
 PC_NAMES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
 DEGREES = ("1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7")
@@ -226,13 +231,17 @@ def loud_level(fdb: np.ndarray) -> float | None:
     return float(np.percentile(audible, 95)) if len(audible) >= 10 else None
 
 
-def onsets(y, sr, fdb: np.ndarray, loud: float) -> np.ndarray:
-    """Onset times (s) of the stem that rise within ONSET_FLOOR_DB of its loud frame level."""
+def onsets(y, sr, fdb: np.ndarray, loud: float, fmax: float | None = None) -> np.ndarray:
+    """Onset times (s) of the stem that rise within ONSET_FLOOR_DB of its loud frame level: spectral flux on a log mel
+    spectrogram (up to `fmax`), each peak moved back to the energy minimum before it (librosa's backtrack), which is
+    where the note starts: the flux peak itself comes late on a slow attack (on a separated bass, 70 % of the peaks
+    fell off the 16ths, 18 % once backtracked)."""
     import librosa
-    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP)
-    fr = librosa.onset.onset_detect(onset_envelope=env, sr=sr, hop_length=HOP, units="frames")
+    S = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=HOP, n_mels=64 if fmax else 128, fmax=fmax)
+    env = librosa.onset.onset_strength(S=librosa.power_to_db(S), sr=sr, hop_length=HOP)
+    fr = librosa.onset.onset_detect(onset_envelope=env, sr=sr, hop_length=HOP, units="frames", backtrack=True)
     keep = []
-    span = max(1, int(round(0.06 * sr / HOP)))
+    span = max(1, int(round(0.1 * sr / HOP)))
     for f in fr:
         if f < len(fdb) and float(fdb[f:f + span].max()) >= loud - ONSET_FLOOR_DB:
             keep.append(f)
@@ -248,6 +257,22 @@ def place(times, t0: float, bar_s: float) -> list[dict]:
         k = int(round(q))
         out.append({"t": float(t), "bar": k // STEPS, "step": k % STEPS, "on_grid": abs(q - k) <= GRID_TOL})
     return out
+
+
+def level_by_16th(fdb: np.ndarray, t0: float, bar_s: float, bars) -> list[float] | None:
+    """The stem's mean level at each 16th of the bar over `bars`, in dB under the loudest 16th: where a part sounds
+    in the bar even when it has no note starts (a sidechained or filtered continuous part). None with no frames."""
+    ft = np.arange(len(fdb)) * HOP / SR
+    pos = (ft - t0) / bar_s
+    sel = np.isin(np.floor(pos).astype(int), list(bars))
+    if not sel.any():
+        return None
+    step = np.floor((pos[sel] % 1.0) * STEPS).astype(int)
+    p = 10 ** (fdb[sel] / 10.0)
+    m = np.array([p[step == k].mean() if (step == k).any() else 0.0 for k in range(STEPS)])
+    if not m.max() > 0:
+        return None
+    return [round(float(10 * np.log10(v / m.max())), 1) if v > 0 else None for v in m]
 
 
 def bass_pitches(y_low, sr, times) -> list[float | None]:
@@ -303,6 +328,23 @@ def match_chord(vec, bass_pc: int | None = None) -> dict | None:
     return {"root": best[1], "quality": best[2], "score": round(best[0], 3), "margin": round(best[0] - other[0], 3)}
 
 
+def cycle(seq: list) -> tuple[int, float | None, list]:
+    """(k, share, cycle) for a sequence of chord runs: the smallest k at which a run equals the run k before in at least
+    REPEAT_SHARE of the pairs (so one extra or missing chord breaks a few pairs, not the phase of all that follow), the
+    sequence coming round at least twice; the cycle is its most common window of k runs, rotated to start where the
+    section does when it can. With none, the whole sequence and share None."""
+    n = len(seq)
+    for k in range(1, n // 2 + 1):
+        share = sum(seq[i] == seq[i - k] for i in range(k, n)) / (n - k)
+        if share >= REPEAT_SHARE:
+            cyc = list(Counter(tuple(seq[i:i + k]) for i in range(n - k + 1)).most_common(1)[0][0])
+            if seq[0] in cyc:
+                j = cyc.index(seq[0])
+                cyc = cyc[j:] + cyc[:j]
+            return k, round(share, 2), cyc
+    return n, None, list(seq)
+
+
 def repeat(sigs: list) -> tuple[int | None, list[int]]:
     """(period, changes) for per-bar signatures (None = the part is silent that bar); see the module docstring. Bars in
     `changes` are 1-based within the section."""
@@ -330,7 +372,8 @@ def rhythm_fields(placed: list[dict], playing: np.ndarray, sec) -> dict:
     on = [o for o in mine if o["on_grid"]]
     per_bar = {b: frozenset(o["step"] for o in on if o["bar"] == b) for b in bars}
     with_onsets = [s for s in per_bar.values() if s]
-    out = {"bars_playing": len(bars), "rhythm": None, "rhythm_steps": None, "rhythm_share": None,
+    out = {"bars_playing": len(bars), "bars_with_onsets": len(with_onsets), "rhythm": None, "rhythm_steps": None,
+           "rhythm_share": None,
            "onsets_per_bar": round(len(mine) / len(bars), 2) if bars else None,
            "off_grid_share": round(1 - len(on) / len(mine), 2) if mine else None, "notes": []}
     if with_onsets:
@@ -366,10 +409,12 @@ def bass_section(sec, placed, pitches, playing, sounding, tonic) -> dict:
         n = sum(pcs.values())
         kept = [(pc, c) for pc, c in pcs.most_common() if c / n >= MIN_PC_SHARE]
         top_pc, top_c = kept[0] if kept else pcs.most_common(1)[0]
+        counted = {pc for pc, _ in kept}
+        reg = [m for m in notes if m % 12 in counted] or notes                   # the register of the notes counted
         out.update(pitch_classes=len(kept), top_pitch_class=PC_NAMES[top_pc], top_pitch_class_share=round(top_c / n, 2),
                    movement="pedal" if top_c / n >= PEDAL_SHARE else "moving",
-                   register=note_name(sorted(notes)[(len(notes) - 1) // 2]),
-                   register_range="%s-%s" % (note_name(min(notes)), note_name(max(notes))),
+                   register=note_name(sorted(reg)[(len(reg) - 1) // 2]),
+                   register_range="%s-%s" % (note_name(min(reg)), note_name(max(reg))),
                    pitched_share=round(n / total, 2) if total else None)
         out["pitch_names"] = [{"note": PC_NAMES[pc], "share": round(c / n, 2)} for pc, c in kept]
         if tonic is not None:
@@ -379,7 +424,7 @@ def bass_section(sec, placed, pitches, playing, sounding, tonic) -> dict:
         for b in bars:
             here = [int(round(p)) % 12 for o, p in pitched if o["bar"] == b]
             root_of[b] = here[0] if here else None              # the bar's first pitched note: the root it sits on
-            pcs_of[b] = frozenset(here)
+            pcs_of[b] = frozenset(pc for pc in here if pc in counted)     # a pitch-tracking slip does not break a repeat
     elif bars:
         out["notes"].append("pitch: no onset had a pitch pyin could follow")
     if bars:
@@ -419,26 +464,34 @@ def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict
     out["chord_margin"] = round(float(np.median([c["margin"] for c in chords if c])), 3) if any(chords) else None
     if tonic is None:
         out["notes"].append("chords are named absolutely: the study has no key (roadie key, then roadie study tag)")
-    runs = []
-    for lab in label:
+    runs = []                                   # [label, bars, labels]: a run is a stretch on one root
+    for c, lab in zip(chords, label):
         if lab is None:
             continue
-        if runs and runs[-1][0] == lab:
+        if runs and runs[-1][3] == c["root"]:
             runs[-1][1] += 1
+            runs[-1][2].append(lab)
         else:
-            runs.append([lab, 1])
+            runs.append([lab, 1, [lab], c["root"]])
+    for r in runs:                              # a run is named by its most common chord (VII, VII5, VIIsus2: VII)
+        r[0] = Counter(r[2]).most_common(1)[0][0]
     if runs:
         seq = [r[0] for r in runs]
-        k = next(k for k in range(1, len(seq) + 1) if all(seq[i] == seq[i % k] for i in range(len(seq))))
-        out["progression"] = " ".join(seq[:k])
+        k, share, cyc = cycle([re.sub(r"(5|sus2|sus4)$", "", x) for x in seq])     # the cycle of roots: VII and VIIsus2 are one
+        out["progression"] = " ".join(cyc)
+        out["progression_share"] = share
         lengths = [r[1] for r in runs[1:-1]] if len(runs) >= 3 else [r[1] for r in runs]
         out["bars_per_chord"] = float(np.median(lengths)) if len(runs) > 1 else None
         if len(runs) == 1:
             out["notes"].append("one chord through the section: no chord change")
-        if len(seq) >= 2 * k and k > 1:
+        if share == 1.0 and len(seq) >= 2 * k and k > 1:
             out["loop_bars"] = int(sum(r[1] for r in runs[:k]))
+        if share is not None and share < 1.0:
+            out["notes"].append("progression: the cycle that fits %d %% of the chord changes" % round(100 * share))
+        elif share is None and len(seq) >= 4:
+            out["notes"].append("progression: no cycle repeats, every change listed")
         out["distinct_chords"] = sorted(set(seq), key=seq.index)
-        out["runs"] = [{"chord": c, "bars": n} for c, n in runs]
+        out["runs"] = [{"chord": r[0], "bars": r[1]} for r in runs]
     played = [chroma[b] for b in bars if b in per_bar and b < len(chroma) and chroma[b].max() > 0]
     if played:
         present = np.array([v / v.max() >= DRONE_LEVEL for v in played])
@@ -509,7 +562,7 @@ def drum_section(sec, drums: dict | None) -> dict | None:
             if r.get("measured", 0) < drummod.MIN_SHOWN:
                 continue
             v = next((v for v in r.get("per_section", []) if v.get("index") == idx), None)
-            if v is None:
+            if v is None or v["hits"] < drummod.MIN_SHOWN:          # a role with a hit or two here is not its pattern
                 continue
             row = {"stem": kind, "role": r["name"], "named": r.get("named"), "hits": v["hits"], "bars_with": v["bars_with"],
                    "pattern": " ".join(v["line"][i:i + 4] for i in range(0, STEPS, 4))}
@@ -541,6 +594,11 @@ def study_key(marker: dict | None) -> dict | None:
         return None
     return {"name": keymod.key_name(pc, mode), "tonic": pc, "mode": mode, "camelot": keymod.camelot(pc, mode),
             "source": marker.get("key_source"), "confidence": marker.get("key_confidence")}
+
+
+def _level(m: dict, sec: dict, t0: float, bar_s: float) -> list[float] | None:
+    bars = [b for b in _bars_of(sec) if b < len(m["playing"]) and m["playing"][b]]
+    return level_by_16th(m["fdb"], t0, bar_s, bars) if bars else None
 
 
 def micro(stems_dir, key: dict | None = None) -> dict:
@@ -583,7 +641,7 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             notes.append("%s stem is silent" % n)
             meas[n]["placed"] = []
             continue
-        meas[n]["placed"] = [o for o in place(onsets(y, SR, fdb, loud), t0, bar_s)
+        meas[n]["placed"] = [o for o in place(onsets(y, SR, fdb, loud, BASS_FMAX if n == "bass" else None), t0, bar_s)
                              if 0 <= o["bar"] < n_bars and playing[o["bar"]]]
     bass_roots = {}
     pitches = []
@@ -608,6 +666,10 @@ def micro(stems_dir, key: dict | None = None) -> dict:
         if "bass" in meas and meas["bass"]["loud"] is not None:
             b = bass_section(sec, meas["bass"]["placed"], pitches, meas["bass"]["playing"], sounding, tonic)
             bass_roots.update(b.pop("_root_of", {}))
+            b["level_by_16th_db"] = _level(meas["bass"], sec, t0, bar_s)
+            if b["style"] == "continuous" and (b["onsets_per_bar"] or 0) < FEW_ONSETS:
+                b["notes"].append("continuous with under %g onsets a bar: its rhythm is in its level (sidechain, filter), "
+                                  "not in note starts: see level_by_16th_db" % FEW_ONSETS)
             rec["bass"] = b
         else:
             rec["bass"] = None
@@ -615,6 +677,7 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             rec["synths"] = synth_section(sec, meas["synths"]["placed"], meas["synths"]["playing"], chroma, bass_roots,
                                           tonic, mode)
             rec["synths"]["notes"].insert(0, SYNTHS_NOTE)
+            rec["synths"]["level_by_16th_db"] = _level(meas["synths"], sec, t0, bar_s)
         else:
             rec["synths"] = None
         if "vocals" in meas and meas["vocals"]["loud"] is not None:
