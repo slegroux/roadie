@@ -308,6 +308,7 @@ def test_detects_the_16_bar_alternation(synth_dir):
     assert beats == [b * BLOCK_BEATS for b in range(N_BLOCKS)]
 
 
+@pytest.mark.slow
 def test_synthetic_boundaries_are_valid(synth_dir):
     sections = detect_sections(synth_dir, phrase_bars=8, n_segments=N_BLOCKS,
                                period=PERIOD, grid_t0=0.0)

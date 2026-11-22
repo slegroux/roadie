@@ -16,20 +16,37 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: setup plus call of 5 s or more in CI (real audio through the analysis); "
-                                       "plain pytest runs it, CI selects with -m slow / -m \"not slow\"")
+    config.addinivalue_line("markers", "slow: CI runs it in the slow suite, not on every pull request. Marked on whole files "
+                                       "where a module fixture or the analysis dominates, otherwise on single tests that took "
+                                       "about 7 s or more in CI. Plain pytest runs it; CI selects with -m slow / -m \"not slow\"")
 
 
-# test_drums.py is being edited by another change, so it is marked slow here, by file name, not in the
-# file. Move the mark into the file later (`pytestmark = pytest.mark.slow`) and delete this hook.
-# Its module fixture `made` alone takes about 40 s in CI, and the file is 244 s of the 877 s serial run
-# (CI run 45002429822). test_analysis_drumroles.py already marks its own slow tests.
+# test_drums.py and test_analysis_drumroles.py are being edited by other changes, so their slow tests are marked
+# here, by file name and by test function name (every parametrization), not in the files. Move the marks into the
+# files later (`pytestmark = pytest.mark.slow`, or `@pytest.mark.slow` on each test) and delete these two sets.
+# test_drums.py: its module fixture `made` alone takes about 40 s in CI, and the file is 244 s of the 877 s serial run
+# (CI run 45002429822). test_analysis_drumroles.py marks some of its own slow tests in the file; the names below
+# are the ones that took 7 s or more in the fast job of CI run 45004487359.
 _SLOW_FILES = {"test_drums.py"}
+_SLOW_TESTS = {
+    "test_analysis_drumroles.py": {
+        "test_sections_are_the_same_groups_restricted_and_their_order_does_not_matter",
+        "test_a_hit_8_ms_early_and_one_12_ms_late_keep_their_16th_and_say_how_far_off_they_are",
+        "test_one_repeated_tom_is_one_group",
+        "test_a_stem_read_from_a_file_and_the_inputs_that_are_refused",
+        "test_16th_hats_under_a_real_open_hat_are_placed_in_the_hat_group_or_reported",
+        "test_a_bed_40_db_under_the_hits_does_not_change_the_groups",
+        "test_a_bed_30_db_under_the_hits_gives_fewer_groups_never_wrong_ones",
+        "test_clap_and_snare_on_beats_2_and_4_are_two_groups",
+        "test_a_tentative_satellite_is_not_the_neighbour_separation_is_measured_against",
+    },
+}
 
 
 def pytest_collection_modifyitems(items):
     for item in items:
-        if os.path.basename(str(item.fspath)) in _SLOW_FILES:
+        name = item.path.name
+        if name in _SLOW_FILES or getattr(item, "originalname", item.name) in _SLOW_TESTS.get(name, ()):
             item.add_marker(pytest.mark.slow)
 
 

@@ -209,6 +209,7 @@ def capture_of(ref, **over):
             "sections": [dict(s) for s in SECTIONS]}
 
 
+@pytest.mark.slow
 def test_elements_bass_raised_4_db_is_the_only_gap(tmp_path):
     prof = profile_of(tmp_path, stem_set(tmp_path, "ref"))
     ours = stem_set(tmp_path, "ours", bass_db=-6.0 + 4.0)
@@ -325,6 +326,7 @@ def test_profile_session_compare_takes_the_path_or_the_json(tmp_path):
         profile.session_compare(capture_of(ref), reference=str(tmp_path / "nope.json"))
 
 
+@pytest.mark.slow
 def test_elements_a_shorter_section_pairs_with_the_first_bars_and_from_bar_picks_others(tmp_path):
     ref = stem_set(tmp_path, "ref", bass_db=[-6.0] * 4 + [-2.0] * 4 + [-6.0] * 16)
     prof = profile_of(tmp_path, ref)
@@ -805,6 +807,7 @@ def drum_report(tmp_path, ref, ours, offset, sec=None, roles=("kick", "snare", "
     return profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shift", [0.005, -0.005])
 def test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shift):
     """The kick is 3 ms early (a hit starts before the section line, the next section's first hit before the
@@ -839,6 +842,7 @@ def test_drum_layer_ghost_notes_are_not_the_clean_hit(tmp_path):
     assert kick["readings"] == [] and abs(kick["reference_at_ms"] - 497) <= 8, kick
 
 
+@pytest.mark.slow
 def test_drum_layer_runs_only_for_roles_present_on_both_sides_and_one_failure_is_one_note(tmp_path, monkeypatch):
     ref = drum_pattern(tmp_path, "ref", 0.0)
     ours = drum_pattern(tmp_path, "ours", 0.0)
