@@ -353,26 +353,38 @@ the peak itself comes late on a slow attack. Per section:
   13`) and its share of the bars, onsets per bar, the share of onsets on step 1 and on the 8th offbeats, the notes
   (pyin per onset) as scale degrees of the study's key with their shares, the median register and range, the
   number of pitch classes and the top one's share (`pedal` at 75 % or more, else `moving`), the duty (sounding
-  time per bar: `stabby` under 0.5, `continuous` from 0.8), and its level at each 16th of the bar (the report lists
-  the 16ths 6 dB or more under the loudest: a sidechain dip shows there even when a continuous bass has no note
-  starts to count).
+  time per bar: `stabby` under 0.5, `continuous` from 0.8), and its mean level at each 16th of the bar over its
+  playing bars (the report lists the 16ths 6 dB or more under the loudest). A dip says the part is quieter there on
+  average, from a sidechain duck, the gap between notes or the tail of notes that start elsewhere; it does not say
+  which. A continuous bass with no note starts to count still shows one.
 - **synths** (`synths.wav`): the rhythm as for the bass, a chord per bar from chroma (major, minor, sus2, sus4, root
   and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major); a chord lasts while its root
-  holds, so the progression (the shortest cycle of roots at which 75 % of the changes repeat, else the loop of 2 to
-  4 chords whose occurrences cover most of them, from half; with that share), bars per
-  chord and the distinct chords follow the root, and the pitch classes held in 90 % of the bars (a drone, or a tone the chords share).
+  holds, so the progression, bars per chord and the distinct chords follow the root, and the pitch classes held in
+  90 % of the bars (a drone, or a tone the chords share). The progression is a loop of 2 to 4 chords: one at which
+  75 % of the changes equal the change that many before (a loop longer than half the section only when every pair
+  does), or one followed in order through 75 % of the changes with now and then a chord put in or left out, in at
+  least two full passes; with neither, every change in order. One loop is written on the same phase in every
+  section (`iv VI i VII` throughout, not `i VII iv VI` in the one section that starts on `i`).
   **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
 - **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat
-  (a pickup shows as `.4`).
+  (a pickup shows as `.4`), found over the whole track so a phrase running over a section line starts only once.
 - **drums**: the roles of 4+ hits and their patterns from `drums.json`, not measured again. A hat's accent (the
   loudest 16th of the beat) needs per-hit levels, which `drums.json` does not record: it is `missing`, with that
   reason.
 - **variation** (bass and synths): the repeat period, the smallest of 1, 2, 4 or 8 bars at which 75 % of the bars
-  equal the bar that many before, and the bars that break it.
+  equal the bar that many before (read from at least 3 pairs of playing bars, else none: too few), and the bars that
+  break it.
 
 What cannot be measured is `null` with the reason in `notes`, never left empty. A study on the pCloud mount is
 never read or written through the mount: the stems and records are copied to a temp folder with `rclone copyto`
-(deleted after), and `micro.json` and `report.md` go back with `rclone copyto` and are read back and compared.
+(deleted after), and `micro.json` and `report.md` go back with `rclone copyto` and are read back and compared. The
+report says when `micro.json` is stale (another key, grid or section list, or a stem or record of another size than it
+was made from) and to re-run `roadie micro`.
+
+Known limits: a section that switches from one chord loop to another halfway gets one progression (the one that fits
+best, or every change); drums.json joins sections under 8 bars, so both rows of a joined pair show the same drum
+roles (count them once when adding up); pyin's frames are 186 ms and centred, so a note's pitch is read with up to
+68 ms of the note before it in the first frames (the median over the note damps it).
 
 ## Configuration
 
