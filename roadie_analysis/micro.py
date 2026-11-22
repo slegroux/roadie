@@ -632,7 +632,7 @@ def micro(stems_dir, key: dict | None = None) -> dict:
         key = study_key(_read_json(stems_dir.parent / "study.json"))
     tonic, mode = (key["tonic"], key["mode"]) if key else (None, None)
     t0, bar_s = grid["t0"], grid["bar_s"]
-    notes = list(grid["notes"]) + list(grid["why"])
+    notes = [n for n in grid["notes"] if "chance-level" not in n] + list(grid["why"])     # `why` says it once
     if not key:
         notes.append("no key in study.json: bass notes and chords are named absolutely, not as degrees")
     files = {n: _stem(stems_dir, n) for n in STEMS}
