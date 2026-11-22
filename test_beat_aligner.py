@@ -517,6 +517,7 @@ def synthetic(tmp_path, monkeypatch):
 
 
 class TestSyntheticAudioEndToEnd:
+    @pytest.mark.slow
     def test_pipeline_recovers_tempo_and_lands_on_a_bar_line(self, synthetic):
         stems, _times, _period, pre_roll, _phase = synthetic()
 
@@ -569,6 +570,7 @@ class TestSyntheticAudioEndToEnd:
         assert res["detector"].startswith("heuristic")
         assert res["downbeat_phase"] == true_phase
 
+    @pytest.mark.slow
     def test_madmom_is_still_reachable_and_answers_when_asked(self, synthetic):
         """Not the default any more, but it must not rot into a dead option.
 

@@ -28,6 +28,9 @@ import soundfile as sf
 
 import test_analysis_equivalence as E
 
+# Slow throughout (a module fixture or the analyses dominate): CI runs this file in the slow job.
+pytestmark = pytest.mark.slow
+
 HERE = pathlib.Path(__file__).resolve().parent
 MCP_GOLDEN = HERE / "mcp_golden" / "sideman_main.json"
 TOOLS = {"drum_roles", "sample_analyze", "sample_compare", "reference_profile", "session_compare", "study_list", "study_read",
