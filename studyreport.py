@@ -207,14 +207,19 @@ def card_markdown(c: dict, f: str) -> list[str]:
     L += ["", "## Into each section", ""]
     if c["transitions"] is not None:
         L += ["The bar before each change, from the drum parts' hits (micro.json; tuned on one track, so none found "
-              "means none found, not none there). %s bars." % c["bars"], ""]
+              "means none found, not none there). %s bars.%s" % (c["bars"], (
+                  " On this unreliable grid a fill one bar before a section line may be the line itself, a bar late."
+                  if f else "")), ""]
         L += card.transition_lines(c["transitions"], file_bar, f)
     elif c["has_micro"]:
         L.append("not measured: no drum parts (drums_<kind> stems), or a micro.json made before the scan (re-run "
                  "`roadie micro`)")
     else:
         L.append("missing: micro (the fill or dropout scan is part of `roadie micro`)")
-    notes = card.observations(c["sections"], c["presence"], idx_bar, f) if c["sections"] else []
+    # The map is bar by bar; the observations read the presence despeckled to 4-bar runs (#6's reading), so a one-bar
+    # flicker does not cut "the longest stretch with nothing in or out".
+    notes = card.observations(c["sections"], card.despeckled(c["presence"]) if c["presence"] else None, idx_bar, f) \
+        if c["sections"] else []
     if c["drift_pct"]:
         notes.insert(0, "The tempo drifts %.1f%% across this track: bars are counted at one steady tempo, so bar numbers "
                         "far from the start may be off by a bar or more." % c["drift_pct"])
@@ -626,6 +631,8 @@ def track_row(st: studymod.Study, d: dict) -> dict:
            "bass_entry": bass_entry,
            "bass_entry_at": round((bass_entry - first) / length, 2) if bass_entry is not None and length and first is not None else None,
            "bass_before_drop": (S.get("bass") or {}).get("before_first_drop"),
+           "why_bass entry": None if (S.get("bass") or {}).get("before_first_drop") is not None else
+           "no activity" if not S or (S.get("bass") or {}).get("entry_bar") is None else "no Drop label",
            "phrase_lines": None, "micro": d["micro"] is not None}
     bounds = [s["file_bar"] - first for s in secs[1:]] if first is not None else []
     if bounds:
@@ -767,7 +774,7 @@ def pattern_kinds(rows: list[dict]) -> list[dict]:
         for x in rows:
             v = value(x)
             if v is None:
-                left["no %s" % layer].append(x["title"])
+                left.setdefault(x.get("why_" + kind) or "no %s" % layer, []).append(x["title"])
                 continue
             if grid and not x["reliable"]:
                 left["unreliable grid"].append(x["title"])

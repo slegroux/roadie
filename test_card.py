@@ -13,7 +13,7 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from card import element_map, longest_static_stretch, observations, runs, transition_lines
+from card import despeckled, element_map, longest_static_stretch, observations, runs, transition_lines
 
 
 def _bits(n, *spans):
@@ -97,3 +97,19 @@ def test_breakdown_depth_reads_the_spectral_names_too():
 def test_sections_off_the_8_bar_grid_are_named():
     notes = observations(_sections(s1={"bars": 30}), None, lambda i: i)
     assert "Sections whose length is not a multiple of 8 bars: Drop 1 (30)." in notes
+
+
+def test_a_one_bar_gap_does_not_cut_the_longest_stretch_once_despeckled():
+    presence = {"bass": "1" * 16 + "0" * 8, "vocals": "1" * 7 + "0" + "1" * 8 + "0" * 8}
+    assert longest_static_stretch(presence) == (8, 15)                     # bar by bar: the gap at 7 cuts it
+    assert despeckled(presence)["vocals"] == "1" * 16 + "0" * 8
+    assert longest_static_stretch(despeckled(presence)) == (0, 15)
+
+
+def test_a_fill_after_a_drumless_section_is_said_in_hits_and_big_ratios_are_capped():
+    tr = [{"bar": 44, "kind": "fill", "ratio": 40.0, "median_hits": 0.0, "last_hits": 20, "into": "Drop 2"},
+          {"bar": 60, "kind": "fill", "ratio": 6.0, "median_hits": 2.0, "last_hits": 12, "into": "Drop 3"},
+          {"bar": 70, "kind": "dropout", "ratio": 3.6, "median_hits": 18.0, "last_hits": 5, "into": "Outro"}]
+    lines = transition_lines(tr, lambda b: b)
+    assert lines[0] == "- Bar 44, the bar before **Drop 2**: drums come in (20 hits; the section had none in its usual bar)."
+    assert "a fill: ≥ 4× the drum hits" in lines[1] and "a dropout: 3.6× fewer" in lines[2]

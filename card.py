@@ -100,18 +100,39 @@ def longest_static_stretch(presence):
     return a, b - 1
 
 
+RATIO_CAP = 4.0            # a ratio shown past this reads "≥ 4×", as sections.transition_notes caps its velocity
+
+
+def _ratio(r):
+    return "≥ %g×" % RATIO_CAP if r >= RATIO_CAP else "%.1f×" % r
+
+
 def transition_lines(transitions, bar_of, flag=""):
     """"Into each section" as Markdown bullets, from `detect_transitions` records ({"bar": the file bar before the
-    change, "kind", "ratio", "into"}); `bar_of` turns a file bar into the bar to print."""
+    change, "kind", "ratio", "into", and, when recorded, "median_hits", "last_hits"}); `bar_of` turns a file bar into
+    the bar to print. After a section with no drum hits in its usual bar the ratio means nothing (the median is floored
+    at 0.5), so that is said in hits; other ratios are shown up to RATIO_CAP."""
     if not transitions:
         return ["No fill or dropout in the bar before any section change."]
     out = []
     for t in transitions:
-        what = ("a fill: %.1f× the drum hits of the section's usual bar" if t["kind"] == "fill" else
-                "a dropout: %.1f× fewer drum hits than the section's usual bar")
-        out.append("- Bar %s%s, the bar before **%s**: %s." % (_fmt_bar(bar_of(t["bar"])), flag, t["into"],
-                                                              what % t["ratio"]))
+        where = "- Bar %s%s, the bar before **%s**" % (_fmt_bar(bar_of(t["bar"])), flag, t["into"])
+        if t["kind"] == "fill" and t.get("median_hits") == 0:
+            out.append("%s: drums come in (%d hits; the section had none in its usual bar)." % (where, t["last_hits"]))
+        elif t["kind"] == "fill":
+            out.append("%s: a fill: %s the drum hits of the section's usual bar." % (where, _ratio(t["ratio"])))
+        else:
+            out.append("%s: a dropout: %s fewer drum hits than the section's usual bar." % (where, _ratio(t["ratio"])))
     return out
+
+
+def despeckled(presence):
+    """`presence` with runs shorter than sections.STEM_MIN_RUN (4) bars absorbed, as the cuts and PR #6's `presence`
+    read it: a one-bar vocal gap does not count as the vocal going out and coming back."""
+    import numpy as np
+    import sections as sectionsmod
+    return {n: "".join("1" if x else "0" for x in sectionsmod._despeckle(np.array([c == "1" for c in bits])))
+            for n, bits in presence.items()}
 
 
 def observations(sections, presence, bar_of, flag=""):

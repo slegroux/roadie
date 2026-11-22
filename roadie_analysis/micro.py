@@ -836,7 +836,10 @@ def micro(stems_dir, key: dict | None = None) -> dict:
         import sections as sectionsmod
         raw = [s for s in (_read_json(stems_dir / "sections.json") or {}).get("sections") or []
                if isinstance(s.get("time_sec"), (int, float)) and "beat" in s and "bar" in s]
-        transitions = sectionsmod.detect_transitions(str(stems_dir), raw, 60.0 / grid["tempo"])
+        try:
+            transitions = sectionsmod.detect_transitions(str(stems_dir), raw, 60.0 / grid["tempo"])
+        except Exception as e:          # the record stands without this part, as the card did
+            notes.append("the fill or dropout scan failed (%s: %s): transitions left out" % (type(e).__name__, e))
     else:
         notes.append("no drum parts (drums_<kind> stems): no fill or dropout scan before the section changes")
     phrase_beats = None
@@ -888,7 +891,7 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             "transitions_note": "the fill or dropout in the bar before each section change (sections.detect_transitions: "
                                 "the drum parts' hits in that bar against the outgoing section's usual bar; tuned on one "
                                 "track, so none found means none found, not none there); bar = the file bar before the change",
-            "inputs": [{"name": f.name, "size": f.stat().st_size} for f in list(files.values()) if f is not None]
+            "inputs": [{"name": f.name, "size": f.stat().st_size} for f in list(files.values()) + parts if f is not None]
                       + [{"name": n, "size": (stems_dir / n).stat().st_size}
                          for n in ("alignment.json", "sections.json", "drums.json") if (stems_dir / n).exists()],
             "legend": {"rhythm": "16 steps from the bar line, one per 16th: o = an onset there; rhythm_steps are 1-based",

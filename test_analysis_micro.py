@@ -370,7 +370,23 @@ def test_the_bar_before_a_section_change_is_scanned_for_a_dropout(tmp_path):
             kick[i:i + len(x)] += x
     sf.write(str(sd / "drums_kick.flac"), kick, SR)
     rec = micro.micro_of(sd, write=False)
-    assert rec["transitions"] == [{"bar": 8, "beat": 28.0, "kind": "dropout", "ratio": 8.0, "into": "Drop 1"}]
+    assert rec["transitions"] == [{"bar": 8, "beat": 28.0, "kind": "dropout", "ratio": 8.0, "into": "Drop 1",
+                                   "median_hits": 4.0, "last_hits": 0}]
+    assert "drums_kick.flac" in [i["name"] for i in rec["inputs"]]
+
+
+def test_a_failed_transition_scan_leaves_the_rest_of_micro(tmp_path, monkeypatch):
+    import sections
+    sd = make_study(tmp_path, stems=("vocals",), drums=False)
+    sf.write(str(sd / "drums_kick.flac"), np.zeros(SR * 4), SR)
+
+    def boom(*a, **k):
+        raise RuntimeError("no librosa here")
+
+    monkeypatch.setattr(sections, "detect_transitions", boom)
+    rec = micro.micro_of(sd, write=False)
+    assert rec["transitions"] is None and any("scan failed (RuntimeError" in n for n in rec["notes"])
+    assert rec["sections"][0]["vocals"]["bars_with_vocal"] == "1-2, 5-7"
 
 
 def test_without_drum_parts_there_is_no_transition_scan(measured):

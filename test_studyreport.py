@@ -346,7 +346,7 @@ def test_the_card_parts_show_the_kick_out_and_the_bar_before_it(tmp_path):
     assert em[1].split() == ["bar", "9"] and em[2].count("|") == 3 and "|Dr" in em[2]          # 2, 2 and 4 columns
     assert next(l for l in em if l.startswith("kick")).split()[1] == "██··████"       # out in Live bars 17-24
     assert next(l for l in em if l.startswith("bass")).split()[1] == "██·█████"
-    assert "- Bar 16, the bar before **Breakdown**: a dropout: 4.0× fewer drum hits" in md          # Live bar 16
+    assert "- Bar 16, the bar before **Breakdown**: a dropout: ≥ 4× fewer drum hits" in md          # Live bar 16, capped
     assert "Longest stretch with no element coming in or going out: bars 25–40 (16 bars)." in md
 
 
@@ -355,3 +355,32 @@ def test_the_card_parts_say_what_is_missing_and_flag_an_unreliable_grid(tmp_path
     md = studyreport.to_markdown(studyreport.report_data(st, *studyreport.read_micro(st)))
     assert "missing: micro (the fill or dropout scan is part of `roadie micro`)" in md
     assert md.split("## Element map")[1].split("```")[1].splitlines()[1].split() == ["bar", "9†"]
+
+
+def test_bass_duty_is_weighted_by_the_bars_it_plays(tmp_path):
+    mc = micro_record()
+    for sec, (duty, bars) in zip(mc["sections"], ((0.2, 8), (0.2, 8), (0.8, 16))):
+        sec["bass"] = dict(sec["bass"], duty=duty, bars_playing=bars)
+    st = study.load_study(str(make_study(tmp_path, micro=mc)), tmp_path)
+    row = studyreport.track_row(st, studyreport.report_data(st, *studyreport.read_micro(st)))
+    assert row["bass_duty"] == 0.5                                           # the median of the sections would be 0.2
+
+
+def test_bass_entry_says_whether_the_activity_or_the_drop_label_is_missing(artist_root):
+    sj = artist_root / "Artist" / "Two [124 Am 8A]" / "Track_124bpm_stems" / "sections.json"
+    data = json.loads(sj.read_text())
+    for s in data["sections"]:
+        s["label"] = s["label"].replace("Drop", "Main")
+    sj.write_text(json.dumps(data))
+    left = _kinds(studyreport.artist_data("Artist"))["bass entry"]["left_out"]
+    assert left == {"no Drop label": ["Two"]}
+
+
+def test_the_transitions_say_hits_after_a_drumless_section_and_warn_on_a_shaky_grid(tmp_path):
+    mc = micro_record(reliable=False)
+    mc["transitions"] = [{"bar": 8, "beat": 28.0, "kind": "fill", "ratio": 40.0, "into": "Breakdown",
+                          "median_hits": 0.0, "last_hits": 20}]
+    st = study.load_study(str(make_study(tmp_path, verdict="chance-level", micro=mc)), tmp_path)
+    md = studyreport.to_markdown(studyreport.report_data(st, *studyreport.read_micro(st)))
+    assert "- Bar 16†, the bar before **Breakdown**: drums come in (20 hits; the section had none in its usual bar)." in md
+    assert md.count("may be the line itself, a bar late") == 1
