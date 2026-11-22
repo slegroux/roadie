@@ -361,10 +361,14 @@ the peak itself comes late on a slow attack. Per section:
   and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major); a chord lasts while its root
   holds, so the progression, bars per chord and the distinct chords follow the root, and the pitch classes held in
   90 % of the bars (a drone, or a tone the chords share). The progression is a loop of 2 to 4 chords: one at which
-  75 % of the changes equal the change that many before (a loop longer than half the section only when every pair
-  does), or one followed in order through 75 % of the changes with now and then a chord put in or left out, in at
-  least two full passes; with neither, every change in order. One loop is written on the same phase in every
-  section (`iv VI i VII` throughout, not `i VII iv VI` in the one section that starts on `i`).
+  75 % of the changes equal the change that many before, or one followed in order through 75 % of the changes with
+  now and then a chord put in or left out, in at least two full passes; with neither, every change in order. Short
+  of an exact repeat, a loop must also be more loop-like than 95 % of 200 orderings of the same changes with no chord
+  twice in a row (a fixed seed, so a run is repeatable): three or four chords in any order often reach 75 % by chance.
+  A loop longer than half the section (`iv VI i VII iv VI`) counts only when every change repeats and another section
+  of the track plays the same loop twice through. One loop is written on the phase most sections start it on (`iv VI
+  i VII` throughout, not `i VII iv VI` in the one section that starts on `i`), so a section's progression need not
+  begin on its first chord; `micro.json` keeps the section's own rotation as `section_progression`.
   **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
 - **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat
   (a pickup shows as `.4`), found over the whole track so a phrase running over a section line starts only once.

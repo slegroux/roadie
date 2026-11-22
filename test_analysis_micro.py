@@ -3,6 +3,7 @@
 
 import json
 import os
+import random
 import shutil
 import sys
 from pathlib import Path
@@ -213,8 +214,35 @@ def test_cycle_does_not_invent_loops():
 @pytest.mark.parametrize("runs", ["iv VI i VII iv VI",                   # More, Drop 2: a loop longer than half, every pair
                                   "i VII iv VI i VII i iv VI i"])         # More, Intro: one chord put in
 def test_more_loops_are_iv_vi_i_vii(runs):
-    k, share, loop = micro.cycle(runs.split())
+    k, share, loop = micro.cycle(runs.split(), confirmed={micro._rotation(["iv", "VI", "i", "VII"])})
     assert k == 4 and share >= 0.75 and micro._rotation(loop) == micro._rotation(["iv", "VI", "i", "VII"])
+
+
+def test_a_loop_longer_than_half_needs_another_section_to_play_it_twice():
+    assert micro.cycle("a b c b a b".split())[1] is None                 # a pedal, alone, is not the loop a b c b
+    assert micro.cycle("iv VI i VII iv VI".split())[1] is None           # More's Drop 2 on its own
+    assert micro.cycle("a b c b a b".split(), confirmed={micro._rotation("abcb")})[2] == list("abcb")
+    secs = [{"synths": {"runs": [{"chord": c, "bars": 2} for c in runs.split()], "notes": [], "bars_per_chord": 2.0}}
+            for runs in ("iv VI i VII iv VI i VII iv", "iv VI i VII iv VI", "i III v iv i III")]
+    for s in secs:
+        micro.set_progression(s["synths"])
+    assert [s["synths"]["progression_share"] for s in secs] == [1.0, None, None]
+    micro.confirm_long_loops(secs)
+    assert secs[1]["synths"]["progression"] == "iv VI i VII" and secs[1]["synths"]["progression_share"] == 1.0
+    assert secs[2]["synths"]["progression_share"] is None                # i III v iv is played twice nowhere
+
+
+@pytest.mark.parametrize("chords,n", [("a b c", 12), ("a b c d", 12), ("i VII iv VI", 12), ("a b c", 9)])
+def test_shuffled_chords_are_not_a_loop(chords, n):
+    rng, cases = random.Random(7), []
+    base = (chords.split() * n)[:n]
+    while len(cases) < 40:
+        x = list(base)
+        rng.shuffle(x)
+        if all(a != b for a, b in zip(x, x[1:])) and not any(micro._lag(x, k) == 1.0 for k in (2, 3, 4)):
+            cases.append(x)                                              # an exactly periodic ordering is a loop
+    loops = sum(micro.cycle(x)[1] is not None for x in cases)
+    assert loops <= 2, loops                                             # at most 2 in 40 (5 %)
 
 
 def test_one_loop_is_written_on_one_phase_across_the_track():
@@ -222,6 +250,16 @@ def test_one_loop_is_written_on_one_phase_across_the_track():
         ("i VII iv VI", 0.9), ("iv VI i VII", 1.0), ("iv VI i VII", 1.0), ("i VII iv", None), ("iv VI i VII", 1.0))]
     micro.phase_loops(secs)
     assert [s["synths"]["progression"] for s in secs] == ["iv VI i VII"] * 3 + ["i VII iv", "iv VI i VII"]
+
+
+def test_a_loop_keeps_its_own_rotation_beside_the_track_phase():
+    secs = [{"synths": {"runs": [{"chord": c, "bars": 2} for c in runs.split()], "notes": [], "bars_per_chord": 2.0}}
+            for runs in ("i VII iv VI i VII i iv VI i", "iv VI i VII iv VI i VII", "iv VI i VII iv VI i VII iv")]
+    for s in secs:
+        micro.set_progression(s["synths"])
+    micro.phase_loops(secs)
+    y = secs[0]["synths"]
+    assert (y["progression"], y["section_progression"]) == ("iv VI i VII", "i VII iv VI")
 
 
 @pytest.mark.parametrize("root,quality,want", [(1, "maj", "#III"), (6, "maj", "#VI"), (8, "maj", "#VII"),

@@ -46,6 +46,7 @@ import argparse
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -79,6 +80,7 @@ DRONE_LEVEL, DRONE_BARS = 0.5, 0.9
 REPEAT_SHARE = 0.75
 LOOP_MIN, LOOP_MAX = 2, 4  # a chord loop is 2 to 4 chords: longer is a sequence of changes, not a loop
 FOLLOW_SHARE = 0.75        # a loop with chords put in names the progression when it is followed in this share of the runs
+SHUFFLES, SHUFFLE_BEAT = 200, 0.95  # ...and scores above this share of this many no-repeat shuffles of the same runs
 PERIODS = (1, 2, 4, 8)
 MIN_PAIRS = 3              # a repeat period read from fewer pairs of playing bars than this is not one
 TIE = 0.02                 # chord scores this close are a tie, broken by the bass
@@ -336,40 +338,91 @@ def match_chord(vec, bass_pc: int | None = None) -> dict | None:
     return {"root": best[1], "quality": best[2], "score": round(best[0], 3), "margin": round(best[0] - other[0], 3)}
 
 
-def cycle(seq: list) -> tuple[int, float | None, list]:
+def cycle(seq: list, confirmed=frozenset()) -> tuple[int, float | None, list]:
     """(k, share, loop) for a section's chord runs: a loop of LOOP_MIN to LOOP_MAX chords, or the whole sequence with
     share None when no loop is there. Two ways to find one, both limited to 2-4 chords so a long run of changes is never
     called a loop:
 
     - lag: at k, a run equals the run k before in at least REPEAT_SHARE of the pairs, with the sequence at least twice
-      the loop's length; a loop longer than half the sequence only when every pair matches, and at least 2 pairs
-      (`iv VI i VII iv VI` is `iv VI i VII`). The loop is the most common window at the loop's own phase.
+      the loop's length. A loop longer than half the sequence (less than two passes: `iv VI i VII iv VI`) only when
+      every pair matches, there are at least 2 pairs, and its rotation class is in `confirmed` (another section of the
+      track plays it twice through): alone, `a b c b a b` would read as `a b c b`. The loop is the most common window
+      at the loop's own phase.
     - a loop played in order with now and then a chord put in or left out (`_follow`): at least 2 loops' worth of runs
-      matched in order, and matches less left-out chords at least FOLLOW_SHARE of the runs (`i VII iv VI i VII i iv VI
-      i`: 9 of 10). The best score wins, ties to the longer loop; that score over the runs is the share.
+      matched in order, a score (matches less left-out chords) of FOLLOW_SHARE of the runs, ties to the longer loop.
+      `i VII iv VI i VII i iv VI i`: 9 of 10.
+
+    Anything short of an exact repeat (a lag under 100 %, or an alignment) is a loop only when the sequence is more
+    loop-like (`_evidence`) than SHUFFLE_BEAT of SHUFFLES orderings of the same runs with no chord twice in a row
+    (fixed seed, so a run is repeatable): three or four chords in any order often reach 75 % on one reading or
+    another, and only what few orderings reach is a loop. The lag reading comes first (the smallest k), then the
+    alignment.
 
     The loop starts where the section first plays it (`phase_loops` puts every section of a track on one phase)."""
     n = len(seq)
     if n < 2 * LOOP_MIN:
         return n, None, list(seq)
+    found = []                                       # (k, share, loop): the inexact ones, tested together below
     for k in range(LOOP_MIN, LOOP_MAX + 1):
         pairs = n - k
         if pairs < 2:
             break
-        share = sum(seq[i] == seq[i - k] for i in range(k, n)) / pairs
+        share = _lag(seq, k)
         if (2 * k <= n and share >= REPEAT_SHARE) or share == 1.0:
             wins = Counter(tuple(seq[i:i + k]) for i in range(0, n - k + 1, k))
-            return k, round(share, 2), list(max(wins, key=lambda w: (wins[w], -next(i for i in range(0, n, k)
-                                                                                  if tuple(seq[i:i + k]) == w))))
+            loop = list(max(wins, key=lambda w: (wins[w], -next(i for i in range(0, n, k) if tuple(seq[i:i + k]) == w))))
+            if share == 1.0 and (2 * k <= n or _rotation(loop) in confirmed):
+                return k, 1.0, loop
+            if 2 * k <= n:
+                found.append((k, round(share, 2), loop))
+    best = _best_alignment(seq)
+    if best and best[0] / n >= FOLLOW_SHARE:
+        found.append((best[1], round(best[0] / n, 2), best[2]))
+    if found and _beats_shuffles(_evidence(seq), [_evidence(x) for x in _shuffles(seq)]):
+        return found[0]
+    return n, None, list(seq)
+
+
+def _evidence(seq) -> float:
+    """How loop-like a sequence is, one number for all the inexact readings at once (so testing several does not add up
+    their chances): the best lag share at 2-4 with two passes, or the best alignment score over the runs."""
+    n = len(seq)
+    lags = [_lag(seq, k) for k in range(LOOP_MIN, LOOP_MAX + 1) if 2 * k <= n]
+    al = _best_alignment(seq)
+    return max(lags + [al[0] / n if al else 0.0])
+
+
+def _lag(seq, k: int) -> float:
+    return sum(seq[i] == seq[i - k] for i in range(k, len(seq))) / (len(seq) - k)
+
+
+def _beats_shuffles(value, null: list) -> bool:
+    """Does `value` beat SHUFFLE_BEAT of the shuffles' values (a tie is not beaten)?"""
+    return bool(null) and sum(x >= value for x in null) <= (1 - SHUFFLE_BEAT) * len(null)
+
+
+def _best_alignment(seq) -> tuple[int, int, list] | None:
+    """(score, k, loop) of the best `_follow` over the windows of 2-4 runs, at least 2 loops' worth matched."""
     best = None
     for k in range(LOOP_MIN, LOOP_MAX + 1):
-        for w in sorted({tuple(seq[i:i + k]) for i in range(n - k + 1)}):
+        for w in sorted({tuple(seq[i:i + k]) for i in range(len(seq) - k + 1)}):
             score, m, first = _follow(seq, w)
-            if m >= 2 * k and score / n >= FOLLOW_SHARE and (best is None or (score, k) > best[:2]):
+            if m >= 2 * k and (best is None or (score, k) > best[:2]):
                 best = (score, k, list(w[first:] + w[:first]))
-    if best:
-        return best[1], round(best[0] / n, 2), best[2]
-    return n, None, list(seq)
+    return best
+
+
+def _shuffles(seq) -> list[list]:
+    """Up to SHUFFLES orderings of `seq` with no chord twice in a row (chord runs never repeat), from a fixed seed."""
+    rng, out = random.Random(0), []
+    for _ in range(SHUFFLES * 50):
+        if len(out) == SHUFFLES:
+            break
+        x = list(seq)
+        rng.shuffle(x)
+        if all(a != b for a, b in zip(x, x[1:])):
+            out.append(x)
+    return out
 
 
 def _follow(seq, w) -> tuple[int, int, int | None]:
@@ -400,6 +453,20 @@ def _follow(seq, w) -> tuple[int, int, int | None]:
 def _rotation(w) -> tuple:
     w = tuple(w)
     return min(w[i:] + w[:i] for i in range(len(w)))
+
+
+def confirm_long_loops(sections: list[dict]) -> None:
+    """A second look at the sections with no loop: one longer than half the section is accepted when another section of
+    the track plays the same loop (any rotation) twice through (`cycle`'s `confirmed`)."""
+    passes = {}
+    for i, s in enumerate(sections):
+        y = s.get("synths") or {}
+        if y.get("progression_share") is not None and y.get("loop_runs") and len(y.get("runs") or []) >= 2 * y["loop_runs"]:
+            passes.setdefault(_rotation(y["section_progression"].split()), set()).add(i)
+    for i, s in enumerate(sections):
+        y = s.get("synths") or {}
+        if y.get("runs") and y.get("progression_share") is None:
+            set_progression(y, frozenset(c for c, where in passes.items() if where - {i}))
 
 
 def phase_loops(sections: list[dict]) -> None:
@@ -521,6 +588,24 @@ def bass_section(sec, placed, pitches, playing, sounding, tonic) -> dict:
     return out
 
 
+def set_progression(y: dict, confirmed=frozenset()) -> None:
+    """The progression fields of a synths section from its runs (`cycle` on the roots: VII and VIIsus2 are one), with
+    `confirmed` the loops (rotation classes) other sections of the track play twice through. Replaces earlier ones."""
+    seq = [re.sub(r"(5|sus2|sus4)$", "", r["chord"]) for r in y["runs"]]
+    k, share, cyc = cycle(seq, confirmed)
+    y["notes"] = [n for n in y["notes"] if not n.startswith("progression:")]
+    y.update(progression=" ".join(cyc), progression_share=share, section_progression=" ".join(cyc), loop_bars=None,
+             loop_runs=k if share is not None else None)
+    if share is not None and y["bars_per_chord"]:
+        y["loop_bars"] = round(k * y["bars_per_chord"], 1)     # k chords at the median run: a section that starts
+        #                                                        mid-chord does not shorten it
+    if share is not None and share < 1.0:
+        y["notes"].append("progression: the loop that fits %d %% of the chord changes; every change is in runs"
+                          % round(100 * share))
+    elif share is None and len(seq) >= 4:
+        y["notes"].append("progression: no loop of 2 to 4 chords, every change listed")
+
+
 def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict:
     out = rhythm_fields(placed, playing, sec)
     _on, per_bar = out.pop("_on"), out.pop("_per_bar")
@@ -559,23 +644,13 @@ def synth_section(sec, placed, playing, chroma, bass_roots, tonic, mode) -> dict
         r[0] = Counter(r[2]).most_common(1)[0][0]
     if runs:
         seq = [r[0] for r in runs]
-        k, share, cyc = cycle([re.sub(r"(5|sus2|sus4)$", "", x) for x in seq])     # the cycle of roots: VII and VIIsus2 are one
-        out["progression"] = " ".join(cyc)
-        out["progression_share"] = share
+        out["runs"] = [{"chord": r[0], "bars": r[1]} for r in runs]
         lengths = [r[1] for r in runs[1:-1]] if len(runs) >= 3 else [r[1] for r in runs]
         out["bars_per_chord"] = float(np.median(lengths)) if len(runs) > 1 else None
         if len(runs) == 1:
             out["notes"].append("one chord through the section: no chord change")
-        if share is not None and out["bars_per_chord"]:
-            out["loop_bars"] = round(k * out["bars_per_chord"], 1)     # k chords at the median run: a section that
-            #                                                              starts mid-chord does not shorten it
-        if share is not None and share < 1.0:
-            out["notes"].append("progression: the loop that fits %d %% of the chord changes; every change is in runs"
-                                % round(100 * share))
-        elif share is None and len(seq) >= 4:
-            out["notes"].append("progression: no cycle repeats, every change listed")
+        set_progression(out)
         out["distinct_chords"] = sorted(set(seq), key=seq.index)
-        out["runs"] = [{"chord": r[0], "bars": r[1]} for r in runs]
     played = [chroma[b] for b in bars if b in per_bar and b < len(chroma) and chroma[b].max() > 0]
     if played:
         present = np.array([v / v.max() >= DRONE_LEVEL for v in played])
@@ -791,6 +866,7 @@ def micro(stems_dir, key: dict | None = None) -> dict:
             rec["vocals"] = None
         rec["drums"] = drum_section(sec, drums)
         out_secs.append(rec)
+    confirm_long_loops(out_secs)
     phase_loops(out_secs)
     return {"kind": KIND, "version": VERSION, "made": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "grid": {"tempo": grid["tempo"], "t0": round(t0, 4), "beats_per_bar": drummod.BEATS_PER_BAR,
