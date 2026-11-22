@@ -59,11 +59,27 @@ line. A default bar line is moved back by whole bars to the first one at or afte
 are still counted from the downbeat (step 0). A hit before that line (a pickup, a hit in the first partial bar) has bar -1. A `t0` passed in is used as given. A downbeat the aligner
 calls chance-level is repeated in the output's `notes`: the whole table is then counted from a bar line that may be the
 wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late. **A hit is on the grid when it is within 20 ms of a
-16th line moved by its section's own phase**: the offset where most of the section's hits sit from their nearest lines (the densest 6 ms window, and the median of the hits in it, not the median of all: a stem with two sounds detected at different latencies has a median that is neither; at least 8 hits, else 0;
-the hats of one track sit 3 to 10 ms late, a grid a few thousandths of a bpm off drifts by 13 ms over a track) is taken as the section's
-phase, and `bar`, `step`, `offset_ms` and `on_grid` are recomputed against the lines moved by it (`grid_shift_ms` per section in
-`per_section`; the raw offset stays in the hit's `offset_raw_ms`). The 20 ms is unchanged; what it is measured from is. A hit more than 20 ms
-from its section's lines is off the grid and counts in no pattern.
+16th line moved by the stem's phase.** The hats of one track are detected 3 to 10 ms late of the aligner's grid, and a grid a few
+thousandths of a bpm off drifts by about 13 ms over a track, so against the aligner's grid itself the hits near the edge of the 20 ms
+tolerance are counted or not by where the grid happens to lie, which moved Glacier's `hh 16th` across a rule's threshold. So:
+
+- **The phase** of a set of hits is the offset (ms from their nearest 16th line) where most of them sit: the densest 6 ms window, and
+  the median of the hits in it. Not the median of all of them: a stem with two sounds detected at different latencies has a median
+  that is neither.
+- **A support floor.** The phase counts only when there are at least 8 hits and the densest window holds at least 40 % of them. 40 %
+  is chosen: a window 6 ms wide holds about 5 % of hits spread evenly over a step, so 40 % is eight times chance, and six hits on
+  the grid beside two strays stay on it while hits spread evenly have no phase. Without a phase the stem's track-wide phase is used
+  (and 0 when that has none either).
+- **The stem's track-wide phase is the default; a section may follow the drift, no more.** A section takes its own phase when it is
+  within 15 ms of the track-wide one (the drift of 0.005 bpm over a track is 13 ms); otherwise it uses the track-wide one. So a
+  part that plays deliberately late (a swung or laid-back sound, a hat 30 ms behind) stays off the grid in every section, even
+  in a section where it makes most of the stem's hits; `bar`, `step`, `offset_ms` and `on_grid` are recomputed against the lines
+  moved by the phase, and the 20 ms tolerance is unchanged. A hit more than 20 ms from them is off the grid and counts in no pattern.
+- **The timing is reported, not absorbed.** Each role has `late_ms`: the median offset of its hits from the ALIGNER's grid (positive:
+  late, negative: early, over all its hits, on the grid or not), and each of its `per_section` rows has the same for that section;
+  the table prints `late +8 ms` and, per stem, the section phases. `grid_shift_ms` in `per_section` is the phase a section was read
+  against; the raw offset stays in each hit's `offset_raw_ms`. "The hat is 8 ms late" is a fact about the hat; the name stays steady.
+  A note says when a section's phase is over 20 ms: the grid's phase may be wrong there, or the stem's dominant sound plays late.
 
 **The table**, one block per stem:
 
@@ -96,7 +112,7 @@ from its section's lines is off the grid and counts in no pattern.
 downbeat it came from, the sections as bar ranges after joining), `inputs` (each stem and grid file read, with name, size and
 mtime: `roadie study show` says fresh or stale by name and size), `legend`, `notes`, `seconds`, `jobs`, `stage_seconds`, and
 per stem `roles`, `bleed`, `per_section` (hits per role in each section) and `notes`. Each role has `name`, `named`, `rule`,
-`reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `level_db`, `stability`, `separation`, `groups`,
+`reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `late_ms`, `level_db`, `stability`, `separation`, `groups`,
 `variants`, `clip`, `clip_note` and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
 `line`, only for the sections the role plays in). `drum_roles/<stem>-<role>.wav` is the role's clean hit (24-bit, the stem's
 rate); no clean hit, no file. A run writes the new clips first, then `drums.json` (by temp file and rename, so a reader never sees half of it), and last removes the clips the earlier `drums.json` listed and the new one does not.
@@ -115,7 +131,7 @@ tolerance is 3 ms tighter or 3 ms looser (about what 0.001 bpm moves the last se
 and a `name_steady_note` saying what changes, and the table says `name unsteady`: the name is then a reading of a pattern at a
 rule's edge. Nothing is tuned.
 
-**Known limits.** Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
+**Known limits.** The phase is read from a stem's hits as a whole: a stem whose two sounds sit at different latencies gets the phase of the bigger, tighter cluster, and the other sound's hits can sit off the grid (`late_ms` says by how much). A sound that dominates every section of its stem by 40 % or more is taken as the phase, so a stem that is entirely late is read against its own lateness (`late_ms` says so, and a note when the phase is over 20 ms). The drift allowance is 15 ms: a grid worse than about 0.006 bpm over a track is not followed. Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
 section are one role, and one sound that changes between sections (a filter sweep, a different sample) is two. A section
 is grouped on what is in it: a hit more than 40 dB under the section's loudest moment is not found, and the hits at the
 two ends of a slice have less context than in the whole stem. Hat stems are judged without `grid_onsets`: a hat under an

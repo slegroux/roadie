@@ -321,3 +321,47 @@ def test_a_hat_detected_late_keeps_its_name_when_the_grid_moves_a_few_millisecon
         assert all(abs(s["grid_shift_ms"] - (19.0 - dt0 * 1000)) < 1.0 for s in rec["stems"]["hh"]["per_section"]), rec["stems"]["hh"]["per_section"]
     assert names["base"] == names["early"] == names["late"] == [("hh 16th", 24 * 8)], names
 
+
+
+def test_a_section_phase_needs_a_cluster_and_scattered_hits_leave_the_grid_alone():
+    from roadie_analysis import drumsections
+    assert drumsections._phase([0.2, 0.1, -0.3, 0.4, 1.0, 0.0] + [30.0, 31.0]) == pytest.approx(0.15, abs=0.5)   # six on the grid, two strays
+    assert drumsections._phase([-14, -9, -4, 0, 5, 8, 12, 38.2, 38.4]) is None                                  # no cluster of 40 %: the two strays are not a phase
+    assert drumsections._phase(list(np.linspace(-55, 55, 24))) is None                                           # spread evenly: no phase
+    assert drumsections._phase([0.0] * 7) is None                                                                # under 8 hits: no phase
+    hits = [{"owned": True, "level_db": -20.0, "section": 0, "offset_ms": o, "onset_s": 0.5 + 0.125 * k + o / 1000.0}
+            for k, o in enumerate([-14, -9, -4, 0, 5, 8, 12, 38.2, 38.4])]
+    assert drumsections._rephase(hits, [{"name": "A"}], 120.0, 0.5) == [0.0]                                      # falls back to the grid itself
+    assert [h["on_grid"] for h in hits] == [True] * 7 + [False] * 2                                              # the six stay on it, the two strays off
+
+
+def test_a_sound_that_plays_late_stays_off_the_grid_in_every_section_whichever_is_the_majority(tmp_path):
+    """A on the grid and B 30 ms late, in one stem; in the middle section B has most of the hits. B is never read as on the grid,
+    and the record says how late it is."""
+    d = tmp_path / "Song_stems"
+    d.mkdir()
+    ev = []
+    for b in range(24):
+        n_a, n_b = (2, 8) if 8 <= b < 16 else (8, 1)                     # hits of A and of B in the bar
+        ev += [(at(b * 16 + s), noise_hit(b * 16 + s, 0.005)) for s in range(0, 16, 2)[:n_a]]
+        ev += [(at(b * 16 + s, 30.0), tom_hit(f=150.0 + (s % 3))) for s in range(1, 16, 2)[:n_b]]
+    sf.write(str(d / "drums_hh.flac"), (stem(ev, 24) * 0.3).astype(np.float32), SR)
+    secs = [{"name": "ABC"[k], "start_bar": 8 * k, "bars": 8} for k in range(3)]
+    rec = drums.drum_roles(d, tempo=BPM, t0=T0, sections=secs, write=False, jobs=1)
+    roles = [r for r in rec["stems"]["hh"]["roles"] if r["measured"] >= 4]
+    late = [r for r in roles if r["late_ms"] is not None and r["late_ms"] > 20]
+    on = [r for r in roles if r["late_ms"] is not None and abs(r["late_ms"]) < 5]
+    assert len(late) == 1 and on and 25 <= late[0]["late_ms"] <= 35, [(r["name"], r["hits"], r["late_ms"], r["off_grid"]) for r in roles]
+    assert late[0]["off_grid"] == late[0]["hits"] and all(r["off_grid"] == 0 for r in on)
+    assert [v["late_ms"] for v in late[0]["per_section"]] and all(25 <= v["late_ms"] <= 35 for v in late[0]["per_section"])
+
+
+def test_a_hit_whose_cut_is_empty_is_silent_not_a_crash(monkeypatch):
+    from roadie_analysis import drumroles
+    sr = 44100
+    x = np.random.default_rng(1).standard_normal(2 * sr) * 0.1
+    segs = [(10000, 12000), (10040, 14000), (20000, len(x))]                 # the second hit starts 40 samples after the first: inside the 2 ms guard
+    monkeypatch.setattr(drumroles.oneshot, "_segments", lambda x, sr, ref=None: segs)
+    monkeypatch.setattr(drumroles, "_onset_after_tail", lambda x, sr, start: start)
+    res = drumroles.hit_groups(x, 120.0, 0.0, None, sr=sr)
+    assert [h["status"] for h in res["hits"]][:1] == ["silent"]

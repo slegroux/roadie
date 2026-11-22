@@ -191,8 +191,8 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     for kind, st in record["stems"].items():
         far = ["%s (%+.0f ms)" % (ps["name"], ps["grid_shift_ms"]) for ps in st["per_section"] if abs(ps["grid_shift_ms"]) > drumroles.GRID_LEAD_S * 1000]
         if far:
-            record["notes"].append("%s: in %s most hits sit more than %g ms from the grid lines, so the grid's phase may be wrong there; "
-                                   "its patterns are read against where the hits sit" % (kind, ", ".join(far), drumroles.GRID_LEAD_S * 1000))
+            record["notes"].append("%s: in %s most hits sit more than %g ms from the aligner's grid lines: the grid's phase may be wrong "
+                                   "here, or this stem's dominant sound plays late" % (kind, ", ".join(far), drumroles.GRID_LEAD_S * 1000))
     if write:
         base = Path(out) if out else stems_dir
         old = _read_json(base / "drums.json")
@@ -292,6 +292,13 @@ def _slug(kind: str, name: str) -> str:
     return s if s.startswith(kind) else "%s-%s" % (kind, s)
 
 
+def _late_ms(hits: list) -> float | None:
+    """Where these hits sit against the ALIGNER's grid: the median of their raw offsets (ms, positive: late, negative: early),
+    whatever the section phase or the 20 ms tolerance say. None without hits."""
+    off = [h["offset_raw_ms"] for h in hits if "offset_raw_ms" in h]
+    return round(float(np.median(off)), 1) if off else None
+
+
 def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
     """(share of the bars the hits are in that have an on-grid hit at each 16th, number of those bars)."""
     own = {h["bar"] for h in hits}
@@ -335,7 +342,7 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             if hs:
                 pat, nb = _own_line(hs)
                 rows.append({"index": i, "section": p["name"], "start_bar": p["start_bar"], "bars": p["bars"], "hits": len(hs), "bars_with": nb,
-                             "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat)})
+                             "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat), "late_ms": _late_ms(hs)})
         return rows
 
     roles, clips = [], []
@@ -350,6 +357,7 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "bars_with": nb, "pattern": [round(float(v), 3) for v in r["pattern"]],
                "own_pattern": [round(float(v), 3) for v in own], "line": pattern_line(own),
                "off_grid": sum(by_id[i]["off_grid"] for i in r["groups"]),
+               "late_ms": _late_ms([hits[i] for i in ids]),
                "level_db": None if r["level_db"] is None else round(float(r["level_db"]), 1),
                "stability": None if big["stability"] is None else round(float(big["stability"]), 2),
                "stability_status": big["stability_status"],
@@ -404,6 +412,8 @@ def format_table(record: dict) -> str:
                 flags.append("stability %.2f" % r["stability"])
             if r["separation"] is not None:
                 flags.append("separation %.2f" % r["separation"])
+            if r.get("late_ms") is not None:
+                flags.append("late %+.0f ms" % r["late_ms"])
             if r["variants"]:
                 flags.append("%d variants" % len(r["variants"]))
             if r.get("name_steady") is False:
@@ -421,6 +431,9 @@ def format_table(record: dict) -> str:
                 lines.append("      %-22s %4d  %s" % (v["section"][:22], v["hits"], " ".join(v["line"][i:i + 4] for i in range(0, 16, 4))))
             if r["clip"]:
                 lines.append("      clip: %s" % r["clip"])
+        shifts = ["%s %+.1f" % (ps["name"][:14], ps["grid_shift_ms"]) for ps in s["per_section"] if ps.get("grid_shift_ms")]
+        if shifts:
+            lines.append("  section phase against the aligner's grid (ms): " + ", ".join(shifts))
         if small:
             lines.append("  + %d groups of fewer than %d measured hits (%d hits in all): in drums.json" % (
                 len(small), MIN_SHOWN, sum(r["hits"] for r in small)))
