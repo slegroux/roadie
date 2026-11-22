@@ -9,6 +9,7 @@ soundfile (requirements.txt).
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import multiprocessing
@@ -16,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -93,6 +95,21 @@ def _file_record(p: Path) -> dict:
     return {"name": p.name, "size": st.st_size, "mtime": round(st.st_mtime, 3)}
 
 
+@functools.lru_cache(maxsize=None)
+def default_jobs() -> int:
+    """Worker processes when `jobs` is not given: the performance cores on macOS (the efficiency cores slow a pool down and
+    leave the machine to other sessions), else every core."""
+    if sys.platform == "darwin":
+        try:
+            n = int(subprocess.run(["sysctl", "-n", "hw.perflevel0.logicalcpu"], capture_output=True, text=True, timeout=5,
+                                   check=True).stdout.strip())
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
 def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, sections: list | None = None,
                out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None,
                hit_times: bool = False) -> dict:
@@ -101,7 +118,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     groups of the sections are matched by sound, so one role keeps one identity and name over the track; `mark_bleed` and
     `name_roles` then run on the merged roles' hits. `tempo` (BPM), `t0` (seconds from the start of the files to bar 0) and
     `sections` ([{name, start_bar, bars}], bars counted from t0) default to the folder's alignment.json and sections.json.
-    `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
+    `jobs` processes run the (stem, section) jobs, the matching and the naming (default: `default_jobs()`, the fast cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
     `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
     A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
@@ -147,7 +164,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     if len(plan) != len(sections or [None]):
         notes.append("sections shorter than %d bars were joined to their neighbour: %s" % (
             drumsections.MIN_SECTION_BARS, ", ".join(p["name"] for p in plan if "+" in str(p["name"]))))
-    workers = min(max(1, jobs if jobs else (os.cpu_count() or 1)), len(stems) * len(plan))
+    workers = min(max(1, jobs if jobs else default_jobs()), len(stems) * len(plan))
     pool = None if workers == 1 else ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
     stages = {}
     try:

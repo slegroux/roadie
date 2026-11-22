@@ -20,7 +20,7 @@ timeout_s)` does the same and returns the record. Nothing is tuned: the threshol
 hits, the run takes minutes on one core, and the grouping moves with the sample it draws (Glacier 3000's hats came out
 as eleven groups, none stable enough to name). A section holds a few dozen to a few hundred hits: it is grouped on its own
 (a section of at most 32 hits of a stem is grouped exactly: "stable by construction"), and the (stem, section) jobs run in
-a process pool (`--jobs N`, default the cores).
+a process pool (`--jobs N`, default the fast cores: the performance cores on macOS, every core elsewhere).
 
 **How the sections are cut and merged** (`roadie_analysis/drumsections.py` has the choices):
 

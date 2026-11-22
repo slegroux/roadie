@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
+from roadie_analysis.jobqueue import heavy_job
+
 MATCH_S = 0.003
 MIN_HITS = 4
 PERTURBATIONS = (("tempo", 0.001), ("tempo", -0.001), ("tempo", 0.005), ("tempo", -0.005), ("t0", 0.001), ("t0", -0.001))
@@ -137,7 +139,8 @@ def main(argv=None) -> int:
     if only and not [o for o in only if o in labels]:
         sys.exit("drumstability: --only %s matches no perturbation (they are: %s)" % (args.only, ", ".join(labels)))
     try:
-        runs = run(args.stems_dir, stems, args.jobs, only)
+        with heavy_job("roadie drumstability %s" % args.stems_dir):     # the seven runs are one job in the machine's queue
+            runs = run(args.stems_dir, stems, args.jobs, only)
     except ValueError as e:
         sys.exit("drumstability: %s" % e)
     report = {}

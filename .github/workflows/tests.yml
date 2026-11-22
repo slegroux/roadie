@@ -242,9 +242,10 @@ jobs:
                        "A dependency is missing and the suite is passing by default.")
 
           # A fast test over 10 s does not belong in the fast suite: it keeps the whole job under
-          # 5 minutes only until a few more arrive. Not enforced on a run that missed the numba
-          # cache: there the first test to reach each compiled librosa function pays its
-          # compile time (20 s and more), whichever test that is.
+          # 5 minutes only until a few more arrive. Over 10 s is a warning, over 60 s fails the run:
+          # the first test in each worker to reach a compiled librosa function pays its compile
+          # time (15 to 20 s, whichever test that is), and a restored numba cache does not always
+          # spare it (a run with a cache hit still showed three such tests), so 10 s cannot be enforced.
           if os.environ["SUITE"] == "fast":
               over = sorted(((float(tc.get("time", 0)), f'{tc.get("classname")}::{tc.get("name")}')
                              for tc in root.iter("testcase") if float(tc.get("time", 0)) > 10), reverse=True)
@@ -253,9 +254,9 @@ jobs:
               if over:
                   names = ", ".join(n for _, n in over[:10])
                   msg = f"{len(over)} fast test(s) took over 10 s: {names}. Mark each slow or shorten it."
-                  if os.environ.get("NUMBA_CACHE_HIT") == "true":
+                  if over[0][0] > 60:
                       sys.exit("::error::" + msg)
-                  print("::warning::" + msg + " (not enforced: the numba cache was cold on this run)")
+                  print("::warning::" + msg + " (enforced over 60 s; under that it may be compile time)")
           PY
 
   # A scheduled run that failed would otherwise only email whoever last edited the cron line.
