@@ -58,6 +58,52 @@ def test_a_truncated_or_garbled_entry_is_a_miss_and_is_overwritten():
     assert cache.get(k) == {"a": 1}
 
 
+def test_a_garbled_deflate_stream_is_a_miss_not_an_error():
+    k = cache.key(samples(), SR, {})
+    cache.put(k, {"a": list(range(2000))})
+    path = os.path.join(cache.cache_dir(), k + cache.SUFFIX)
+    data = bytearray(open(path, "rb").read())
+    for i in range(20, 60):                                                # flip bytes inside the stream, header intact
+        data[i] ^= 0xFF
+    open(path, "wb").write(bytes(data))
+    assert cache.get(k) is None
+    cache.put(k, {"a": 1})
+    assert cache.get(k) == {"a": 1}
+
+
+def test_a_value_json_cannot_hold_loses_the_entry_not_the_run():
+    k = cache.key(samples(), SR, {})
+    cache.put(k, {"a": {1, 2}})                                            # a set
+    cache.put(k, {"a": {(1, 2): 3}})                                       # a tuple key
+    assert cache.get(k) is None
+    assert not [n for n in os.listdir(cache.cache_dir()) if n.startswith(".tmp-")]
+
+
+def test_a_read_still_serves_the_entry_when_its_time_cannot_be_touched(monkeypatch):
+    k = cache.key(samples(), SR, {})
+    cache.put(k, {"a": 1})
+    monkeypatch.setattr(os, "utime", lambda *a, **kw: (_ for _ in ()).throw(PermissionError()))
+    assert cache.get(k) == {"a": 1}
+
+
+def test_an_entry_another_worker_removed_still_counts_off_the_total(monkeypatch):
+    d = cache.cache_dir()
+    keys = [cache.key(samples(i), SR, {}) for i in range(3)]
+    rng = np.random.default_rng(1)
+    for i, k in enumerate(keys):
+        cache.put(k, {"pad": rng.bytes(5000).hex()})
+        os.utime(os.path.join(d, k + cache.SUFFIX), (1000 + i, 1000 + i))
+    paths = [os.path.join(d, k + cache.SUFFIX) for k in keys]
+    size = os.stat(paths[2]).st_size
+    real = os.unlink
+    def gone(p):                                                           # the oldest is removed by someone else just before
+        real(p)
+        raise FileNotFoundError(p)
+    monkeypatch.setattr(os, "unlink", lambda p: gone(p) if p == paths[0] else real(p))
+    cache.evict(d, limit=2 * size + 100)                                   # room for two: only the oldest has to go
+    assert not os.path.exists(paths[0]) and os.path.exists(paths[1]) and os.path.exists(paths[2])
+
+
 def test_over_the_limit_the_entry_used_longest_ago_goes_first(monkeypatch):
     keys = [cache.key(samples(i), SR, {}) for i in range(5)]
     rng = np.random.default_rng(0)
@@ -98,6 +144,11 @@ def test_a_folder_that_cannot_be_written_loses_the_cache_not_the_run(tmp_path, m
 
 
 # ---------------------------------------------------------------- the analysis
+
+
+def test_an_entry_missing_a_part_is_a_miss():
+    assert drumroles._unpack({"groups": []}) is None
+    assert drumroles._unpack({"hat_like": 0.1, "grid_hits": 0, "hits": [], "notes": [], "groups": []}) is not None
 
 def hat_stem(bars=2, bpm=120.0, seed=3):
     """Mono stem of closed hats on every 16th and one tom a bar: short, quick to analyse."""
@@ -152,7 +203,7 @@ def test_a_changed_setting_or_a_bumped_version_detects_again(monkeypatch):
     monkeypatch.setattr(drumroles, "CACHE_VERSION", drumroles.CACHE_VERSION + 1)
     drumroles.hit_groups(x, 120.0, 0.0, sr=SR, stability_runs=0, cache=True)
     assert len(calls) == 3
-    monkeypatch.setattr(drumroles, "FAINT_DB", drumroles.FAINT_DB + 1)     # a constant of the detector changes the key by itself
+    monkeypatch.setattr(drumroles, "_source_hash", lambda: "another source")   # an edit to the detector's source changes the key by itself
     drumroles.hit_groups(x, 120.0, 0.0, sr=SR, stability_runs=0, cache=True)
     assert len(calls) == 4
 

@@ -33,9 +33,9 @@ the grid's lines, so a run with it is never cached. The records of a cold and a 
 Entries live in `~/Library/Caches/roadie/drum-hits/` (`ROADIE_CACHE_DIR` moves it), at most 300 MB (`ROADIE_CACHE_MAX_MB`; the
 least recently used go first), as gzipped JSON, written by temp file and rename, so several workers may write at once and an
 unreadable file is a miss. The key is a sha256 over the samples, the rate, the channels, the settings, a
-`CACHE_VERSION` constant in `drumroles.py` and every upper-case numeric or string constant of `drumroles.py` and `oneshot.py`, so a
-tuned threshold changes the key by itself; **bump `CACHE_VERSION` when the detection or grouping code changes without a constant
-changing.** `--no-cache` (on `roadie drums` and on `drumstability`; `cache=False` on `drums.drum_roles`) or `ROADIE_NO_CACHE=1`
+`CACHE_VERSION` constant in `drumroles.py` and a sha256 of the source text of `drumroles.py`, `oneshot.py` and `sideman/listen.py`
+(read once per process), so any edit to the detector, a tuned threshold included, starts a fresh set of entries, in every checkout that
+shares the folder; `CACHE_VERSION` is there to mark a change of the cached shape on purpose. `--no-cache` (on `roadie drums` and on `drumstability`; `cache=False` on `drums.drum_roles`) or `ROADIE_NO_CACHE=1`
 skips reads and writes; clear the cache by deleting the folder. Glacier 3000, all stems: 186 s cold, 54 s with the hits cached
 alone, 41 s with the readings cached too; the stability check's seven runs 5 min 32 s.
 

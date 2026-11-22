@@ -65,7 +65,7 @@ def key(samples, sr: int, settings: dict) -> str:
     h.update(json.dumps({"arrays": [[a.dtype.str, a.shape] for a in arrays], "sr": int(sr), "settings": settings}, sort_keys=True,
                         default=_jsonable).encode())
     for a in arrays:
-        h.update(a.tobytes())
+        h.update(memoryview(a).cast("B"))                 # no copy
     return h.hexdigest()
 
 
@@ -81,10 +81,13 @@ def get(k: str):
     try:
         with gzip.open(p, "rt", encoding="utf-8") as f:
             value = json.load(f)
-        os.utime(p)                                   # read: the entry is the newest
-        return value
-    except (OSError, EOFError, ValueError):           # missing, truncated, not gzip, not JSON (UnicodeDecodeError is a ValueError)
+    except Exception:                                 # missing, truncated, garbled (zlib.error), not JSON: a miss, never an error
         return None
+    try:
+        os.utime(p)                                   # read: the entry is the newest (a read-only folder still serves its entries)
+    except OSError:
+        pass
+    return value
 
 
 def put(k: str, value) -> None:
@@ -101,7 +104,7 @@ def put(k: str, value) -> None:
         os.replace(tmp, _path(k))
         tmp = None
         evict(d)
-    except OSError:
+    except (OSError, TypeError, ValueError):          # a full disk, or a value JSON cannot hold: the run goes on without the entry
         pass
     finally:
         if tmp is not None:
@@ -141,6 +144,9 @@ def evict(d: str | None = None, limit: int | None = None) -> int:
             break
         try:
             os.unlink(p)
+        except FileNotFoundError:                     # another worker removed it: it no longer counts
+            total -= size
+            continue
         except OSError:
             continue
         total -= size

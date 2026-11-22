@@ -96,6 +96,8 @@ Choices that are not obvious from the code:
 """
 from __future__ import annotations
 
+import functools
+import hashlib
 import math
 import pathlib
 import sys
@@ -106,7 +108,7 @@ from roadie_analysis import cache as hitcache
 from roadie_analysis import oneshot
 from sideman.listen import GRID_LEAD_S, check_channels, check_sections, load
 
-CACHE_VERSION = 1        # bump when the detection or the grouping changes what `_detect` returns for the same audio and settings (the cached hits and groups); a changed constant of this module or of oneshot changes the key by itself
+CACHE_VERSION = 1        # bump when the detection or the grouping changes what `_detect` returns for the same audio and settings (the cached hits and groups); the key also holds a hash of the source of this module, oneshot and sideman.listen, so an edit never serves old hits, but CACHE_VERSION still marks a change on purpose
 THRESHOLD = 1.5          # average-linkage distance (spectral_distance, mel) at which groups stop merging
 MAX_CUT_S = 0.5          # a hit's cut is at most this long
 END_GUARD_S = 0.002      # a cut ends this long before the next hit's onset
@@ -569,15 +571,21 @@ def _assign_overlapped(x: np.ndarray, sr: int, hits: list, found: list, threshol
 
 
 def cache_settings() -> dict:
-    """What every cached result of this module's and drumsections' readings is keyed by besides the audio: CACHE_VERSION and the constants."""
-    return {"version": CACHE_VERSION, "constants": _constants()}
+    """What every cached result of this module's and drumsections' readings is keyed by besides the audio: CACHE_VERSION and the
+    hash of the detector's source."""
+    return {"version": CACHE_VERSION, "source": _source_hash()}
 
 
-def _constants() -> dict:
-    """Every number and string constant of this module and of oneshot's: what the detection and the grouping read, so a changed
-    threshold invalidates the cache without anyone remembering to bump CACHE_VERSION."""
-    return {"%s.%s" % (m.__name__.rsplit(".", 1)[-1], k): v for m in (sys.modules[__name__], oneshot) for k, v in sorted(vars(m).items())
-            if k.isupper() and isinstance(v, (int, float, str))}
+@functools.lru_cache(maxsize=None)
+def _source_hash() -> str:
+    """sha256 of the source text of this module, oneshot and sideman.listen (what the detection and the grouping run), once per
+    process: an edited constant or function gives another key, so a branch under work never serves its hits to another checkout
+    that shares the cache folder, and nobody has to remember CACHE_VERSION for an edit."""
+    from sideman import listen
+    h = hashlib.sha256()
+    for m in (sys.modules[__name__], oneshot, listen):
+        h.update(pathlib.Path(m.__file__).read_bytes())
+    return h.hexdigest()
 
 
 def _pack(d: dict) -> dict:
@@ -588,6 +596,8 @@ def _pack(d: dict) -> dict:
 def _unpack(d) -> dict | None:
     """What `_pack` made, back; None for anything that is not that (an entry of another shape is a miss)."""
     try:
+        if not all(k in d for k in ("hat_like", "grid_hits", "hits", "notes")):
+            return None
         return {**d, "groups": [{**g, "distance": {int(i): v for i, v in g["distance"]}} for g in d["groups"]]}
     except (KeyError, TypeError, ValueError):
         return None

@@ -338,8 +338,9 @@ second `roadie drums --no-write` took 41 s against 200 s, with the same record a
 - **How much:** at most 300 MB (`ROADIE_CACHE_MAX_MB=<n>`). Over the limit, the entries used longest ago are
   removed first.
 - **What makes an entry:** the slice's samples, the sample rate and channel count, the detector's settings and
-  constants, and a version number in `roadie_analysis/drumroles.py` (`CACHE_VERSION`). Different audio, a changed
-  setting or a new version never finds an old entry. A file that cannot be read counts as not there.
+  a hash of the detector's source text (`drumroles.py`, `oneshot.py`, `sideman/listen.py`), and a version number in
+  `roadie_analysis/drumroles.py` (`CACHE_VERSION`). Different audio, a changed setting, an edit to the detector or a new
+  version never finds an old entry. A file that cannot be read counts as not there.
 - **Bypass:** `roadie drums <study> --no-cache`, `python -m roadie_analysis.drumstability <stems> --no-cache`, or
   `ROADIE_NO_CACHE=1` for everything (nothing is read or written).
 - **Clear it:** delete the folder (`rm -r ~/Library/Caches/roadie/drum-hits`); it is made again on the next run.
