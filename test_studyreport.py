@@ -335,3 +335,23 @@ def test_artist_report_lists_missing_layers_and_writes_artist_md(artist_root, ca
     assert data["kind"] == "artist_report" and len(data["rows"]) == 4
     assert study.main(["report"]) == 2 and study.main(["report", "One", "--artist", "Artist"]) == 2
     assert study.main(["report", "--artist", "Nobody"]) == 1
+
+
+def test_the_card_parts_show_the_kick_out_and_the_bar_before_it(tmp_path):
+    mc = micro_record()
+    mc["transitions"] = [{"bar": 8, "beat": 28.0, "kind": "dropout", "ratio": 4.0, "into": "Breakdown"}]
+    st = study.load_study(str(make_study(tmp_path, micro=mc)), tmp_path)
+    md = studyreport.to_markdown(studyreport.report_data(st, *studyreport.read_micro(st)))
+    em = md.split("## Element map")[1].split("```")[1].splitlines()
+    assert em[1].split() == ["bar", "9"] and em[2].count("|") == 3 and "|Dr" in em[2]          # 2, 2 and 4 columns
+    assert next(l for l in em if l.startswith("kick")).split()[1] == "██··████"       # out in Live bars 17-24
+    assert next(l for l in em if l.startswith("bass")).split()[1] == "██·█████"
+    assert "- Bar 16, the bar before **Breakdown**: a dropout: 4.0× fewer drum hits" in md          # Live bar 16
+    assert "Longest stretch with no element coming in or going out: bars 25–40 (16 bars)." in md
+
+
+def test_the_card_parts_say_what_is_missing_and_flag_an_unreliable_grid(tmp_path):
+    st = study.load_study(str(make_study(tmp_path, verdict="chance-level")), tmp_path)
+    md = studyreport.to_markdown(studyreport.report_data(st, *studyreport.read_micro(st)))
+    assert "missing: micro (the fill or dropout scan is part of `roadie micro`)" in md
+    assert md.split("## Element map")[1].split("```")[1].splitlines()[1].split() == ["bar", "9†"]

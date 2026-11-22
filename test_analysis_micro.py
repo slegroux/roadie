@@ -355,3 +355,24 @@ def test_pcloud_read_back_mismatch_raises_and_removes_the_temp_folder(remote_stu
     with pytest.raises(OSError, match="read back"):
         micro.micro_of(sd)
     assert not any(Path(p).exists() for p in fake.local_paths)
+
+
+def test_the_bar_before_a_section_change_is_scanned_for_a_dropout(tmp_path):
+    sd = make_study(tmp_path, stems=("vocals",), drums=False)
+    total = int((T0 + BARS * BAR + 1.0) * SR)
+    kick = np.zeros(total)
+    for b in range(BARS):
+        if b == 7:                                        # the last bar of the Intro: no kick
+            continue
+        for beat in range(4):
+            i = int((T0 + b * BAR + beat * BAR / 4) * SR)
+            x = tone(55.0, 0.15, 30)
+            kick[i:i + len(x)] += x
+    sf.write(str(sd / "drums_kick.flac"), kick, SR)
+    rec = micro.micro_of(sd, write=False)
+    assert rec["transitions"] == [{"bar": 8, "beat": 28.0, "kind": "dropout", "ratio": 8.0, "into": "Drop 1"}]
+
+
+def test_without_drum_parts_there_is_no_transition_scan(measured):
+    _sd, rec = measured
+    assert rec["transitions"] is None and any("no drum parts" in n for n in rec["notes"])

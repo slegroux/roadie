@@ -831,6 +831,14 @@ def micro(stems_dir, key: dict | None = None) -> dict:
     chroma = None
     if "synths" in meas and meas["synths"]["loud"] is not None:
         chroma = chroma_bars(meas["synths"]["y"], SR, t0, bar_s, n_bars)
+    transitions, parts = None, [f for f in sorted(stems_dir.iterdir()) if f.name.startswith("drums_") and f.suffix in AUDIO]
+    if parts:
+        import sections as sectionsmod
+        raw = [s for s in (_read_json(stems_dir / "sections.json") or {}).get("sections") or []
+               if isinstance(s.get("time_sec"), (int, float)) and "beat" in s and "bar" in s]
+        transitions = sectionsmod.detect_transitions(str(stems_dir), raw, 60.0 / grid["tempo"])
+    else:
+        notes.append("no drum parts (drums_<kind> stems): no fill or dropout scan before the section changes")
     phrase_beats = None
     if "vocals" in meas and meas["vocals"]["loud"] is not None:
         v = meas["vocals"]
@@ -876,6 +884,10 @@ def micro(stems_dir, key: dict | None = None) -> dict:
                      "bar_0": "the downbeat moved back whole bars to the first bar line in the file, as drums.json"},
             "key": {k: key[k] for k in ("name", "camelot", "source", "confidence")} if key else None,
             "drums_made": drums.get("made") if drums else None,
+            "transitions": transitions,
+            "transitions_note": "the fill or dropout in the bar before each section change (sections.detect_transitions: "
+                                "the drum parts' hits in that bar against the outgoing section's usual bar; tuned on one "
+                                "track, so none found means none found, not none there); bar = the file bar before the change",
             "inputs": [{"name": f.name, "size": f.stat().st_size} for f in list(files.values()) if f is not None]
                       + [{"name": n, "size": (stems_dir / n).stat().st_size}
                          for n in ("alignment.json", "sections.json", "drums.json") if (stems_dir / n).exists()],
@@ -918,6 +930,7 @@ def micro_of(stems_dir, write: bool = True) -> dict:
     for s in STEMS:
         hit = sorted(n for n in names if Path(n).stem == s and Path(n).suffix in AUDIO)
         wanted += hit[:1]
+    wanted += [n for n in names if n.startswith("drums_") and Path(n).suffix in AUDIO]     # the transition scan
     parent = remote.rpartition("/")[0]
     with tempfile.TemporaryDirectory(prefix="roadie-micro-") as tmp:
         tmp = Path(tmp)

@@ -335,7 +335,23 @@ roadie study report "Blomqvist/More" --json   # the record the Markdown is made 
 records only, nothing is measured: the study record (`roadie study show`), the structure `roadie arrangement ref`
 reads from `bar_activity` (groove blocks, each role's entry, the stretches it is out and its last bar, kick-outs,
 the labelled drops), the mix profile per section (the mix's level, LUFS and six bands, then each stem's level) and
-`micro.json`. A part that is not on disk is listed as `missing: <layer>` with the command that makes it. The report
+`micro.json`. From the track card (PR #6, folded in; `card.py`) it has an element map, a text grid with one column per
+4 bars (`█` plays throughout, `▒` in part, `·` not at all) from `bar_activity`, so bar by bar and not smoothed;
+"into each section", the fill or dropout in the bar before each change, which `roadie micro` measures from the drum
+parts (`sections.detect_transitions`, tuned on one track: none found means none found); and observations (the
+longest stretch with nothing coming in or going out, the deepest breakdown under the loudest drop, mini-breaks of 4
+bars or less, sections that are not a multiple of 8 bars, and a tempo-drift warning).
+
+```
+bar     9†      41†     73†     105†    137†
+        || |Drop 1     |Br |Bu |Drop 2     |
+kick    ███████████████·······▒███████▒████··
+bass    █▒·████████████····█████████████████·
+hh      ███████████████····████████████████··
+synths  ·███████████████████████████████████·
+```
+*(Rodriguez Jr., Off Gerlach, rows cut: the breakdown at Live bar 69 and the drop at 101 match PR #6's by-ear check;
+`†` because its downbeat is chance-level.)* A part that is not on disk is listed as `missing: <layer>` with the command that makes it. The report
 is generated: a rebuild overwrites it, so notes belong in the vault.
 
 **Grid reliability.** Every bar position and every 16-step pattern counts from bar 1. When the downbeat is

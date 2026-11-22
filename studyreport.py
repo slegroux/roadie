@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import arrangement  # noqa: E402
+import card  # noqa: E402
 import study as studymod  # noqa: E402
 from roadie_analysis import key as keymod  # noqa: E402
 
@@ -173,6 +174,54 @@ def entries_exits(st: studymod.Study) -> dict | None:
     return out
 
 
+def card_data(st: studymod.Study, micro: dict | None) -> dict:
+    """The track card's parts (card.py, from PR #6): who plays in each bar (sections.json's bar_activity, by stem file),
+    the sections in card form, micro.json's transitions, and the bar numbering (Live bars when the offset is known)."""
+    act = st.layers["activity"].data
+    secs = st.sections()
+    first = act["first_bar"] if act else (secs[0].bar if secs else 1)
+    raw = (st.layers["sections"].data or {}).get("sections") or []          # in the order st.sections() reads them
+    return {"presence": act["stems"] if act else None, "first_bar": first, "bar_offset": st.bar_offset,
+            "bars": "Live" if st.bar_offset is not None else "file",
+            "sections": [{"label": s.label, "start": s.bar - first, "bars": s.bars, "stems": s.roles,
+                          "rel_energy": raw[i].get("rel_energy") if i < len(raw) else None} for i, s in enumerate(secs)],
+            "transitions": (micro or {}).get("transitions"), "has_micro": micro is not None,
+            "drift_pct": (st.layers["grid"].data or {}).get("drift_pct") if (st.layers["grid"].data or {}).get("has_drift") else None}
+
+
+def card_markdown(c: dict, f: str) -> list[str]:
+    """Element map, into each section and observations, in the report's bar numbering (`f` marks bars on an
+    unreliable grid)."""
+    off = c["bar_offset"] or 0
+    idx_bar = (lambda i: c["first_bar"] + i + off)          # noqa: E731  presence index -> printed bar
+    file_bar = (lambda b: b + off)                          # noqa: E731
+    L = ["", "## Element map", ""]
+    if c["presence"]:
+        L += ["%s %s bars%s." % (card.LEGEND, c["bars"], ", from bar_activity: bar by bar, so a one-bar gap shows as ▒"),
+              "", "```"]
+        L += card.element_map(c["presence"], [s["start"] for s in c["sections"]], [s["label"] for s in c["sections"]],
+                              idx_bar(0), flag=f)
+        L += ["```"]
+    else:
+        L.append("missing: activity (bar_activity in sections.json: re-run `roadie sections`)")
+    L += ["", "## Into each section", ""]
+    if c["transitions"] is not None:
+        L += ["The bar before each change, from the drum parts' hits (micro.json; tuned on one track, so none found "
+              "means none found, not none there). %s bars." % c["bars"], ""]
+        L += card.transition_lines(c["transitions"], file_bar, f)
+    elif c["has_micro"]:
+        L.append("not measured: no drum parts (drums_<kind> stems), or a micro.json made before the scan (re-run "
+                 "`roadie micro`)")
+    else:
+        L.append("missing: micro (the fill or dropout scan is part of `roadie micro`)")
+    notes = card.observations(c["sections"], c["presence"], idx_bar, f) if c["sections"] else []
+    if c["drift_pct"]:
+        notes.insert(0, "The tempo drifts %.1f%% across this track: bars are counted at one steady tempo, so bar numbers "
+                        "far from the start may be off by a bar or more." % c["drift_pct"])
+    L += ["", "## Observations", ""] + (["- " + n for n in notes] or ["none"])
+    return L
+
+
 def report_data(st: studymod.Study, micro: dict | None = None, micro_missing: str | None = None) -> dict:
     """The report as one record (what `--json` prints and the Markdown renders)."""
     grid = grid_state(st)
@@ -203,6 +252,7 @@ def report_data(st: studymod.Study, micro: dict | None = None, micro_missing: st
         data["structure"] = {"blocks": m["blocks"], "kick": m["kick"], "bass": m["bass"], "hats": m["hats"],
                              "drops": arrangement.labelled_drops(m), "drop_ratio": m["drop_ratio"]}
     data["mix"] = st.mix() or None
+    data["card"] = card_data(st, micro)
     if micro is None:
         data["missing"].append({"layer": "micro", "command": micro_missing})
     else:
@@ -285,6 +335,7 @@ def to_markdown(d: dict) -> str:
                              for o in e["out"]) or "never"
             L.append("| %s | %s (%s) | %s | %s |" % (role, bar(e["enters"]), e["enters_in"] or "no label", outs,
                                                     bar(e["last_bar"])))
+    L += card_markdown(d["card"], f)
     S = d["structure"]
     L += ["", "## Kick-outs", ""]
     if S is None or S["kick"] is None:
