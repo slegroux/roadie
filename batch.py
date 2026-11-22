@@ -27,6 +27,8 @@ import time
 import unicodedata
 from collections import namedtuple
 
+from roadie_analysis.jobqueue import heavy_job
+
 REPO = os.path.dirname(os.path.realpath(__file__))
 CACHE = os.path.expanduser("~/.cache/roadie-batch")
 DEFAULT_DEST = "pcloud:Music/Production/Roadie"
@@ -449,8 +451,11 @@ class Runner:
             try:
                 dur = float(row["duration_sec"] or 0)
                 tmo = int(SPLIT_FACTOR * dur + SPLIT_PAD) if dur > 0 else SPLIT_NODUR
-                self.step(row, "split", [roadie_cmd(), "split", "--file", row["src"], "-d", "-o", work],
-                          tmo, env=dict(os.environ, TMPDIR=tmp))
+                # The machine-wide queue is waited out here, before the step's clock starts; the split
+                # child sees the lock as its parent's and does not wait again.
+                with heavy_job("roadie batch split %s" % os.path.basename(row["src"])):
+                    self.step(row, "split", [roadie_cmd(), "split", "--file", row["src"], "-d", "-o", work],
+                              tmo, env=dict(os.environ, TMPDIR=tmp))
                 safe_rmtree(tmp, self.work_root)
                 stems = [d for d in os.listdir(work)
                          if d.endswith("_stems") and os.path.isdir(os.path.join(work, d))]

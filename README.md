@@ -390,6 +390,31 @@ best, or every change); drums.json joins sections under 8 bars, so both rows of 
 roles (count them once when adding up); pyin's frames are 186 ms and centred, so a note's pitch is read with up to
 68 ms of the note before it in the first frames (the median over the note damps it).
 
+## Heavy jobs queue
+
+`roadie split` (the separation) and `roadie drums` (also the MCP `drum_roles` tool) each take one
+machine-wide lock before the heavy part, so jobs started from several terminals or agents run one after
+another instead of fighting for the cores and the graphics memory. Nothing else queues: `--help`, `load`,
+`sections`, `key`, `study` and the other commands start at once.
+
+A job that has to wait says so on stderr, naming the one it waits for, and repeats every minute:
+
+```
+roadie: waiting for roadie drums Glacier 3000 (pid 4121, since 14:03:22); ROADIE_NO_QUEUE=1 skips the queue
+roadie: still waiting for roadie drums Glacier 3000 (pid 4121, since 14:03:22) (1 min 00 s so far)
+roadie: lock acquired after waiting 2 min 41 s
+```
+
+The lock is a `flock` on `~/Library/Caches/roadie/heavy-job.lock` (`ROADIE_QUEUE_LOCK=<file>` moves it),
+which the system drops when the holder ends, even if it is killed, so a crashed job never blocks the
+next. The file's JSON (pid, command, start time) is only the note the waiting message reads. A job the
+holder starts (a worker process, `yt2stems.sh` with its children) shares the holder's turn and never
+waits for it. `ROADIE_NO_QUEUE=1` skips the queue.
+
+The command line waits as long as it takes. The MCP `drum_roles` tool waits 3 minutes, then fails with
+`machine busy: <job> (pid …, since …); retry later` and runs nothing. `roadie batch` waits for its turn before
+it starts a track's split, so the wait does not count against the split's timeout.
+
 ## Configuration
 
 Roadie reads one optional file, `~/.config/roadie/config` (`$XDG_CONFIG_HOME` is
