@@ -145,6 +145,7 @@ def test_phase_scenes_start_on_the_downbeat(phase):
         assert min(r, BAR - r) < 1e-3     # clip_start is rounded to 4 dp
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("phase", [1, 2, 3])
 def test_build_session_view_dry_run_starts_scenes_on_the_downbeat(tmp_path, phase):
     """The real entry point, not plan_session: the downbeat must reach

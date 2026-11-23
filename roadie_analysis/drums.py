@@ -9,6 +9,7 @@ soundfile (requirements.txt).
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import multiprocessing
@@ -16,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -26,6 +28,7 @@ import numpy as np
 import soundfile as sf
 
 from roadie_analysis import drumroles, drumsections
+from roadie_analysis.drumsections import _runs as _runs_of
 from roadie_analysis import key as keymod
 
 KIND, VERSION = "drum_roles", 1
@@ -92,18 +95,33 @@ def _file_record(p: Path) -> dict:
     return {"name": p.name, "size": st.st_size, "mtime": round(st.st_mtime, 3)}
 
 
+@functools.lru_cache(maxsize=None)
+def default_jobs() -> int:
+    """Worker processes when `jobs` is not given: the performance cores on macOS (the efficiency cores slow a pool down and
+    leave the machine to other sessions), else every core."""
+    if sys.platform == "darwin":
+        try:
+            n = int(subprocess.run(["sysctl", "-n", "hw.perflevel0.logicalcpu"], capture_output=True, text=True, timeout=5,
+                                   check=True).stdout.strip())
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
 def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, sections: list | None = None,
                out=None, write: bool = True, deadline: float | None = None, jobs: int | None = None,
-               hit_times: bool = False) -> dict:
+               hit_times: bool = False, cache: bool = True) -> dict:
     """The roles of every drum stem in `stems_dir`, as the `drums.json` record. Each stem is analysed section by section
     (drumsections.py: sections shorter than 8 bars join their neighbour, no sections means the whole track as one) and the
     groups of the sections are matched by sound, so one role keeps one identity and name over the track; `mark_bleed` and
     `name_roles` then run on the merged roles' hits. `tempo` (BPM), `t0` (seconds from the start of the files to bar 0) and
     `sections` ([{name, start_bar, bars}], bars counted from t0) default to the folder's alignment.json and sections.json.
-    `jobs` processes run the (stem, section) jobs, the matching and the naming (default: the cores; 1: in this process).
+    `jobs` processes run the (stem, section) jobs, the matching and the naming (default: `default_jobs()`, the fast cores; 1: in this process).
     With `write` the record goes to `<out or stems_dir>/drums.json` and each role's clean hit to
     `<out or stems_dir>/drum_roles/<stem>-<role>.wav` (new clips first, then drums.json by temp file and rename, then the clips the earlier drums.json listed and this one does not).
-    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
+    A study on the pCloud mount is analysed in a temp folder and its results uploaded with rclone, never read or written through the mount (`_library_roles`). `hit_times` adds each role's hits' onset times (`hit_times`) to the record. `cache` (default on; `ROADIE_NO_CACHE=1` also turns it off) reuses the hits and groups detected in a slice of a stem that an earlier analysis of the same audio found (`roadie_analysis/cache.py`); the record is the same either way. `deadline` is a time.monotonic() value checked as results come in; passing it raises TimeoutError (nothing is written; jobs
     already started finish in the background). Raises ValueError when there are no drum stems or no grid.
 
     Per stem: {"file", "sample_rate", "hits", "hat_like", "roles", "bleed", "per_section", "notes"}. A role is {"name", "named",
@@ -115,7 +133,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     stems_dir = Path(stems_dir)
     remote = keymod.pcloud_remote(stems_dir)
     if remote is not None:
-        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs, hit_times)
+        return _library_roles(stems_dir, remote, tempo, t0, sections, out, write, deadline, jobs, hit_times, cache)
     stems = find_stems(stems_dir)
     if not stems:
         raise ValueError("no drum stems (drums_<kind>.flac or .wav) in %s" % stems_dir)
@@ -146,7 +164,7 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     if len(plan) != len(sections or [None]):
         notes.append("sections shorter than %d bars were joined to their neighbour: %s" % (
             drumsections.MIN_SECTION_BARS, ", ".join(p["name"] for p in plan if "+" in str(p["name"]))))
-    workers = min(max(1, jobs if jobs else (os.cpu_count() or 1)), len(stems) * len(plan))
+    workers = min(max(1, jobs if jobs else default_jobs()), len(stems) * len(plan))
     pool = None if workers == 1 else ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
     stages = {}
     try:
@@ -155,23 +173,27 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
         stages["levels"] = time.monotonic() - t
         t = time.monotonic()
         keys = [(k, si) for k in stems for si in range(len(plan))]
-        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k]) for k, si in keys], pool, deadline)
+        outs = _run(drumsections.section_job, [(stems[k], tempo, t0, plan[si], peaks[k], cache) for k, si in keys], pool, deadline)
         stages["sections"] = time.monotonic() - t
         t = time.monotonic()
-        merged = _run(drumsections.merge_stem, [([outs[i] for i, (k2, _) in enumerate(keys) if k2 == k], plan, tempo, t0) for k in stems],
-                      pool, deadline)
+        sec_outs = {k: [outs[i] for i, (k2, _) in enumerate(keys) if k2 == k] for k in stems}
+        unmerged = dict(zip(stems, _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, False, frozenset(), cache) for k in stems],
+                                        pool, deadline)))
+        bleed0 = drumroles.mark_bleed(unmerged)             # a group that is bleed is never merged: found before merging, on the unmerged groups
+        merged = _run(drumsections.merge_stem, [(sec_outs[k], plan, tempo, t0, drumroles.THRESHOLD, True,
+                                                 frozenset(g for g, b in bleed0[k].items() if b["bleed"]), cache) for k in stems], pool, deadline)
         results = dict(zip(stems, merged))
         stages["matching"] = time.monotonic() - t
         t = time.monotonic()
         bleed = drumroles.mark_bleed(results)
         stages["bleed"] = time.monotonic() - t
         t = time.monotonic()
-        named = _run(drumroles.name_roles, [(results[k], k, bleed[k]) for k in stems], pool, deadline)
+        named = _run(drumroles.name_roles, [(_for_naming(results[k]), k, bleed[k]) for k in stems], pool, deadline)
         stages["naming"] = time.monotonic() - t
         t = time.monotonic()
-        tight = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S - STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+        tight = _run(drumroles.name_roles, [(_with_grid_tol(_for_naming(results[k]), drumroles.GRID_LEAD_S - STEADY_MARGIN_S), k, bleed[k]) for k in stems],
                      pool, deadline)
-        loose = _run(drumroles.name_roles, [(_with_grid_tol(results[k], drumroles.GRID_LEAD_S + STEADY_MARGIN_S), k, bleed[k]) for k in stems],
+        loose = _run(drumroles.name_roles, [(_with_grid_tol(_for_naming(results[k]), drumroles.GRID_LEAD_S + STEADY_MARGIN_S), k, bleed[k]) for k in stems],
                      pool, deadline)
         stages["steadiness"] = time.monotonic() - t
     finally:
@@ -188,6 +210,11 @@ def drum_roles(stems_dir, tempo: float | None = None, t0: float | None = None, s
     for kind, nm, tg, lo in zip(stems, named, tight, loose):
         record["stems"][kind], more = _stem_record(kind, stems[kind], results[kind], nm, bleed[kind], plan, t0, bar_s, hit_times, (tg, lo))
         clips += more
+    for kind, st in record["stems"].items():
+        far = ["%s (%+.0f ms)" % (ps["name"], ps["grid_shift_ms"]) for ps in st["per_section"] if abs(ps["grid_shift_ms"]) > drumroles.GRID_LEAD_S * 1000]
+        if far:
+            record["notes"].append("%s: in %s most hits sit more than %g ms from the aligner's grid lines: the grid's phase may be wrong "
+                                   "here, or this stem's dominant sound plays late" % (kind, ", ".join(far), drumroles.GRID_LEAD_S * 1000))
     if write:
         base = Path(out) if out else stems_dir
         old = _read_json(base / "drums.json")
@@ -218,7 +245,7 @@ def _rclone(*args) -> str:
         raise OSError("rclone %s failed: %s" % (args[0], (e.stderr or "").strip() or "exit %s" % e.returncode))
 
 
-def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs, hit_times=False) -> dict:
+def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write: bool, deadline, jobs, hit_times=False, cache=True) -> dict:
     """`drum_roles` for a study on the pCloud mount, which is never read or written through the FUSE mount (that fills a local
     cache with audio and writes into the archive through a mount): the drum stems, alignment.json and sections.json are copied
     to a temp folder with rclone, analysed there, and the results go back with rclone: the new clips, then drums.json, then
@@ -237,7 +264,7 @@ def _library_roles(stems_dir: Path, remote: str, tempo, t0, sections, out, write
                 old = json.loads(_rclone("cat", "%s/drums.json" % remote))
             except ValueError:
                 old = None
-        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs, hit_times)
+        rec = drum_roles(tmp, tempo, t0, sections, out, write, deadline, jobs, hit_times, cache)
         if write and not out:
             clips = sorted({r["clip"] for s in rec["stems"].values() for r in s["roles"] if r["clip"]})
             for c in clips:
@@ -287,11 +314,25 @@ def _slug(kind: str, name: str) -> str:
     return s if s.startswith(kind) else "%s-%s" % (kind, s)
 
 
+def _late_ms(hits: list) -> float | None:
+    """Where these hits sit against the ALIGNER's grid: the median of their raw offsets (ms, positive: late, negative: early),
+    whatever the section phase or the 20 ms tolerance say. None without hits."""
+    off = [h["offset_raw_ms"] for h in hits if "offset_raw_ms" in h]
+    return round(float(np.median(off)), 1) if off else None
+
+
 def _own_line(hits: list, bars: int | None = None) -> tuple[list, int]:
     """(share of the bars the hits are in that have an on-grid hit at each 16th, number of those bars)."""
     own = {h["bar"] for h in hits}
     on = [h for h in hits if h["on_grid"]]
     return [len({h["bar"] for h in on if h["step"] == s}) / len(own) if own else 0.0 for s in range(16)], len(own)
+
+
+def _for_naming(res: dict) -> dict:
+    """`res` without the groups that are an echo of another: they take no name and take no part in the naming of the others."""
+    out = dict(res)
+    out["groups"] = [g for g in res["groups"] if g.get("echo_of") is None]
+    return out
 
 
 def _with_grid_tol(res: dict, tol: float) -> dict:
@@ -330,13 +371,21 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             if hs:
                 pat, nb = _own_line(hs)
                 rows.append({"index": i, "section": p["name"], "start_bar": p["start_bar"], "bars": p["bars"], "hits": len(hs), "bars_with": nb,
-                             "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat)})
+                             "pattern": [round(float(v), 3) for v in pat], "line": pattern_line(pat), "late_ms": _late_ms(hs)})
         return rows
 
+    group_role = {gid: r["name"] for r in named["roles"] for gid in r["groups"]}
+    echoes = []
+    for g in res["groups"]:
+        if g.get("echo_of") is not None:
+            parent = group_role.get(g["echo_of"], "%s %d" % (kind, g["echo_of"] + 1))
+            echoes.append({"name": "echo of %s %+.0f ms" % (parent, g["echo_ms"]), "named": False, "rule": None, "groups": [g["id"]], "count": g["count"],
+                           "assigned": g["assigned"], "level_db": g["level_db"], "pattern": g["pattern"], "note": None, "variants": None,
+                           "possibly_also": [], "echo_of": parent, "echo_ms": g["echo_ms"], "echo_bars": g["echo_bars"]})
     roles, clips = [], []
-    for r in named["roles"]:
+    for r in named["roles"] + echoes:
         big = by_id[max(r["groups"], key=lambda i: by_id[i]["count"])]
-        e = info[big["id"]]
+        e = info.get(big["id"]) or {"reason": "an echo of %s: its hits follow that role's by %.0f ms" % (r.get("echo_of"), r.get("echo_ms") or 0)}
         clip = big["clean_hit"]
         ids = [i for gid in r["groups"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]]
         own, nb = _own_line([hits[i] for i in ids])
@@ -345,6 +394,7 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "bars_with": nb, "pattern": [round(float(v), 3) for v in r["pattern"]],
                "own_pattern": [round(float(v), 3) for v in own], "line": pattern_line(own),
                "off_grid": sum(by_id[i]["off_grid"] for i in r["groups"]),
+               "late_ms": _late_ms([hits[i] for i in ids]),
                "level_db": None if r["level_db"] is None else round(float(r["level_db"]), 1),
                "stability": None if big["stability"] is None else round(float(big["stability"]), 2),
                "stability_status": big["stability_status"],
@@ -352,7 +402,25 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
                "groups": r["groups"], "note": r["note"], "variants": r["variants"],
                "possibly_also": r["possibly_also"], "clip": None,
                "clip_note": None if clip else big["clean_note"], "per_section": section_view(ids)}
-        if variants:
+        if any(by_id[gid].get("merged_from") for gid in r["groups"]):    # one sound the grouping had split: each part with its evidence; the parts sum to the role's hits
+            parts = []
+            for gid in r["groups"]:
+                g_parts = by_id[gid].get("merged_from") or [{"hits": by_id[gid]["count"] + by_id[gid]["assigned"], "ids": by_id[gid]["members"] + by_id[gid]["assigned_members"],
+                                                             "bars": _runs_of([hits[i]["bar"] for i in by_id[gid]["members"] + by_id[gid]["assigned_members"]])}]
+                for part in g_parts:
+                    part = dict(part, group=gid)
+                    ids_ = part.pop("ids")
+                    if hit_times:
+                        part["hit_times"] = sorted(round(hits[i]["onset_s"], 4) for i in ids_)
+                    parts.append(part)
+            rec["merged_from"] = parts
+        if r.get("echo_of") is not None:
+            rec["echo_of"], rec["echo_ms"], rec["echo_bars"] = r["echo_of"], r["echo_ms"], r["echo_bars"]
+        maybe = sorted({group_role[og] for gid in r["groups"] for og in by_id[gid].get("may_be_one_sound_with", [])
+                        if og in group_role and group_role[og] != r["name"]})
+        if maybe and r.get("echo_of") is None:
+            rec["may_be_one_sound_with"], rec["may_be_note"] = maybe, "not compared: too few clean hits on one side"
+        if variants and r.get("echo_of") is None:
             why = _steadiness(r["groups"], r["name"], r["named"], variants)
             rec["name_steady"], rec["name_steady_note"] = why is None, why
         if hit_times:                                  # onset seconds of the role's hits, for roadie_analysis/drumstability.py
@@ -367,13 +435,20 @@ def _stem_record(kind: str, path: Path, res: dict, named: dict, bleed: dict, pla
             marked.append({"name": "%s %d" % (kind, g["id"] + 1), "hits": g["count"] + g["assigned"], "line": pattern_line(pat),
                            "level_db": None if g["level_db"] is None else round(float(g["level_db"]), 1),
                            "why": bleed[g["id"]]["why"]})
+    shifts = res.get("section_shift_ms") or [0.0] * len(plan)
     per_section = [{"name": p["name"], "start_bar": p["start_bar"], "bars": p["bars"],      # by index: labels repeat (two "Drop")
+                    "grid_shift_ms": shifts[i],      # where this stem's hits sit against the grid in this section (median)
                     "roles": {r["name"]: v["hits"] for r in roles for v in r["per_section"] if v["index"] == i}}
                    for i, p in enumerate(plan)]
     rec = {"file": path.name, "sample_rate": res["sample_rate"], "hits": sum(h["owned"] for h in hits),
            "hat_like": res["hat_like"], "bars": res["bars"], "first_bar": res["first_bar"], "roles": roles, "bleed": marked,
            "per_section": per_section, "notes": res["notes"] + named["notes"]}
     return rec, clips
+
+
+def _bars_text(runs: list) -> str:
+    """[[3, 9], [12, 12]] as "3-9, 12" (file bars counted from bar 0)."""
+    return ", ".join("%d" % a if a == b else "%d-%d" % (a, b) for a, b in runs)
 
 
 def format_table(record: dict) -> str:
@@ -397,10 +472,18 @@ def format_table(record: dict) -> str:
                 flags.append("stability %.2f" % r["stability"])
             if r["separation"] is not None:
                 flags.append("separation %.2f" % r["separation"])
+            if r.get("late_ms") is not None:
+                flags.append("late %+.0f ms" % r["late_ms"])
             if r["variants"]:
                 flags.append("%d variants" % len(r["variants"]))
             if r.get("name_steady") is False:
                 flags.append("name unsteady")
+            if r.get("echo_of"):
+                flags.append("echo of %s, %+.0f ms later" % (r["echo_of"], r["echo_ms"]))
+            if r.get("merged_from"):
+                flags.append("%d groups merged" % len(r["merged_from"]))
+            if r.get("may_be_one_sound_with"):
+                flags.append("may be one sound with %s (%s)" % (", ".join(r["may_be_one_sound_with"]), r["may_be_note"]))
             lvl = "%.1f dB" % r["level_db"] if r["level_db"] is not None else "-"
             lines.append("  %-14s %5d  %-19s %7s  %s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
                                                           lvl, ", ".join(flags)))
@@ -410,10 +493,17 @@ def format_table(record: dict) -> str:
                 lines.append("      note: %s" % r["note"])
             if r.get("name_steady") is False:
                 lines.append("      unsteady: %s" % r["name_steady_note"])
+            for m in r.get("merged_from") or []:
+                lines.append("      merged part: %d hits in bars %s" % (m["hits"], _bars_text(m["bars"])))
+            if r.get("echo_bars"):
+                lines.append("      echo is on in bars %s" % _bars_text(r["echo_bars"]))
             for v in r["per_section"] if len(r["per_section"]) > 1 else []:
                 lines.append("      %-22s %4d  %s" % (v["section"][:22], v["hits"], " ".join(v["line"][i:i + 4] for i in range(0, 16, 4))))
             if r["clip"]:
                 lines.append("      clip: %s" % r["clip"])
+        shifts = ["%s %+.1f" % (ps["name"][:14], ps["grid_shift_ms"]) for ps in s["per_section"] if ps.get("grid_shift_ms")]
+        if shifts:
+            lines.append("  section phase against the aligner's grid (ms): " + ", ".join(shifts))
         if small:
             lines.append("  + %d groups of fewer than %d measured hits (%d hits in all): in drums.json" % (
                 len(small), MIN_SHOWN, sum(r["hits"] for r in small)))

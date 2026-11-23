@@ -1,19 +1,127 @@
 name: tests
 
+# Two suites, one job definition (a matrix):
+#   fast  `-m "not slow"`  every pull request and push that changes more than docs, and every night.
+#                          Whole job under 5 minutes.
+#   slow  `-m slow`        push to main, nightly, and a pull request whose changed files touch code
+#                          the slow tests cover (the `plan` job below decides).
+# Locally a plain `pytest` still runs everything; see "Tests" in README.md.
+#
+# There is no `paths-ignore`: the `plan` job decides, because a change to a golden file such as
+# analysis_golden/mix_report.md is a .md file that the slow tests compare against. A docs-only
+# change (only *.md or docs/, no golden file) skips both test jobs. Safe because main has no branch
+# protection requiring the `pytest` check (GitHub API: "Branch not protected"); a required check
+# that never runs would block a docs pull request forever.
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
-  pytest:
+  # Chooses what runs and says why in the job summary. A pull request gets the slow suite when a
+  # changed file is: a module the slow tests import (an import walk, through other modules, of
+  # test_drums, test_analysis_drumroles, test_analysis_profile, test_bench_roles,
+  # test_analysis_equivalence, test_roadie_mcp and test_sections), golden data, the requirements,
+  # conftest.py, this workflow, or any test file that marks a test slow (found by grep, so a slow
+  # test added to another file is picked up). Wide on purpose: when in doubt it runs. A new module
+  # imported by a slow test must be added to the regex. Collecting `-m slow` instead needs the
+  # venv (about 30 s of installs), which the grep avoids.
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      run_tests: ${{ steps.pick.outputs.run_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the suites
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # min_ran is the guard's floor: tests that actually ran (not skipped), about 10 % under
+          # the count when set (fast: 886 collected, about 879 run; slow: 128). The fast suite spreads tests over workers (`load`);
+          # the slow one keeps each file on one worker (`loadfile`): its module fixtures
+          # (test_drums.py `made`, 40 s) would be rebuilt on every worker otherwise.
+          fast='{"suite":"fast","marker":"not slow","dist":"load","min_ran":790,"timeout":8}'
+          slow='{"suite":"slow","marker":"slow","dist":"loadfile","min_ran":110,"timeout":25}'
+          docs='(\.md$|^docs/)'
+          slow_re='^(roadie_analysis/|analysis_golden/|mcp_golden/|\.github/|requirements[a-z-]*\.txt$|conftest\.py$|roadie$|(arrangement|als_writer|batch|beat_aligner|bench_roles|benchmark|fake_live|keyfill|live_batch|roadie_drums|roadie_mcp|sections|session_view|stems2live|study|studyrename)\.py$)'
+          run_tests=yes
+          run_slow=yes
+          matched=""
+          if [ "$EVENT" = schedule ]; then
+            reason="nightly: both suites"
+          else
+            if [ "$EVENT" = pull_request ]; then
+              files=$(git -c core.quotepath=false diff --name-only --no-renames "origin/$BASE_REF"...HEAD) || files=ALL
+            else
+              files=$(git -c core.quotepath=false diff --name-only --no-renames HEAD^1 HEAD) || files=ALL
+            fi
+            echo "changed files:"; echo "$files"
+            code=$(echo "$files" | grep -Ev "$docs" || true)
+            golden=$(echo "$files" | grep -E '^(analysis_golden|mcp_golden)/' || true)
+            if [ "$files" != ALL ] && [ -z "$code" ] && [ -z "$golden" ]; then
+              run_tests=no; run_slow=no
+              reason="docs only (*.md and docs/, no golden file): no tests"
+            elif [ "$EVENT" = push ]; then
+              reason="push to main: both suites"
+            elif [ "$files" = ALL ]; then
+              reason="could not list the changed files: both suites"
+            else
+              # test files that mark tests slow: pytest.mark.slow in the file, or named in conftest.py
+              slowfiles=$( { grep -l 'pytest.mark.slow' test_*.py; grep -o '"test_[a-z_0-9]*\.py"' conftest.py | tr -d '"'; } | sort -u)
+              matched=$( { echo "$files" | grep -E "$slow_re"; echo "$files" | grep -Fx -f <(echo "$slowfiles"); } | sort -u || true)
+              if [ -z "$matched" ]; then
+                run_slow=no
+                reason="pull request touches no code the slow tests cover: fast suite only"
+              else
+                reason="pull request touches code the slow tests cover: both suites"
+              fi
+            fi
+          fi
+          echo "$reason"
+          {
+            echo "### Suites: $reason"
+            echo
+            echo "fast: $run_tests, slow: $run_slow"
+            if [ -n "$matched" ]; then
+              echo; echo "Files that selected the slow suite:"; echo '```'; echo "$matched"; echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
+          if [ "$run_slow" = yes ]; then
+            echo "matrix={\"include\":[$fast,$slow]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[$fast]}" >> "$GITHUB_OUTPUT"
+          fi
+
+  pytest:
+    needs: plan
+    if: needs.plan.outputs.run_tests == 'yes'
+    name: pytest (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
 
+      # enable-cache keeps uv's download and built-wheel cache between runs, keyed on the
+      # requirements files. Cuts the dependency install and the madmom build (a git source
+      # built into a wheel); the cache is restored on pull requests from this repo's branches.
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
 
       - name: Set up Python 3.13
         run: uv python install 3.13
@@ -51,20 +159,57 @@ jobs:
           # The MCP SDK for roadie_mcp.py, every package pinned: requirements-mcp.txt.
           uv pip install --python .venv/bin/python -r requirements-mcp.txt
 
+      # Slow suite only: the one test that uses it (test_beat_aligner.py
+      # test_madmom_is_still_reachable...) is marked slow, and the build costs 40 s.
       # madmom is a real backend but an awkward build: the PyPI release is from
       # 2018 and imports MutableSequence from collections, so it needs git main,
       # Cython, and setuptools<81 (81+ dropped pkg_resources). Allowed to fail —
       # the one test that uses it is an importorskip, so a broken madmom costs a
       # skip rather than a red build for a reason unrelated to the change.
       - name: Install madmom (optional)
+        if: matrix.suite == 'slow'
         continue-on-error: true
         run: |
           uv pip install --python .venv/bin/python "setuptools<81" cython
           uv pip install --python .venv/bin/python --no-build-isolation \
             "madmom @ git+https://github.com/CPJKU/madmom"
 
-      - name: Run tests
-        run: .venv/bin/python -m pytest -q -rs --junitxml=junit.xml
+      # The numba cache of the per-worker directories (conftest.py): restored from the last run on
+      # the same requirements, so a worker does not recompile librosa's functions in whichever test
+      # reaches them first. Saved only when the key did not exist and the job passed.
+      - name: Numba cache
+        id: numba
+        uses: actions/cache@v4
+        with:
+          path: /tmp/roadie-numba-cache
+          key: numba-${{ matrix.suite }}-${{ hashFiles('requirements*.txt') }}
+
+      # pytest-xdist, one worker per core: `nproc --all`, because plain `nproc` honours
+      # OMP_NUM_THREADS=1 (set below) and returned 1. A public repo's runner has 4.
+      # --dist from the matrix: `load` spreads the fast tests over the workers (no fast test
+      # depends on its file-mates running in the same worker: checked with a run of the fast
+      # set under `load`); `loadfile` keeps a file on one worker for the slow suite.
+      # --max-worker-restart=0: a worker that dies (a numba segfault did, once) ends the run
+      # with the crash in the log instead of being replaced and dragging to the time limit.
+      # --strict-markers: a mistyped marker is an error, not a warning that silently leaves a
+      # slow test in the fast suite.
+      # --durations=40 prints the slowest tests at the end. xdist merges all workers into the
+      # one junit.xml the guard below reads.
+      # One thread per worker: numpy/BLAS/OpenMP/numba each start a pool the size of the
+      # machine, and 4 workers x 4 threads oversubscribe 4 cores. Each worker also gets its
+      # own numba cache (conftest.py), because a shared cold cache crashed workers.
+      - name: Run tests (${{ matrix.suite }})
+        env:
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          NUMBA_NUM_THREADS: "1"
+          MARKER: ${{ matrix.marker }}
+          DIST: ${{ matrix.dist }}
+        run: |
+          cores=$(nproc --all)
+          echo "runner cores: $cores"
+          .venv/bin/python -m pytest -q -rs -n "$cores" --dist "$DIST" --max-worker-restart=0 --strict-markers --durations=40 -m "$MARKER" --junitxml=junit.xml
 
       # THE POINT OF THIS STEP. Every test here is gated on something — the real
       # stems, aubiotrack, madmom — so a missing dependency does not fail the
@@ -73,6 +218,10 @@ jobs:
       # a vacuously green CI is the same failure in a different costume.
       - name: Guard against a vacuously green run
         if: always()
+        env:
+          MIN_RAN: ${{ matrix.min_ran }}
+          SUITE: ${{ matrix.suite }}
+          NUMBA_CACHE_HIT: ${{ steps.numba.outputs.cache-hit }}
         run: |
           python3 - <<'PY'
           import os, sys, xml.etree.ElementTree as ET
@@ -87,8 +236,48 @@ jobs:
           skipped = int(ts.get("skipped", 0))
           ran = total - skipped
           print(f"{ran} ran, {skipped} skipped, {total} collected")
-          MIN_RAN = 140          # a floor, not the count: only the stem- and madmom-gated tests may skip
+          MIN_RAN = int(os.environ["MIN_RAN"])   # per suite, from the matrix: a floor, not the count. A marker typo that deselects everything fails here
           if ran < MIN_RAN:
               sys.exit(f"::error::only {ran} tests actually ran (expected >= {MIN_RAN}). "
                        "A dependency is missing and the suite is passing by default.")
+
+          # A fast test over 10 s does not belong in the fast suite: it keeps the whole job under
+          # 5 minutes only until a few more arrive. Over 10 s is a warning, over 60 s fails the run:
+          # the first test in each worker to reach a compiled librosa function pays its compile
+          # time (15 to 20 s, whichever test that is), and a restored numba cache does not always
+          # spare it (a run with a cache hit still showed three such tests), so 10 s cannot be enforced.
+          if os.environ["SUITE"] == "fast":
+              over = sorted(((float(tc.get("time", 0)), f'{tc.get("classname")}::{tc.get("name")}')
+                             for tc in root.iter("testcase") if float(tc.get("time", 0)) > 10), reverse=True)
+              for t, n in over:
+                  print(f"{t:.1f} s over 10 s: {n}")
+              if over:
+                  names = ", ".join(n for _, n in over[:10])
+                  msg = f"{len(over)} fast test(s) took over 10 s: {names}. Mark each slow or shorten it."
+                  if over[0][0] > 60:
+                      sys.exit("::error::" + msg)
+                  print("::warning::" + msg + " (enforced over 60 s; under that it may be compile time)")
           PY
+
+  # A scheduled run that failed would otherwise only email whoever last edited the cron line.
+  alert:
+    needs: [plan, pytest]
+    if: always() && github.event_name == 'schedule' && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open the issue, or comment on the open one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="nightly tests failed"
+          n=$(gh issue list --repo "$REPO" --state open --search "\"$title\" in:title" --json number -q '.[0].number')
+          body="The scheduled test run failed: $RUN_URL"
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi

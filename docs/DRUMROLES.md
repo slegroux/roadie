@@ -10,7 +10,7 @@ and `mark_bleed` marks the groups that are another stem's sound leaking in.
 
 ## Running it: `roadie drums`
 
-    roadie drums <study name | stems_dir> [--jobs N] [--json] [--no-write]
+    roadie drums <study name | stems_dir> [--jobs N] [--json] [--no-write] [--no-cache]
 
 `roadie_analysis.drums.drum_roles` analyses every `drums_<kind>` stem of a stems folder (`drums.flac`, the sum, is not
 one) **section by section** and writes the roles. The MCP tool `drum_roles(stems, tempo, t0, sections, out, jobs,
@@ -20,7 +20,28 @@ timeout_s)` does the same and returns the record. Nothing is tuned: the threshol
 hits, the run takes minutes on one core, and the grouping moves with the sample it draws (Glacier 3000's hats came out
 as eleven groups, none stable enough to name). A section holds a few dozen to a few hundred hits: it is grouped on its own
 (a section of at most 32 hits of a stem is grouped exactly: "stable by construction"), and the (stem, section) jobs run in
-a process pool (`--jobs N`, default the cores).
+a process pool (`--jobs N`, default the fast cores: the performance cores on macOS, every core elsewhere).
+
+`roadie drums` and the stability check (`python -m roadie_analysis.drumstability`) are heavy jobs: each waits for the
+machine's one heavy-job lock, prints what it is waiting for, and runs when the lock is free (`ROADIE_NO_QUEUE=1` skips
+the queue; README, "Heavy jobs queue").
+
+**The cache.** What a (stem, section) job finds depends only on its slice's samples, the sample rate and the detector's
+settings: the hits (onsets, cuts, levels, leads, statuses), their groups (members, medoids, distances, stability,
+separation, overlapped hits assigned to a group) and, at the matching, each group's sound reading (`group_reading`).
+The tempo, `t0` and the section lines enter only afterwards, in what `hit_groups` does with the grid: each hit's bar,
+16th, offset and `on_grid`, the tails that sound through grid lines, the patterns, and the clean hit of each group, which are
+recomputed every time. Slices start and end on a multiple of a fixed quantum of samples (see below), so the same audio gives a
+sample-identical slice for any grid that does not move a section line over a quantum boundary. `grid_onsets` looks for hits at
+the grid's lines, so a run with it is never cached. The records of a cold and a warm run are equal apart from the timing fields.
+Entries live in `~/Library/Caches/roadie/drum-hits/` (`ROADIE_CACHE_DIR` moves it), at most 300 MB (`ROADIE_CACHE_MAX_MB`; the
+least recently used go first), as gzipped JSON, written by temp file and rename, so several workers may write at once and an
+unreadable file is a miss. The key is a sha256 over the samples, the rate, the channels, the settings, a
+`CACHE_VERSION` constant in `drumroles.py` and a sha256 of the source text of `drumroles.py`, `oneshot.py` and `sideman/listen.py`
+(read once per process), so any edit to the detector, a tuned threshold included, starts a fresh set of entries, in every checkout that
+shares the folder; `CACHE_VERSION` is there to mark a change of the cached shape on purpose. `--no-cache` (on `roadie drums` and on `drumstability`; `cache=False` on `drums.drum_roles`) or `ROADIE_NO_CACHE=1`
+skips reads and writes; clear the cache by deleting the folder. Glacier 3000, all stems: 186 s cold, 54 s with the hits cached
+alone, 41 s with the readings cached too; the stability check's seven runs 5 min 32 s.
 
 **How the sections are cut and merged** (`roadie_analysis/drumsections.py` has the choices):
 
@@ -29,10 +50,10 @@ a process pool (`--jobs N`, default the cores).
    to the end of the file.
 2. Each stem's loudest 5 ms is measured once over the whole file (`ref_power`), so a section is judged against that and not
    against its own loudest moment. A section's slice runs from about 40 ms before its first bar line to about 60 ms after its
-   last, **rounded outwards to a multiple of lcm(1 ms, 10 ms) of samples** (19,404 at 44.1 kHz): the detector reads the audio on a
+   last, **rounded outwards to a multiple of lcm(1 ms, 10 ms) of samples that is about 0.45 s long** (19,404 samples at 44.1 kHz, 21,600 at 48 kHz, 43,200 at 96 kHz): the detector reads the audio on a
    1 ms grid and the DC offset on 10 ms blocks anchored at the slice start, so a slice that began a few samples later (a grid
    moved by 0.001 bpm moves a section line by about a millisecond) found hits a few samples apart and grouped them differently.
-   With the anchor fixed the same audio gives the same hits and groups as long as the grid change does not move a section line across a quantum boundary: at 44.1 kHz the quantum is 19,404 samples (0.44 s), and a line crossing one brings the old instability back for that section. Rough odds at 44.1 kHz: about 0.5 % per section line for a tempo change of 0.001 bpm and about 3 % for 0.005 bpm (the line of a late section moves by about 2.6 ms and 13 ms), a few thousandths of that for t0 +-1 ms. At 48 kHz the quantum is 480 samples (10 ms), so the limit is much tighter there (a 2.6 ms move crosses one about a quarter of the time); a grid-independent anchor would remove the limit and is not done. A hit belongs
+   With the anchor fixed the same audio gives the same hits and groups as long as the grid change does not move a section line across a quantum boundary (about 0.45 s at every sample rate); a line crossing one brings the old instability back for that section. Rough odds: about 0.5 % per section line for a tempo change of 0.001 bpm and about 3 % for 0.005 bpm (the line of a late section moves by about 2.6 ms and 13 ms), a few thousandths of that for t0 +-1 ms. A hit belongs
    to the section whose bar lines, moved 20 ms earlier, enclose it, so a hit 8 ms early on the first beat is that section's
    and none is counted twice.
 3. The groups of all the sections are matched by sound: each group's clean hit (else the cut of its member nearest the
@@ -58,8 +79,28 @@ clips the previous `drums.json` listed and the new one does not (nothing else is
 line. A default bar line is moved back by whole bars to the first one at or after the start of the file; the 16ths
 are still counted from the downbeat (step 0). A hit before that line (a pickup, a hit in the first partial bar) has bar -1. A `t0` passed in is used as given. A downbeat the aligner
 calls chance-level is repeated in the output's `notes`: the whole table is then counted from a bar line that may be the
-wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late, and a hit more than
-20 ms from a line is off the grid and counts in no pattern.
+wrong beat. The grid is one constant tempo: a track with drift reads hits a little early or late. **A hit is on the grid when it is within 20 ms of a
+16th line moved by the stem's phase.** The hats of one track are detected 3 to 10 ms late of the aligner's grid, and a grid a few
+thousandths of a bpm off drifts by about 13 ms over a track, so against the aligner's grid itself the hits near the edge of the 20 ms
+tolerance are counted or not by where the grid happens to lie, which moved Glacier's `hh 16th` across a rule's threshold. So:
+
+- **The phase** of a set of hits is the offset (ms from their nearest 16th line) where most of them sit: the densest 6 ms window, and
+  the median of the hits in it. Not the median of all of them: a stem with two sounds detected at different latencies has a median
+  that is neither.
+- **A support floor.** The phase counts only when there are at least 8 hits and the densest window holds at least 40 % of them. 40 %
+  is chosen: a window 6 ms wide holds about 5 % of hits spread evenly over a step, so 40 % is eight times chance, and six hits on
+  the grid beside two strays stay on it while hits spread evenly have no phase. Without a phase the stem's track-wide phase is used
+  (and 0 when that has none either).
+- **The stem's track-wide phase is the default; a section may follow the drift, no more.** A section takes its own phase when it is
+  within 15 ms of the track-wide one (the drift of 0.005 bpm over a track is 13 ms); otherwise it uses the track-wide one. So a
+  part that plays deliberately late (a swung or laid-back sound, a hat 30 ms behind) stays off the grid in every section, even
+  in a section where it makes most of the stem's hits; `bar`, `step`, `offset_ms` and `on_grid` are recomputed against the lines
+  moved by the phase, and the 20 ms tolerance is unchanged. A hit more than 20 ms from them is off the grid and counts in no pattern.
+- **The timing is reported, not absorbed.** Each role has `late_ms`: the median offset of its hits from the ALIGNER's grid (positive:
+  late, negative: early, over all its hits, on the grid or not), and each of its `per_section` rows has the same for that section;
+  the table prints `late +8 ms` and, per stem, the section phases. `grid_shift_ms` in `per_section` is the phase a section was read
+  against; the raw offset stays in each hit's `offset_raw_ms`. "The hat is 8 ms late" is a fact about the hat; the name stays steady.
+  A note says when a section's phase is over 20 ms: the grid's phase may be wrong there, or the stem's dominant sound plays late.
 
 **The table**, one block per stem:
 
@@ -92,26 +133,82 @@ wrong beat. The grid is one constant tempo: a track with drift reads hits a litt
 downbeat it came from, the sections as bar ranges after joining), `inputs` (each stem and grid file read, with name, size and
 mtime: `roadie study show` says fresh or stale by name and size), `legend`, `notes`, `seconds`, `jobs`, `stage_seconds`, and
 per stem `roles`, `bleed`, `per_section` (hits per role in each section) and `notes`. Each role has `name`, `named`, `rule`,
-`reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `level_db`, `stability`, `separation`, `groups`,
+`reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `late_ms`, `level_db`, `stability`, `separation`, `groups`,
 `variants`, `clip`, `clip_note` and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
 `line`, only for the sections the role plays in). `drum_roles/<stem>-<role>.wav` is the role's clean hit (24-bit, the stem's
 rate); no clean hit, no file. A run writes the new clips first, then `drums.json` (by temp file and rename, so a reader never sees half of it), and last removes the clips the earlier `drums.json` listed and the new one does not.
 `roadie study show` prints each stem's roles with their pattern line when `drums.json` exists, and `study list` flags the
 `drums` layer.
 
+**One sound, one role; echoes.** After the sections' groups are matched, two more rules read each stem's groups (both in
+`drumsections.py`, none of the naming rules change):
+
+- **Merge.** Groups of at least 4 measured hits become one role when all hold:
+  1. they play the same 16th steps: cosine of their hits-per-16th (counts, so a stray 16th weighs little; the naming reads presence) at least 0.8;
+  2. they **take turns over the track**: they share at most half of the smaller one's bars. (Two sounds alternating on the same steps in the same
+     bars are two sounds. Onsets in one stem are at least 50 ms apart, so "never hit together" guards nothing here and is not a condition; this is
+     the condition that stands in for it. Measured: Glacier's backbeat parts share 18 of 62 bars (0.29), Flare's merged hat parts 0.24 and its snare
+     parts 0.11; Glacier's hat pair 0.41, and the extra small hat groups that sit in the same bars 0.6 to 1.0.)
+  3. both are steady groups (the naming's own gate: stability measured and at least 0.75, or stable by construction): a group the grouping cuts
+     differently with a shifted sample is a piece of a continuum, and merging one made Glacier's `hh 16th` flip with the grid;
+  4. their readings agree: from up to 12 cuts of each group (no complete hit needed) the decay (the time constant the level 60 ms after the onset
+     implies) agrees within a factor of **2** and the shares of cuts read as pitched differ by at most **0.65**;
+  5. neither is a bleed group (found before merging, on the unmerged groups);
+  6. they sound alike: the mean spectral distance of their sections' clean hits is at most **1.73** (1.15 times the 1.5 grouping threshold: the
+     bound the naming already uses for "possibly one sound", set on Flare, where distinct snare groups held at 1.77 to 1.82). The distance is a
+     comparison only with at least 3 clean entries (sections' clean hits) on each side and at least a quarter of that side's entries (3: a mean over
+     two cuts is one section's hit; one complete hit among 193 is not a measurement).
+  Measured readings: pairs that should merge have decay ratios 1.0 to 1.7 and pitched shares within 0.45; Flare's kick pair (a pitched 45 Hz kick and an
+  unpitched click that the distance alone merged) has a ratio of 45 and shares 1.0 and 0.16; groups that are plainly different (a 136 ms and a 28 ms snare
+  group) 4.9 (the readings table is in the one-sound report). **The rule is calibrated on five pairs from two tracks.** The decay reading (level at 55 to 65
+  ms against the loudest ms of the first 20) depends on the noise floor for very short sounds and is unproven on dry (unprocessed) material.
+  **A pair that passes everything but the sound comparison is not merged and is not hidden**: both roles carry `may_be_one_sound_with` (the other role) and
+  `may_be_note` ("not compared: too few clean hits on one side"); Glacier's two main hat groups are such a pair. A group joins another only when it fits
+  every member (closest first; ties by group number, so the same groups in the same order always give the same roles). The role keeps its parts in
+  `merged_from`: for each part its hits, bars, decay and pitched share and, against each other part, the distance, cosine, shared bars, decay ratio and
+  pitched difference (plus the hit times with `hit_times`); a role of several groups lists all of them, so the parts sum to the role's hits. The merged role's
+  `hits`, pattern, `late_ms` and `per_section` are recomputed from the union; its stability is the hit-weighted mean of the parts' stabilities (stitched, so
+  it understates a part that is steadier than the rest). The naming then runs on the merged role.
+- **Echo.** A group of at least 8 measured hits (a few hits each let two small groups pass for an echo) is the **echo** of another when at least 90 % of
+  its hits follow the nearest earlier hit of that group by the same gap (within 15 ms either side of the median: an onset is found to about 10 ms and a gap
+  is the difference of two), the gap is between 30 ms and 600 ms (a second hit under 30 ms later is one hit detected twice), and the gap is not within 20 ms
+  of a multiple of a 16th (a gap the grid explains is two parts on the grid, such as the offbeat hat after the on-beat hat). The gap is read both ways: in an
+  ordinary periodic rhythm the other direction is constant too (an offbeat 206 ms after the beat is 286 ms before the next one), so the forward gap must be
+  at most **half** the gap the other way and at most half the parent's median interval between hits; when neither direction is clearly the shorter there is no
+  echo. A group already known to be an echo is never a parent: a chain of taps (0, 150, 300 ms) labels each tap an echo of the first, never of an echo.
+  It is labelled, not removed: `echo_of` (the parent role), `echo_ms`, `echo_bars`; it is named `echo of <role> +<gap> ms`, takes no name of its own and
+  takes no part in the naming of the others (nor in their `separation`). Its clip is kept: an echo is a sound the user has judged by ear. The table and
+  `study show` print it. **Limits:** a delay locked to the grid (one or two 16ths, a dotted eighth) is never called an echo, because the grid explains it;
+  and **Glacier's echo exists only in a corner of the rule's parameters**: re-deciding it from the saved hit times at a share of 85, 90 and 95 % and a spread of
+  10, 15 and 20 ms, it is an echo at 85 % with any spread and at 90 % with 15 or 20 ms (5 of 9 settings), and is lost at 90 % with 10 ms and at every 95 %: 88.6 % of its
+  hits are within 10 ms of the median gap, 92.7 % within 15 (the rest follow a parent hit that is missing or in another group). On Flare and Breathing no setting
+  gives an echo.
+
+Measured on Glacier's current stems, so that the numbers behind the bound are on record: the backbeat's two groups (162 and 104
+hits) play the same steps (cosine 0.99), share 18 of 62 bars, and are 1.55 apart; the two main
+hat groups (710 and 193 hits) also play the same steps (0.94), share 22 of 53 bars, and are **1.52** apart: no
+distance bound separates the two cases (the hats are closer). What keeps the hats apart is that the smaller hat group has no
+complete hit (every hit of it is cut by the next hit), so the sound comparison cannot be made, as in the bleed test.
+That is a measurement gap, not a finding that they sound different, so it is said (`may_be_one_sound_with`). And the readings that need no complete hit
+do not support the user's ear for those two hat groups: decay 32.6 and 29.4 ms (ratio 1.11), centroid 9160 and 9298 Hz, pitched shares 0.08 and 0.08, fall
+in 57 and 54 ms: measurably the same on all of them, closer than the snare pair (decay 15.7 and 21.5 ms, ratio 1.37). The two groups may differ in what the
+readings cannot see; the numbers do not say they are two sounds. The false merge the readings stop: on Flare a 117-hit unpitched kick-stem group (falls 20 dB
+in 40 ms) was merged into the 633-hit pitched kick (172 ms) because the distance compares two clean hits over the shorter of the two, so a short click looks like
+the attack of a long kick; the merged role lost its name.
+
 **Steadiness.** `python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare]` re-runs the analysis with the grid
 moved by tempo +-0.001 and +-0.005 bpm and t0 +-1 ms (nothing written) and compares, hit by hit, which role each hit lands in
 (`kept`: the share of a base role's hits in its best-matching role; `agreement`: the same over all roles of 4 or more hits).
-The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: agreement 1.0 in 11, 0.995 in one, nothing absorbed, worst purity 0.99). What is
-not steady is a **name that rests on a threshold the pattern sits on**: the patterns are made from the hits within 20 ms of a
-16th line, and a hat whose offsets spread to the edge (Glacier's `hh 16th`: 60 of 1600 hat hits lie within 3 ms of it) loses or
-gains a few hits when the grid moves, which moves its hits a bar on the odd 16ths across the 4.0 the `hh 16th` rule asks for
-(4.3 at the base grid, 4.0 and 3.7 at +0.001 and +0.005 bpm) while its hits stay the same. A role whose name or whether it is
-named changes when the on-grid tolerance is 3 ms tighter or 3 ms looser (about what 0.001 bpm moves the last section's bar line
-by) has `name_steady: false` and a `name_steady_note` saying what changes, and the table says `name unsteady`: the name is a
-reading of a pattern at a rule's edge. Nothing is tuned.
+The hit assignment is steady under those moves unless a section line crosses a slice-anchor quantum boundary (see above); `agreement` also counts a base role absorbed into another role as lost, so a merge cannot score 1.0 (Glacier's hat and snare stems, 12 runs: agreement 1.0 in 11, 0.995 in one, nothing absorbed, worst purity 0.99). Names were not steady before the section phase: a hat whose offsets spread to the 20 ms edge (Glacier's `hh 16th`: about 60 of
+1600 hat hits within 3 ms of it) lost or gained a few hits as the grid moved, which moved its hits a bar on the odd 16ths across the 4.0
+the `hh 16th` rule asks for (4.3 at the base grid, 4.0 and 3.7 at +0.001 and +0.005 bpm) while its hits stayed the same; measured on
+those hits, the on-grid count with the phase taken from where most of the section's hits sit is the same in all seven runs, and a soft ramp
+from 15 to 25 ms without the phase moved by 14 % as before. A role whose name or whether it is named changes when the on-grid
+tolerance is 3 ms tighter or 3 ms looser (about what 0.001 bpm moves the last section's bar line by) still has `name_steady: false`
+and a `name_steady_note` saying what changes, and the table says `name unsteady`: the name is then a reading of a pattern at a
+rule's edge. Nothing is tuned.
 
-**Known limits.** Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
+**Known limits.** The phase is read from a stem's hits as a whole: a stem whose two sounds sit at different latencies gets the phase of the bigger, tighter cluster, and the other sound's hits can sit off the grid (`late_ms` says by how much). A sound that dominates every section of its stem by 40 % or more is taken as the phase, so a stem that is entirely late is read against its own lateness (`late_ms` says so, and a note when the phase is over 20 ms). The drift allowance is 15 ms: a grid worse than about 0.006 bpm over a track is not followed. Each section is judged against the whole stem's loudest 5 ms (the core's 40 dB figures, unchanged), so a section where the stem is near silent has no hits, as in a whole-track run; a stem's quiet hits within 40 dB of its loudest are still found. Matching is by one clean hit (or cut) per section group: two sounds that are close (under 1.5) in every
 section are one role, and one sound that changes between sections (a filter sweep, a different sample) is two. A section
 is grouped on what is in it: a hit more than 40 dB under the section's loudest moment is not found, and the hits at the
 two ends of a slice have less context than in the whole stem. Hat stems are judged without `grid_onsets`: a hat under an

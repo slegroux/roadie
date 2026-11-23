@@ -1,5 +1,7 @@
 # Roadie
 
+[![tests](https://github.com/slegroux/roadie/actions/workflows/tests.yml/badge.svg)](https://github.com/slegroux/roadie/actions/workflows/tests.yml)
+
 *Formerly yt2live.*
 
 **From finished track to Live set.** Roadie is stem separation for Ableton
@@ -254,8 +256,9 @@ The MCP tool `arrangement_compare` takes the same arguments.
 
 ```bash
 roadie drums Glacier               # a study or a stems folder: table per stem and section, writes drums.json and drum_roles/*.wav
-roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the cores)
+roadie drums Glacier --jobs 4      # processes for the (stem, section) jobs (default: the fast cores)
 roadie drums Glacier --no-write    # the table only
+roadie drums Glacier --no-cache    # detect every hit again (see "The cache of detected hits" below)
 roadie drums Glacier --json        # the drums.json record
 ```
 
@@ -321,6 +324,28 @@ The numbers come from 108 role-sorted one-shots and the Flare replica. Where eac
 comes from, and the known misnames (a rim rule that also names some hats, "tom" meaning
 "pitched, in the toms stem", what bleed cannot catch), are in
 [`docs/DRUMROLES.md`](docs/DRUMROLES.md).
+
+## The cache of detected hits
+
+Finding the hits of a stem and grouping them by sound is most of a drum analysis (about 135 s of 186 s on
+Glacier 3000), and it reads only the audio: the tempo, `t0` and the section lines decide where each hit sits on
+the grid afterwards. So `roadie drums` keeps, for each (stem, section) slice, the hits and their groups, and the
+sound readings the matching of sections starts from, in a folder on disk. The next analysis of the same audio
+(another grid, the stability check's seven runs, a re-run after a rename) finds them there. Glacier 3000's
+second `roadie drums --no-write` took 41 s against 200 s, with the same record apart from `made`, `seconds`,
+`stage_seconds` and `jobs`; the stability check's seven runs took 5 min 32 s (one cold run: about 190 s).
+
+- **Where:** `~/Library/Caches/roadie/drum-hits/` (`ROADIE_CACHE_DIR=<folder>` moves it), one `.json.gz` file
+  per entry. A track takes about 0.2 MB.
+- **How much:** at most 300 MB (`ROADIE_CACHE_MAX_MB=<n>`). Over the limit, the entries used longest ago are
+  removed first.
+- **What makes an entry:** the slice's samples, the sample rate and channel count, the detector's settings and
+  a hash of the detector's source text (`drumroles.py`, `oneshot.py`, `sideman/listen.py`), and a version number in
+  `roadie_analysis/drumroles.py` (`CACHE_VERSION`). Different audio, a changed setting, an edit to the detector or a new
+  version never finds an old entry. A file that cannot be read counts as not there.
+- **Bypass:** `roadie drums <study> --no-cache`, `python -m roadie_analysis.drumstability <stems> --no-cache`, or
+  `ROADIE_NO_CACHE=1` for everything (nothing is read or written).
+- **Clear it:** delete the folder (`rm -r ~/Library/Caches/roadie/drum-hits`); it is made again on the next run.
 
 ## Study reports and the micro layer
 
@@ -432,7 +457,8 @@ roles (count them once when adding up); pyin's frames are 186 ms and centred, so
 
 ## Heavy jobs queue
 
-`roadie split` (the separation) and `roadie drums` (also the MCP `drum_roles` tool) each take one
+`roadie split` (the separation), `roadie drums` (also the MCP `drum_roles` tool) and the drum stability check
+(`python -m roadie_analysis.drumstability`, its seven runs as one job) each take one
 machine-wide lock before the heavy part, so jobs started from several terminals or agents run one after
 another instead of fighting for the cores and the graphics memory. Nothing else queues: `--help`, `load`,
 `sections`, `key`, `study` and the other commands start at once.
@@ -1345,8 +1371,30 @@ measures the tempo from the audio; do not feed the filename BPM back in as
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q                      # everything
+.venv/bin/python -m pytest -q -m "not slow"        # fast tests only
+.venv/bin/python -m pytest -q -m slow              # slow tests only
+.venv/bin/python -m pytest -q -n 4 --dist loadfile # in parallel (pytest-xdist; keep each file on one worker)
 ```
+
+A test is `slow` when CI runs it in the slow suite: the whole file for `test_drums.py`,
+`test_bench_roles.py`, `test_roadie_mcp.py` and `test_analysis_equivalence.py`, and single tests
+(`@pytest.mark.slow`) elsewhere, chosen from CI timings (about 7 s or more, or a full alignment
+of synthetic audio). A plain `pytest` runs both kinds. CI warns when a fast test
+takes over 10 s and fails the fast job over 60 s (under that it may be one-off compile time): mark it slow or shorten it. What CI runs
+(`.github/workflows/tests.yml`, decided by its `plan` job, which writes the reason to the run summary):
+
+| Event | Fast | Slow |
+|---|---|---|
+| Pull request that changes only `*.md` or `docs/` (no golden file) | skipped | skipped |
+| Pull request | always | only if a changed file is code the slow tests import, golden data (`analysis_golden/`, `mcp_golden/`), the requirements, `conftest.py`, the workflow, or a test file that marks a test slow |
+| Push to `main`, and nightly at 03:17 UTC | yes | yes |
+
+A failed nightly run opens (or comments on) an issue titled "nightly tests failed".
+
+When you add a module that a slow test imports, add it to the filter in the workflow's
+`plan` job. When you add a slow test, mark it; the job's floor on tests actually run
+catches a marker typo that deselects everything.
 
 The real-stem tests need a split of a reference track, which is not
 redistributable and never committed. Point `ROADIE_REF_STEMS` at a stems folder

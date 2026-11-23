@@ -644,7 +644,11 @@ def _show(study: Study) -> None:
                                                                   ", %d bleed" % len(st["bleed"]) if st.get("bleed") else ""))
                 for r in big:
                     print("      %-14s %5d  %s%s" % (r["name"], r["hits"], " ".join(r["line"][i:i + 4] for i in range(0, 16, 4)),
-                                           "  name unsteady" if r.get("name_steady") is False else ""))
+                                           ("  name unsteady" if r.get("name_steady") is False else "")
+                                           + ("  echo of %s, %+.0f ms" % (r["echo_of"], r["echo_ms"]) if r.get("echo_of") else "")
+                                           + ("  (%d groups merged)" % len(r["merged_from"]) if r.get("merged_from") else "")
+                                           + ("  may be one sound with %s (not compared: no clean hit)" % ", ".join(r["may_be_one_sound_with"])
+                                              if r.get("may_be_one_sound_with") else "")))
         if name == "sections":
             for s in study.sections():
                 live = "Live bar %g" % s.live_bar if s.live_bar is not None else "-"

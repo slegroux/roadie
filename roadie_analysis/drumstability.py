@@ -1,6 +1,6 @@
 """How steady are the drum roles when the grid moves by an amount no ear would notice?
 
-    python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare] [--jobs N] [--only tempo+0.001,t0-0.001]
+    python -m roadie_analysis.drumstability <stems_dir> [--stems hh,snare] [--jobs N] [--only tempo+0.001,t0-0.001] [--no-cache]
 
 Runs `drums.drum_roles` (nothing written) at the folder's grid and at perturbed grids (tempo +-0.001 and +-0.005 bpm, t0
 +-1 ms), then compares, hit by hit (hits matched by onset time within MATCH_S), which role each hit lands in. Role names
@@ -23,6 +23,8 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+
+from roadie_analysis.jobqueue import heavy_job
 
 MATCH_S = 0.003
 MIN_HITS = 4
@@ -71,7 +73,11 @@ def compare(base: dict, other: dict, stem: str, match_s: float = MATCH_S, min_hi
             purity = float((mine == k).sum() / len(mine)) if len(mine) else None
             known = mine[mine >= 0]
             absorbed = bool(len(known) and int(np.bincount(known).argmax()) != k)
-        rows.append({"name": role["name"], "named": role["named"], "hits": int(len(idx)), "kept": round(kept / len(idx), 3),
+        mrole = other["stems"][stem]["roles"][match] if match >= 0 else {}
+        n_parts = lambda r: len(r.get("merged_from") or [1])  # noqa: E731
+        rows.append({"echo": role.get("echo_of") is not None, "echo_same": (mrole.get("echo_of") is not None) == (role.get("echo_of") is not None),
+                     "merged_parts": n_parts(role), "merged_same": n_parts(role) == n_parts(mrole) if mrole else False,
+                     "name": role["name"], "named": role["named"], "hits": int(len(idx)), "kept": round(kept / len(idx), 3),
                      "purity": None if purity is None else round(purity, 3), "absorbed": absorbed,
                      "match": match, "match_name": no[match] if match >= 0 else None, "split": split,
                      "named_ok": (role["name"] == no[match]) if role["named"] and match >= 0 else (False if role["named"] else None)})
@@ -81,7 +87,7 @@ def compare(base: dict, other: dict, stem: str, match_s: float = MATCH_S, min_hi
             "named_base": sorted(named_b), "named_other": sorted(named_o)}
 
 
-def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None) -> dict:
+def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None, cache=True) -> dict:
     """The base run and the perturbed runs of `stems` ({name: record}); `stems` limits the drum stems analysed (a scratch
     folder of links is made, so nothing is written into `stems_dir`)."""
     from roadie_analysis import drums
@@ -105,7 +111,7 @@ def run(stems_dir, stems=None, jobs=None, only=None, tempo=None, t0=None) -> dic
                 continue
             tt = tempo + kw.get("tempo", 0.0)
             t = t0 + kw.get("t0", 0.0)
-            out[label] = drums.drum_roles(tmp, tempo=tt, t0=t, write=False, jobs=jobs, hit_times=True)
+            out[label] = drums.drum_roles(tmp, tempo=tt, t0=t, write=False, jobs=jobs, hit_times=True, cache=cache)
     return out
 
 
@@ -116,6 +122,7 @@ def main(argv=None) -> int:
     ap.add_argument("--jobs", type=int, default=None)
     ap.add_argument("--only", default=None, help="comma separated perturbations to run, e.g. tempo+0.001,t0-0.001")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-cache", action="store_true", help="detect every hit in every run: do not use the cache of detected hits")
     args = ap.parse_args(argv)
     from roadie_analysis import drums
     try:
@@ -133,7 +140,8 @@ def main(argv=None) -> int:
     if only and not [o for o in only if o in labels]:
         sys.exit("drumstability: --only %s matches no perturbation (they are: %s)" % (args.only, ", ".join(labels)))
     try:
-        runs = run(args.stems_dir, stems, args.jobs, only)
+        with heavy_job("roadie drumstability %s" % args.stems_dir):     # the seven runs are one job in the machine's queue
+            runs = run(args.stems_dir, stems, args.jobs, only, cache=not args.no_cache)
     except ValueError as e:
         sys.exit("drumstability: %s" % e)
     report = {}
@@ -150,9 +158,11 @@ def main(argv=None) -> int:
             pure = min((r["purity"] for r in c["roles"] if r["purity"] is not None), default=None)
             named = [r for r in c["roles"] if r["named"]]
             merged = [r["name"] for r in c["roles"] if r["absorbed"]]
+            odd = [r["name"] for r in c["roles"] if not (r["echo_same"] and r["merged_same"])]
             print("  %-14s agreement %s  worst role kept %s  worst purity %s%s  named same %s  %s" % (
                 label, c["agreement"], worst, pure, "  ABSORBED: " + ", ".join(merged) if merged else "", c["named_same"],
-                ", ".join("%s %.2f%s" % (r["name"], r["kept"], "" if r["named_ok"] else " (renamed)") for r in named)))
+                ", ".join("%s %.2f%s" % (r["name"], r["kept"], "" if r["named_ok"] else " (renamed)") for r in named)
+                + ("  MERGE/ECHO CHANGED: " + ", ".join(odd) if odd else "")))
     return 0
 
 

@@ -219,3 +219,18 @@ def test_run_without_a_command_is_a_usage_error():
     r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "roadie_analysis", "jobqueue.py"), "run", "label"],
                        capture_output=True, text=True, timeout=10)
     assert r.returncode == 2 and "usage" in r.stderr
+
+
+def test_the_drum_stability_check_runs_all_its_analyses_under_one_lock(tmp_path, monkeypatch):
+    from roadie_analysis import drumstability
+    (tmp_path / "drums_hh.flac").write_bytes(b"")
+    seen = []
+
+    def fake_run(*a, **kw):
+        seen.append(os.environ.get(jobqueue.HELD_ENV))
+        raise ValueError("stop here")                   # no audio is analysed
+    monkeypatch.setattr(drumstability, "run", fake_run)
+    with pytest.raises(SystemExit, match="stop here"):
+        drumstability.main([str(tmp_path), "--stems", "hh"])
+    assert seen == [os.environ["ROADIE_QUEUE_LOCK"]]
+    assert jobqueue.HELD_ENV not in os.environ          # and it let go

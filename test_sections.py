@@ -299,6 +299,7 @@ def test_stem_listing_ignores_live_analysis_files(synth_dir):
     assert sorted(stem_paths(synth_dir)) == ["mix"]
 
 
+@pytest.mark.slow
 def test_detects_the_16_bar_alternation(synth_dir):
     """Every loud/quiet transition, and nothing between them."""
     sections = detect_sections(synth_dir, phrase_bars=8, n_segments=N_BLOCKS,
@@ -307,6 +308,7 @@ def test_detects_the_16_bar_alternation(synth_dir):
     assert beats == [b * BLOCK_BEATS for b in range(N_BLOCKS)]
 
 
+@pytest.mark.slow
 def test_synthetic_boundaries_are_valid(synth_dir):
     sections = detect_sections(synth_dir, phrase_bars=8, n_segments=N_BLOCKS,
                                period=PERIOD, grid_t0=0.0)

@@ -209,6 +209,7 @@ def capture_of(ref, **over):
             "sections": [dict(s) for s in SECTIONS]}
 
 
+@pytest.mark.slow
 def test_elements_bass_raised_4_db_is_the_only_gap(tmp_path):
     prof = profile_of(tmp_path, stem_set(tmp_path, "ref"))
     ours = stem_set(tmp_path, "ours", bass_db=-6.0 + 4.0)
@@ -230,6 +231,7 @@ def test_elements_bass_raised_4_db_is_the_only_gap(tmp_path):
     assert "bass" in pathlib.Path(r["json_path"]).read_text()
 
 
+@pytest.mark.slow
 def test_elements_the_capture_that_is_the_reference_is_flagged(tmp_path):
     ref = stem_set(tmp_path, "ref")
     prof = profile_of(tmp_path, ref)
@@ -304,6 +306,7 @@ def test_elements_a_stale_profile_is_reported_and_an_audio_reference_is_refused(
         profile.session_compare(capture_of(ref), reference={"sections": []})
 
 
+@pytest.mark.slow
 def test_profile_session_compare_takes_the_path_or_the_json(tmp_path):
     import json
 
@@ -323,6 +326,7 @@ def test_profile_session_compare_takes_the_path_or_the_json(tmp_path):
         profile.session_compare(capture_of(ref), reference=str(tmp_path / "nope.json"))
 
 
+@pytest.mark.slow
 def test_elements_a_shorter_section_pairs_with_the_first_bars_and_from_bar_picks_others(tmp_path):
     ref = stem_set(tmp_path, "ref", bass_db=[-6.0] * 4 + [-2.0] * 4 + [-6.0] * 16)
     prof = profile_of(tmp_path, ref)
@@ -571,6 +575,7 @@ def stereo_set(tmp_path, folder, kick_gain=1.0, pan=0.3, bars_n=16, synth_lr=Non
             "mix_array": mix}
 
 
+@pytest.mark.slow
 def test_elements_the_capture_that_is_the_reference_is_found_by_shape_not_level(tmp_path):
     secs = [{"name": "A", "start_bar": 0, "bars": 8}, {"name": "B", "start_bar": 8, "bars": 8}]
     ref = stereo_set(tmp_path, "ref")
@@ -743,6 +748,7 @@ def identical_material(tmp_path, folder, shift_s, tau, bars_n=8):
     return paths
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("tau,shift", [(0.04, -0.003), (0.015, 0.004), (0.008, -0.003)])
 def test_elements_partial_pairing_of_identical_material_has_no_bias_and_the_arc_agrees(tmp_path, tau, shift):
     """4 and 6 of 8 bars of the same material (the same timing on both sides): every row and every arc
@@ -801,6 +807,7 @@ def drum_report(tmp_path, ref, ours, offset, sec=None, roles=("kick", "snare", "
     return profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shift", [0.005, -0.005])
 def test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shift):
     """The kick is 3 ms early (a hit starts before the section line, the next section's first hit before the
@@ -835,6 +842,7 @@ def test_drum_layer_ghost_notes_are_not_the_clean_hit(tmp_path):
     assert kick["readings"] == [] and abs(kick["reference_at_ms"] - 497) <= 8, kick
 
 
+@pytest.mark.slow
 def test_drum_layer_runs_only_for_roles_present_on_both_sides_and_one_failure_is_one_note(tmp_path, monkeypatch):
     ref = drum_pattern(tmp_path, "ref", 0.0)
     ours = drum_pattern(tmp_path, "ours", 0.0)
@@ -931,6 +939,7 @@ def test_elements_a_role_absent_over_the_profile_section_is_present_in_the_paire
     assert e["reference_only"] == [] and e["ours_only"] == [] and e["silent_in_both"] == []
 
 
+@pytest.mark.slow
 def test_elements_a_kick_out_on_one_side_only_is_listed_as_a_difference(tmp_path):
     ref = stem_set(tmp_path, "ref")
     ours = stem_set(tmp_path, "ours", kick_db=-41.0)              # 35 dB under the bass: out
@@ -945,6 +954,7 @@ def test_elements_a_kick_out_on_one_side_only_is_listed_as_a_difference(tmp_path
     assert len(k2) == 1 and "kick out in the reference" in k2[0]["reason"]
 
 
+@pytest.mark.slow
 def test_elements_the_kick_out_line_is_30_db(tmp_path):
     """Kick 25 dB under the loudest other role on both sides: the kick is the yardstick; 35 dB under: bass is."""
     for kick_db, want in ((-31.0, "kick"), (-41.0, "bass")):               # the bass sits at -6 dB
@@ -953,6 +963,7 @@ def test_elements_the_kick_out_line_is_30_db(tmp_path):
         assert e["yardstick"] == want, (kick_db, e["yardstick"])
 
 
+@pytest.mark.slow
 def test_elements_the_capture_is_the_reference_tolerance_is_a_third_of_a_db(tmp_path):
     """Mono material (width cannot decide it): the bass alone is a little louder in the master. Its band moves
     by that much against the others, so 0.1 dB is inside the 0.3 dB tolerance and 1.5 dB is outside."""
@@ -1022,6 +1033,7 @@ def lead_pattern(tmp_path, folder, bars_n=4):
     return paths
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("lines_moved", [0.0, -0.020])
 def test_drum_layer_and_levels_are_the_same_for_identical_audio_read_at_any_offset(tmp_path, lines_moved):
     """The same audio on both sides, read -20 .. +20 ms apart (odd offsets among them, off the 1 ms grid), with every
@@ -1213,6 +1225,7 @@ def house_files(tmp_path, folder, early):
             "mix": write(d, "mix.wav", stereo(kick + toms))}
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("early,deltas", [(0.007, (0.0, 0.007, 0.013)), (0.016, (0.004,))])
 def test_elements_a_tom_just_before_the_line_into_the_section_with_toms_is_not_in_the_section_before(tmp_path, early, deltas):
     """The same house audio on both sides; toms are silent through section A (bars 1-4) and start on the A|B downbeat,

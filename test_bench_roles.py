@@ -5,6 +5,9 @@ import pytest
 import bench_roles as R
 from roadie_analysis import drumroles
 
+# Slow throughout (a module fixture or the analyses dominate): CI runs this file in the slow job.
+pytestmark = pytest.mark.slow
+
 SR = 44100
 BPM = 124.0
 STEP = 60.0 / BPM / 4.0           # a 16th, seconds
@@ -528,7 +531,7 @@ def test_run_set_redoes_a_stem_only_when_its_file_the_code_or_the_parameters_cha
 def test_sources_stage_is_cached_and_follows_the_source_files(tmp_path, monkeypatch):
     import soundfile as sf
     (tmp_path / "truth_sources").mkdir()
-    x, t0 = _stem(_hat(3), [0, 2, 4, 6, 8, 10, 12, 14], bars=4)
+    x, t0 = _stem(_hat(3), [0, 2, 4, 6, 8, 10, 12, 14], bars=2)
     f = tmp_path / "truth_sources" / "hat.flac"
     sf.write(str(f), x, SR, subtype="PCM_24", format="FLAC")
     manifest = {"bpm": BPM, "bar1_s": t0, "sources": [{"file": "HAT.aif", "source": "HAT", "role": "drums_hh", "drum_source": "hat"},
@@ -542,7 +545,7 @@ def test_sources_stage_is_cached_and_follows_the_source_files(tmp_path, monkeypa
     monkeypatch.setattr(R, "true_onsets", counting)
     cache = str(tmp_path / "roles")
     first = R.sources_stage(manifest, str(tmp_path), cache)
-    assert len(first["info"]["hat"]["onsets"]) == 32 and first["info"]["hat"]["role"] == "drums_hh" and first["refs"]["hat"] is not None
+    assert len(first["info"]["hat"]["onsets"]) == 16 and first["info"]["hat"]["role"] == "drums_hh" and first["refs"]["hat"] is not None
     assert "bass" not in first["info"] and first["sr"] == SR
     again = R.sources_stage(manifest, str(tmp_path), cache)
     assert len(calls) == 1 and again["info"]["hat"]["onsets"] == first["info"]["hat"]["onsets"]
