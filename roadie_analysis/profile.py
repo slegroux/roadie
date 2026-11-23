@@ -795,6 +795,20 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
     return {"roles": out, "notes": notes}
 
 
+def _next_rise(oneshot, x, sr: int, at: float, until: float) -> float | None:
+    """The onset (s) of the next hit after the one at `at` in x, before `until`, or None: oneshot.hit_cut's rise out
+    of the tail, looked for every 10 ms from 40 ms after `at` (each search reads the tail from 30 ms before where
+    it starts, so a hit under the tail of the one before is found when it rises out of it, as on the reference's
+    side). The segmentation is not used: a hit inside another's tail splits it differently."""
+    t = at + 0.040
+    while t - 0.010 < until:
+        _, on = oneshot.hit_cut(x, sr, t, 0.0)
+        if on is not None and at + oneshot.AMONG_S < on < until:
+            return on
+        t += 0.010
+    return None
+
+
 def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref_pre: float, our_x, sr: int,
                 our_pre: float, n: int, pbar: float, bar_s: float) -> None:
     """Fill one drum-layer entry: the reference's clean hit in the section (with `among`, among those times,
@@ -859,7 +873,18 @@ def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref
                                           % (pos * 1000, (our_at - our_pre) * 1000))
             if our_cut is not None:          # a cut that reached the end of its slice: both as long as the shorter
                 dur = min(len(ref_cut) / rrate, len(our_cut) / sr)
-                ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
+                if "short_room_ms" in rp_:       # ours may be denser: our next hit must not fall inside the cut
+                    start = our_at - oneshot.HIT_LEAD_S
+                    nxt = _next_rise(oneshot, our_x, sr, our_at, start + dur)
+                    if nxt is not None:
+                        dur = nxt - 0.001 - start
+                        if dur - oneshot.HIT_LEAD_S < SHORT_ROOM_S:
+                            entry["notes"].append("our hits are too close together to compare: our next hit is %.0f ms "
+                                                  "after ours, under the %.0f ms a short comparison needs"
+                                                  % (1000 * (nxt - our_at), 1000 * SHORT_ROOM_S))
+                            our_cut = None
+                if our_cut is not None:
+                    ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
             entry["notes"] += errs
             if our_cut is not None:
                 pa, pb = oneshot.profile_array(our_cut, sr, hit=0, single=True), oneshot.profile_array(ref_cut, rrate, hit=0, single=True)

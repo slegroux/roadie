@@ -268,3 +268,18 @@ def test_drumstability_no_cache_is_passed_to_every_run(monkeypatch, tmp_path, fl
     with pytest.raises(SystemExit):
         drumstability.main([str(tmp_path)] + flag)
     assert seen == [expect]
+
+
+def test_drums_json_hit_times_are_the_same_with_the_cache_cold_warm_or_off(tmp_path, monkeypatch):
+    """drums.json keeps each role's hit_times by default (a reference profile reads them): the cache must not move one."""
+    sf.write(str(tmp_path / "drums_hh.wav"), hat_stem(), SR)
+    secs = [{"name": "A", "start_bar": 0, "bars": 2}]
+
+    def times():
+        rec = drums.drum_roles(tmp_path, tempo=120.0, t0=0.0, sections=secs, write=False, jobs=1)
+        return {r["name"]: r["hit_times"] for r in rec["stems"]["hh"]["roles"]}
+    cold, warm = times(), times()
+    assert cache.size_bytes() > 0
+    monkeypatch.setenv("ROADIE_NO_CACHE", "1")
+    off = times()
+    assert cold == warm == off and sum(len(t) for t in cold.values()) > 0, (cold, warm, off)

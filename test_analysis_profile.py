@@ -1530,3 +1530,17 @@ def test_drum_layer_by_role_noise_or_bleed_50_db_under_our_loudest_is_not_our_hi
     quiet = next(d for d in drums["roles"] if d["name"] == "snare 2")
     assert quiet["readings"] == [] and quiet.get("ours_at_ms") is None, quiet
     assert any(n.startswith("ours: no clean hit") for n in quiet["notes"]), quiet["notes"]
+
+
+@pytest.mark.parametrize("gap_ms, note", [(70, "compared over the first 69 ms"), (58, "our hits are too close together")])
+def test_drum_layer_by_role_a_denser_pattern_of_ours_shortens_the_short_cut_on_both_sides(tmp_path, gap_ms, note):
+    """The reference's 16th hat (tau 30 ms: no hit complete, compared short over 124 ms); ours plays the same hats and
+    one more hit `gap_ms` after each, rising out of the tail. Our next hit must not fall inside our cut: both sides are
+    cut short of it (70 ms: the same sound, no readings), or, under the 60 ms minimum (58 ms), not compared."""
+    times, ref_x = sixteenths(3000, 0.03)
+    _, extra = sixteenths(3000, 0.03)
+    our_x = ref_x + np.roll(extra, int(gap_ms / 1000 * SR))
+    _, drums, _ = one_stem_by_role(tmp_path, "hh", ref_x, our_x, roles=[role("hh 16th", times)])
+    (hh,) = drums["roles"]
+    assert hh["readings"] == [] and any(n.startswith(note) for n in hh["notes"]), hh
+    assert ("ours_at_ms" in hh) == (gap_ms == 70), hh

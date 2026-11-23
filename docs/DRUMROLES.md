@@ -463,7 +463,7 @@ hat, Glacier's `hh 16th`) is compared short: its hit with the most room before t
 if that room is at least 60 ms (`SHORT_ROOM_S`: the 30 ms attack window and a 30 ms body window after it, where a
 short cut's body starts), both sides cut to that room by the same cut path. The falls (10, 20, 40 dB) and the length
 need the tail and are not read; attack, pitch, harmonics, noise, click, width and bands are, over the same window on
-both sides. The note says "compared over the first N ms". Under 60 ms of room: "no clean hit", no readings. Our hit
+both sides. The note says "compared over the first N ms". When our pattern is denser, our next hit (a rise out of the tail, found as `oneshot.hit_cut` finds an onset) would fall inside that room: both sides are cut short of it, or, under 60 ms, not compared ("our hits are too close together to compare"). Under 60 ms of room: "no clean hit", no readings. Our hit
 at the reference's place must rise within 30 ms of it and sit within 30 dB of where the reference's hit sits in its
 own slice (a quiet role is not refused for being 30 dB under the stem's loudest hit), and never more than 50 dB under our slice's loudest (`ROLE_FLOOR_DB`: noise or bleed is not our hit). In the markdown a neutral name
 is marked "(neutral name)" (the reason is in the JSON). Roles of fewer than 4 measured hits are not compared.
