@@ -175,6 +175,7 @@ def strip(res):
     return repr(sorted(res.items()))
 
 
+@pytest.mark.slow
 def test_a_second_analysis_of_the_same_audio_reuses_the_hits_whatever_the_grid_says(monkeypatch):
     x = hat_stem()
     calls = count_detections(monkeypatch)
@@ -192,6 +193,7 @@ def test_a_second_analysis_of_the_same_audio_reuses_the_hits_whatever_the_grid_s
     assert len(calls) == 4                                                 # one sample less: detected again
 
 
+@pytest.mark.slow
 def test_a_changed_setting_or_a_bumped_version_detects_again(monkeypatch):
     x = hat_stem()
     calls = count_detections(monkeypatch)
@@ -208,6 +210,7 @@ def test_a_changed_setting_or_a_bumped_version_detects_again(monkeypatch):
     assert len(calls) == 4
 
 
+@pytest.mark.slow
 def test_no_cache_and_grid_onsets_never_touch_the_folder(monkeypatch):
     x = hat_stem()
     drumroles.hit_groups(x, 120.0, 0.0, sr=SR, stability_runs=0, cache=False)
@@ -217,6 +220,7 @@ def test_no_cache_and_grid_onsets_never_touch_the_folder(monkeypatch):
     assert cache.size_bytes() == 0
 
 
+@pytest.mark.slow
 def test_section_job_takes_no_cache_down_to_the_detector(tmp_path, monkeypatch):
     f = tmp_path / "drums_hh.wav"
     sf.write(str(f), hat_stem(), SR)
@@ -270,6 +274,7 @@ def test_drumstability_no_cache_is_passed_to_every_run(monkeypatch, tmp_path, fl
     assert seen == [expect]
 
 
+@pytest.mark.slow
 def test_drums_json_hit_times_are_the_same_with_the_cache_cold_warm_or_off(tmp_path, monkeypatch):
     """drums.json keeps each role's hit_times by default (a reference profile reads them): the cache must not move one."""
     sf.write(str(tmp_path / "drums_hh.wav"), hat_stem(), SR)

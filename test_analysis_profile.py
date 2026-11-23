@@ -246,6 +246,7 @@ def test_elements_the_capture_that_is_the_reference_is_flagged(tmp_path):
     assert not any(s["elements"]["capture_is_reference"] for s in profile.session_compare(capture_of(ours), reference=prof)["sections"])
 
 
+@pytest.mark.slow
 def test_elements_without_a_kick_source_leaves_the_table_out_but_keeps_the_mix_layer(tmp_path):
     ref = stem_set(tmp_path, "ref")
     prof = profile_of(tmp_path, ref)
@@ -258,6 +259,7 @@ def test_elements_without_a_kick_source_leaves_the_table_out_but_keeps_the_mix_l
     assert "no kick source" in pathlib.Path(r["md_path"]).read_text()
 
 
+@pytest.mark.slow
 def test_elements_roles_in_one_side_only_and_sections_that_do_not_pair(tmp_path):
     ref = stem_set(tmp_path, "ref")
     prof = profile_of(tmp_path, ref)
@@ -290,6 +292,7 @@ def test_elements_arc_follows_the_ratio_per_four_bars(tmp_path):
     assert all(abs(v - w) <= 0.2 for v, w in zip(arc["ours"], [-6.0, -2.0])), arc
 
 
+@pytest.mark.slow
 def test_elements_a_stale_profile_is_reported_and_an_audio_reference_is_refused(tmp_path):
     import os
     ref = stem_set(tmp_path, "ref")
@@ -357,6 +360,7 @@ def test_elements_a_shorter_section_pairs_with_the_first_bars_and_from_bar_picks
         profile.session_compare(m, reference=prof)
 
 
+@pytest.mark.slow
 def test_elements_where_the_kick_is_out_the_loudest_shared_role_is_the_yardstick(tmp_path):
     out_in_b = [0.0] * 8 + [-62.0] * 8 + [0.0] * 8              # the kick stem 62 dB down in bars 9-16
     ref = stem_set(tmp_path, "ref", kick_db=out_in_b)
@@ -474,6 +478,7 @@ def test_drum_layer_skips_a_role_whose_stem_changed_and_needs_a_profile(tmp_path
             profile.session_compare(m, reference=reference, out_dir=tmp_path / "plain")
 
 
+@pytest.mark.slow
 def test_elements_kick_out_is_decided_for_both_sides_together(tmp_path):
     """The reviewer's probe: in the break the reference kick is 50 dB down and ours 35 dB down (29 dB
     under the bass: 'in' by the 30 dB rule alone), everything else identical. Both sides must use the
@@ -597,6 +602,7 @@ def test_elements_the_capture_that_is_the_reference_is_found_by_shape_not_level(
     assert flags(stereo_set(tmp_path, "pan", pan=0.8)["mix_array"], "pan") == [False, False]   # width 0.35 -> 0.10
 
 
+@pytest.mark.slow
 def test_profile_loading_refuses_a_wrong_shape_or_version_and_says_to_rebuild(tmp_path):
     import copy
     import json
@@ -624,6 +630,7 @@ def test_profile_loading_refuses_a_wrong_shape_or_version_and_says_to_rebuild(tm
     assert profile.session_compare(m, reference=prof, out_dir=tmp_path / "ok")["reference_kind"] == "profile"
 
 
+@pytest.mark.slow
 def test_manifest_source_may_be_a_list_of_files_summed_into_one_role(tmp_path):
     ref = stem_set(tmp_path, "ref")
     prof = profile_of(tmp_path, ref)
@@ -645,6 +652,7 @@ def test_manifest_source_may_be_a_list_of_files_summed_into_one_role(tmp_path):
         profile.session_compare(m, reference=prof)
 
 
+@pytest.mark.slow
 def test_profile_small_things_json_extension_tempo_note_markdown_and_stale_tolerance(tmp_path):
     import os
     ref = stem_set(tmp_path, "ref")
@@ -713,6 +721,7 @@ def test_elements_a_role_panned_wider_on_our_side_is_one_width_gap_and_no_level_
     assert "widths and loudness are for the whole section" in e["notes"][0] and e["width_gaps"] == []
 
 
+@pytest.mark.slow
 def test_elements_mono_on_both_sides_has_no_width_gap(tmp_path):
     ref = stem_set(tmp_path, "ref")
     r = profile.session_compare(capture_of(stem_set(tmp_path, "ours")), reference=profile_of(tmp_path, ref))
@@ -1324,6 +1333,7 @@ def one_stem_by_role(tmp_path, kind, ref_x, our_x, roles=None, bleed=(), bars_n=
     return prof, r["sections"][0]["drums"], pathlib.Path(r["md_path"]).read_text()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shift", [0.005, -0.005])
 def test_drum_layer_by_role_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shift):
     """test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings with a drums.json: one role per stem, each
@@ -1347,6 +1357,7 @@ def test_drum_layer_by_role_identical_audio_shifted_5_ms_gives_no_readings(tmp_p
         assert abs(d["ours_at_ms"] - d["reference_at_ms"] + 1000 * shift) <= 12, d
 
 
+@pytest.mark.slow
 def test_drum_layer_by_role_a_tom_bled_into_the_kick_stem_is_not_the_kick(tmp_path):
     """The reference's kick stem opens the section with a tom (100 Hz) bled in, as loud and as roomy as the kicks
     (60 Hz) that follow on every other beat; ours is the kicks alone. By stem the tom, the earliest typical hit, is
@@ -1498,6 +1509,7 @@ def test_profile_a_malformed_drums_json_is_a_note_and_the_stem_is_compared_whole
     assert any("drums.json is malformed" in n and "compares kick by stem" in n for n in prof["notes"]), prof["notes"]
 
 
+@pytest.mark.slow
 def test_drum_layer_a_stem_whose_roles_all_have_under_4_hits_is_compared_whole(tmp_path):
     kick, mix, dj = kick_with_drums_json(tmp_path, [role("kick 1", [0.5, 1.0, 1.5]), role("kick 2", [2.0])])
     sec = [{"name": "K", "start_bar": 0, "bars": 4}]

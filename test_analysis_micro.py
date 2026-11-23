@@ -232,6 +232,7 @@ def test_a_loop_longer_than_half_needs_another_section_to_play_it_twice():
     assert secs[2]["synths"]["progression_share"] is None                # i III v iv is played twice nowhere
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("chords,n", [("a b c", 12), ("a b c d", 12), ("i VII iv VI", 12), ("a b c", 9)])
 def test_shuffled_chords_are_not_a_loop(chords, n):
     rng, cases = random.Random(7), []
@@ -272,6 +273,7 @@ def test_chromatic_roman_numerals_in_a_major_are_flats():
     assert [micro.roman(r, "maj", 9, "major") for r in (10, 0, 5, 7)] == ["bII", "bIII", "bVI", "bVII"]
 
 
+@pytest.mark.slow
 def test_a_phrase_across_a_section_line_starts_once(tmp_path):
     sd = make_study(tmp_path, stems=("vocals",), drums=False, phrases=((0, 6), (7 * 4 + 2, 8)))   # bar 8.3 into bar 10
     rec = micro.micro_of(sd, write=False)
