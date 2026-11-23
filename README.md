@@ -78,7 +78,7 @@ claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clo
 | `study_list()` | every study under the Studies folder and which analysis layers each has; the JSON of `roadie study list --json` |
 | `study_read(name, layers=None)` | one study as a record, the JSON of `roadie study show <name> --json`; `layers` keeps only some |
 | `arrangement_compare(scenes=None, ref="all", roles=None, read=None, out=None)` | the Set's Session scenes against reference studies, in numbers: the JSON of `roadie arrangement compare`, and with `out` the Markdown report too; `read` is a saved `roadie arrangement read --json` instead of Live |
-| `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's; writes `mix_report.json` and `mix_report.md` |
+| `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's (by drum role, `hh offbeat`, `snare 2`, when a fresh `drums.json` sat beside the reference's stems; by stem otherwise, with a note); writes `mix_report.json` and `mix_report.md` |
 
 The first three have the names, arguments and output of Sideman's tools of the
 same name; `session_compare` is what Sideman's `mix_report` returns when its
@@ -269,6 +269,12 @@ pattern line from the downbeat (`x...x...x...x...`: `x` = most of the bars it pl
 in, `o` = some, `.` = fewer) over the track and in each section, its level, and a
 clip of one clean hit in `drum_roles/`. See
 `docs/DRUMROLES.md` for the file format, how to read the table and the limits.
+
+A reference profile built with a fresh `drums.json` beside its stems carries the roles, and
+`session_compare` compares drum sounds role by role: the reference's hit is a clean hit of
+that role in the section (never a bleed group's or an echo's hit; an echo is listed, not
+compared). Without one, each drum stem is compared as a whole and the report says so
+(`docs/DRUMROLES.md`, "In the comparison").
 
 `roadie drums <study | stems_dir>` (and the MCP tool `drum_roles`) lists the sounds
 inside each drum stem of a study; `roadie_analysis/drumroles.py` does it for one stem. `hit_groups` finds the hits (oneshot's hit detection), puts each on

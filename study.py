@@ -557,6 +557,24 @@ def load_study(name_or_path: str, roots=None) -> Study:
                  stems, layers, sorted(extras), source, stem_model=_stem_model(stems_dir), **_key_fields(marker))
 
 
+def _without_hit_times(data):
+    """A drums.json record without its roles' `hit_times` (and those of their `merged_from` parts): thousands of
+    numbers a reader of the study has no use for. drums.json on disk keeps them (a reference profile reads them there)."""
+    if not isinstance(data, dict) or not isinstance(data.get("stems"), dict):
+        return data
+
+    def drop(r):
+        if not isinstance(r, dict):
+            return r
+        out = {k: v for k, v in r.items() if k != "hit_times"}
+        if isinstance(r.get("merged_from"), list):
+            out["merged_from"] = [drop(m) for m in r["merged_from"]]
+        return out
+    return dict(data, stems={k: dict(st, roles=[drop(r) for r in st["roles"]])
+                             if isinstance(st, dict) and isinstance(st.get("roles"), list) else st
+                             for k, st in data["stems"].items()})
+
+
 def to_json(study: Study, layers: list[str] | None = None) -> dict:
     """The record as JSON. `layers` keeps only those layers (a name not in LAYER_NAMES is an error)."""
     unknown = [n for n in layers or [] if n not in LAYER_NAMES]
@@ -576,7 +594,7 @@ def to_json(study: Study, layers: list[str] | None = None) -> dict:
         "listed_bpm": study.listed_bpm, "bpm_url": study.bpm_url, "beats_per_bar": study.beats_per_bar, "bar_offset": study.bar_offset,
         "stems": {r: [rel(f) for f in fs] for r, fs in study.stems.items()},
         "layers": {n: {"source": rel(l.source) if l.source else None, "made_by": l.made_by,
-                       "missing": l.missing, "caveats": l.caveats, "data": l.data}
+                       "missing": l.missing, "caveats": l.caveats, "data": _without_hit_times(l.data) if n == "drums" else l.data}
                    for n, l in study.layers.items() if layers is None or n in layers},
         "extras": [rel(p) for p in study.extras],
     }

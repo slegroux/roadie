@@ -126,6 +126,8 @@ def test_the_study_reader_shows_the_drums_layer_and_flags_it(made, capsys):
     assert layer.missing is None and layer.data["kind"] == "drum_roles"
     assert any(c.startswith("fresh") for c in layer.caveats)
     assert study.to_json(s)["layers"]["drums"]["data"]["stems"]["kick"]["roles"][0]["name"] == "kick"
+    assert "hit_times" in layer.data["stems"]["kick"]["roles"][0]                 # drums.json keeps them...
+    assert "hit_times" not in study.to_json(s)["layers"]["drums"]["data"]["stems"]["kick"]["roles"][0]   # ...the reader does not
     assert d / "drums.json" not in s.extras
     study._show(s)
     assert "x... x... x... x..." in capsys.readouterr().out

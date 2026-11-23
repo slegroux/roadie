@@ -12,6 +12,10 @@ its content) depends on PYTHONHASHSEED, in Sideman main as in the copy. One test
 in any process; the other runs roadie_analysis with PYTHONHASHSEED=0, the seed the goldens were written
 with, and compares bytes.
 
+One change since the copy is on purpose: the drum layer compares by drum role when a drums.json sits beside
+the reference's stems, and says so in a note when none does (the fixture has none). Those notes are taken out of
+Roadie's outputs before the comparison (`_without_drum_role_notes`); nothing else is.
+
 Regenerate from a checkout (or `git archive`) of Sideman main, whose own `listen` and `oneshot` do the
 work, with the numpy and soundfile pinned in requirements.txt:
 
@@ -122,7 +126,34 @@ def produce(profile_mod, oneshot_mod, d):
     a, b = oneshot_mod.profile(str(d / "take.wav"), 0), oneshot_mod.profile(str(d / "take.wav"), 2)
     out["oneshot_profile.json"] = json.dumps(a, indent=2)
     out["oneshot_compare.json"] = json.dumps(oneshot_mod.compare(a, b), indent=2)
+    if hasattr(profile_mod, "_drum_roles_of"):
+        out = _without_drum_role_notes(out)
     return {k: _norm(v, d) for k, v in out.items()}
+
+
+def _without_drum_role_notes(out):
+    """Roadie's outputs without the one thing added on purpose since the copy: with no drums.json beside the
+    reference's stems, the profile's note saying so and the drum layer's note (JSON `notes`, a markdown line) that
+    it compares by stem. Everything else is compared as it was written. `out` may hold any of the three."""
+    out = dict(out)
+    if "profile.json" in out:
+        prof = json.loads(out["profile.json"])
+        prof["notes"] = _without_drum_role_note(prof["notes"])
+        out["profile.json"] = json.dumps(prof, indent=1)
+    if "mix_report.json" in out:
+        rep = json.loads(out["mix_report.json"])
+        for s in rep["sections"]:
+            s.get("drums", {}).pop("notes", None)
+        out["mix_report.json"] = json.dumps(rep, indent=2)
+    if "mix_report.md" in out:
+        out["mix_report.md"] = "\n".join(ln for ln in out["mix_report.md"].split("\n")
+                                         if not (ln.startswith("- ") and "compared by stem (one typical hit" in ln))
+    return out
+
+
+def _without_drum_role_note(notes):
+    """A profile's notes without the one saying no fresh drums.json was beside its drum stems."""
+    return [n for n in notes if "the drum layer compares" not in n]
 
 
 def test_the_fixture_exercises_every_layer(tmp_path):

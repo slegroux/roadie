@@ -105,11 +105,15 @@ def test_each_tool_gives_what_sidemans_tool_gives_on_the_fixtures(S, made):
     d, mix, stems, manifest, take = made
     summary = call(S, "reference_profile", mix=mix, stems=stems, tempo=E.TEMPO, t0=E.T0, sections=E.SECTIONS,
                    out=str(d / "ref.profile.json"))
-    same((d / "ref.profile.json").read_text(), "profile.json", d)
-    assert json.loads(E._norm(summary, d)) == json.loads(MCP_GOLDEN.read_text())["reference_profile_summary"]
     report = call(S, "session_compare", manifest=manifest, reference=str(d / "ref.profile.json"), out_dir=str(d / "out"))
-    same(report, "mix_report.json", d)
-    assert E._norm((d / "out" / "mix_report.md").read_text(), d) == (E.GOLDEN / "mix_report.md").read_text()
+    got = E._without_drum_role_notes({"profile.json": (d / "ref.profile.json").read_text(), "mix_report.json": report,
+                                      "mix_report.md": (d / "out" / "mix_report.md").read_text()})   # the one change on purpose
+    same(got["profile.json"], "profile.json", d)
+    summary = json.loads(E._norm(summary, d))
+    summary["notes"] = E._without_drum_role_note(summary["notes"])
+    assert summary == json.loads(MCP_GOLDEN.read_text())["reference_profile_summary"]
+    same(got["mix_report.json"], "mix_report.json", d)
+    assert E._norm(got["mix_report.md"], d) == (E.GOLDEN / "mix_report.md").read_text()
     same(call(S, "sample_analyze", source=take, hit=0), "oneshot_profile.json", d)
     same(call(S, "sample_compare", a=take, b=take, hit_a=0, hit_b=2), "oneshot_compare.json", d)
 

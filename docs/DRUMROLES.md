@@ -134,7 +134,7 @@ downbeat it came from, the sections as bar ranges after joining), `inputs` (each
 mtime: `roadie study show` says fresh or stale by name and size), `legend`, `notes`, `seconds`, `jobs`, `stage_seconds`, and
 per stem `roles`, `bleed`, `per_section` (hits per role in each section) and `notes`. Each role has `name`, `named`, `rule`,
 `reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `late_ms`, `level_db`, `stability`, `separation`, `groups`,
-`variants`, `clip`, `clip_note` and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
+`variants`, `clip`, `clip_note`, `hit_times` (its hits' onsets, seconds from the start of the file; the reference profile reads them) and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
 `line`, only for the sections the role plays in). `drum_roles/<stem>-<role>.wav` is the role's clean hit (24-bit, the stem's
 rate); no clean hit, no file. A run writes the new clips first, then `drums.json` (by temp file and rename, so a reader never sees half of it), and last removes the clips the earlier `drums.json` listed and the new one does not.
 `roadie study show` prints each stem's roles with their pattern line when `drums.json` exists, and `study list` flags the
@@ -439,3 +439,31 @@ a neutral group. Why a group was not marked is in `mark_bleed`'s `why` and
 `evidence` for that group, not in `name_roles`: there its `reason` is the one
 for not being named (or "marked as bleed: ..." when it is).
 
+## In the comparison
+
+`reference_profile` (`roadie_analysis/profile.py`) reads the `drums.json` beside each drum stem of the reference
+(kick, toms, snare, hh, clap, rim; a stem given as one file) and never runs the analysis. When it is fresh (every input it
+records is there with the size it recorded, by name: `study show`'s rule, so a study synced or downloaded again stays fresh) and lists that file, the profile keeps the stem's roles of at
+least 4 measured hits (`drum_roles`: name, `named`, `reason`, `echo_of`, `echo_ms`, `may_be_one_sound_with`, `hit_times`)
+and the names of its bleed groups. `roadie drums` writes `hit_times` (each role's onsets in seconds from the start of the
+file) by default; on Glacier 3000 they make `drums.json` 246 KB instead of 180 KB. A missing or stale `drums.json`, or one
+made before hit times were written, or a malformed one, is a line in the profile's `notes`, and that stem has no roles; so is a stem whose roles all have under 4 measured hits (it is compared by stem). Smaller roles beside kept ones are named in the section's `drums.notes`.
+
+`session_compare`'s drum layer then gives one entry per role with a hit in the paired bars, with its `name` (and
+`name_reason` when the name is neutral; the markdown prints both): the reference's hit is the clean hit of the section
+picked among that role's hits only (`oneshot.profile_array(..., among=...)`: a segment whose onset is within 25 ms of one
+of them), with the same cuts, pre-roll, post-roll and same-place rule as before, so a bled tom in the kick stem, the other
+hat of the hat stem or an echo is never "the kick", "the hat" or "the snare". A complete hit is still one not cut off by
+the next hit of any kind. An echo is listed with `echo_of`, `echo_ms` and a note, no readings; bleed groups are never
+compared and are named in the section's `drums.notes`. A stem without roles is compared as one stem, as before, and
+`drums.notes` says so.
+
+A role none of whose hits in the section is complete (each still rings when the next hit of the stem starts: a 16th
+hat, Glacier's `hh 16th`) is compared short: its hit with the most room before the next onset of any hit in the stem,
+if that room is at least 60 ms (`SHORT_ROOM_S`: the 30 ms attack window and a 30 ms body window after it, where a
+short cut's body starts), both sides cut to that room by the same cut path. The falls (10, 20, 40 dB) and the length
+need the tail and are not read; attack, pitch, harmonics, noise, click, width and bands are, over the same window on
+both sides. The note says "compared over the first N ms". When our pattern is denser, our next hit (a rise out of the tail, found as `oneshot.hit_cut` finds an onset) would fall inside that room: both sides are cut short of it, or, under 60 ms, not compared ("our hits are too close together to compare"). Under 60 ms of room: "no clean hit", no readings. Our hit
+at the reference's place must rise within 30 ms of it and sit within 30 dB of where the reference's hit sits in its
+own slice (a quiet role is not refused for being 30 dB under the stem's loudest hit), and never more than 50 dB under our slice's loudest (`ROLE_FLOOR_DB`: noise or bleed is not our hit). In the markdown a neutral name
+is marked "(neutral name)" (the reason is in the JSON). Roles of fewer than 4 measured hits are not compared.
