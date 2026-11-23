@@ -548,8 +548,8 @@ AMONG_S = MIN_GAP_S / 2  # a hit is one of the times asked for ("among") within 
 
 def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray,
                within: tuple | None = None, near: float | None = None,
-               among: list | None = None) -> tuple[int, dict, int, str]:
-    """(index, measured profile, ms of room, note) of the clean hit.
+               among: list | None = None, min_room: float | None = None) -> tuple[int, dict, int, str, bool]:
+    """(index, measured profile, ms of room, note, short) of the clean hit.
 
     The candidates are the complete hits (not cut off before they fall 40 dB, long enough to
     measure), except that a take whose first hit begins at full level while a later one is more
@@ -562,10 +562,13 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
     TYPICAL_DB of the median peak, if any; the earliest. With `near` (seconds), the complete hit
     whose onset is within NEAR_S of it wins instead, when there is one, whatever its level. With
     `among` (seconds), only hits whose onset is within AMONG_S of one of those times are candidates (the
-    hits of one drum role); the room and the cut still run to the next hit of any kind.
+    hits of one drum role); the room and the cut still run to the next hit of any kind. With `among` and
+    `min_room` (seconds), when none of those hits is complete, the one with the most room to the next onset
+    of any hit (or the end of the take) is taken if that room is at least `min_room`, and `short` is True:
+    the hit is cut off, and what needs its tail cannot be read.
     Raises ValueError("no clean hit ...") when there is no candidate."""
     skip0 = len(segs) > 1 and _starts_inside(x, mag, sr, segs)
-    complete = []
+    complete, asked = [], []
     for k, (_, end) in enumerate(segs):
         if k == 0 and skip0:
             continue
@@ -573,6 +576,8 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
             continue                           # never a candidate (below): not worth measuring
         if among is not None and not any(abs(onsets[k] / sr - t) <= AMONG_S for t in among):
             continue
+        if within is None or within[0] <= onsets[k] / sr < within[1]:
+            asked.append((k, (onsets[k + 1] if k + 1 < len(segs) else x.shape[0]) - onsets[k]))
         cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
         try:
             got = _measure(x[onsets[k]:end], sr, cut, quick=True)
@@ -591,10 +596,19 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
         complete = [c for c in complete if within[0] - slack <= c["at"] < within[1] + slack]
     if not inside and near is not None:
         inside = complete                      # nothing inside the span, but a hit at the edge may be the one asked for
+    if not inside and among is not None and min_room is not None and asked:
+        k, room = max(asked, key=lambda a: (a[1], -a[0]))         # the most room; of equals, the earliest
+        if room >= min_room * sr:
+            cut = "the file ends" if k == len(segs) - 1 else "the next hit starts"
+            got = _measure(x[onsets[k]:segs[k][1]], sr, cut)
+            return k, got, int(round(_ms(room, sr))), "no hit asked for rings out before the next hit: the one with the most room", True
     if not inside:
+        roomiest = "" if among is None or min_room is None or not asked else (
+            "; the roomiest has %.0f ms before the next hit, under the %.0f ms a short comparison needs"
+            % (_ms(max(a[1] for a in asked), sr), 1000 * min_room))
         raise ValueError("no clean hit: none of the %d hit%s is complete (not cut off before falling 40 dB) "
-                         "and inside the span asked for%s" % (len(segs), "" if len(segs) == 1 else "s",
-                                                              "" if among is None else " among the role's hits"))
+                         "and inside the span asked for%s%s" % (len(segs), "" if len(segs) == 1 else "s",
+                                                                "" if among is None else " among the role's hits", roomiest))
     c, why = None, None
     if near is not None:                       # like with like: the hit at that place, whatever the span's own band
         close = [c for c in complete if abs(c["at"] - near) <= NEAR_S]
@@ -611,7 +625,7 @@ def _clean_hit(x: np.ndarray, sr: int, segs: list, onsets: list, mag: np.ndarray
         c = min(typical or roomy, key=lambda c: c["k"])
         why = "typical of %d candidate%s" % (len(roomy), "" if len(roomy) == 1 else "s")
     got = _measure(x[onsets[c["k"]]:segs[c["k"]][1]], sr, c["cut"])      # only the pick is measured in full
-    return c["k"], got, int(round(_ms(c["room"], sr))), why
+    return c["k"], got, int(round(_ms(c["room"], sr))), why, False
 
 
 def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> tuple[np.ndarray, float | None]:
@@ -645,13 +659,16 @@ def hit_cut(x: np.ndarray, sr: int, at: float, length: float | None = None) -> t
 
 
 def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: tuple | None = None,
-                  near: float | None = None, single: bool = False, among: list | None = None) -> dict:
+                  near: float | None = None, single: bool = False, among: list | None = None,
+                  min_room: float | None = None) -> dict:
     """The one-shot profile of one signal [n, channels]: of hit `hit` (from 0)
     when it holds several, by default the first that is not cut off; "clean"
     picks a typical complete hit (see profile()). `within` (start s, end s) and
     `near` (s) only apply to "clean": hits must start inside the span, and the
     hit starting within 30 ms of `near` is preferred; with `among` (a list of s) only the hits
-    starting within 25 ms of one of those times are candidates. Raises ValueError("no clean
+    starting within 25 ms of one of those times are candidates, and with `min_room` (s) too, when none
+    of them is complete, the one with the most room before the next hit if it has at least that much
+    (the profile then has `short_room_ms`: it is cut off). Raises ValueError("no clean
     hit ...") when there is no candidate. `single` takes the whole of x as one hit (hit 0), without
     looking for hits inside it: for a cut made with hit_cut."""
     if isinstance(hit, bool) or not (hit is None or hit == "clean" or isinstance(hit, (int, np.integer))):
@@ -674,9 +691,9 @@ def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: 
                          % (hit, len(segs), "" if len(segs) == 1 else "s", len(segs) - 1))
     onsets = [_onset(x[s:e], mag[s:e], sr, s > 0) + s for s, e in segs]
     order, extra, tail = list(range(len(segs))), [], False
-    picked = None
+    picked, short = None, False
     if hit == "clean":
-        k, got, room, why = _clean_hit(x, sr, segs, onsets, mag, within, near, among)
+        k, got, room, why, short = _clean_hit(x, sr, segs, onsets, mag, within, near, among, min_room)
         picked, order = (k, got), []
         extra.append("hit %d is the clean hit (%s): complete, with %d ms from its onset to the next onset "
                      "or the end of the file" % (k, why, room))
@@ -712,6 +729,8 @@ def profile_array(x: np.ndarray, sr: int, hit: int | str | None = None, within: 
            "onsets_ms": [_ms(o, sr) for o in onsets], "hit": k, "onset_ms": _ms(onsets[k], sr)}
     out.update(got)
     out["notes"] = extra + out["notes"]
+    if hit == "clean" and short:
+        out["short_room_ms"] = room
     return out
 
 

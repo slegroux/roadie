@@ -314,7 +314,8 @@ def session_compare(manifest: dict[str, Any] | str, reference: dict[str, Any] | 
     When the profile carries drum roles for a stem (a fresh drums.json was beside the reference's stems), that
     stem gives one entry per role with a hit in the section, with its `name` (`hh offbeat`, `snare 2`) and, when
     the name is neutral, `name_reason`: the reference's hit is a clean hit of that role only, ours the one at the
-    same place; an echo is listed (`echo_of`, `echo_ms`) with no readings, bleed groups are never compared and
+    same place; a role with no complete hit is compared over its roomiest hit's room (at least 60 ms, noted;
+    falls and length not read); an echo is listed (`echo_of`, `echo_ms`) with no readings, bleed groups are never compared and
     are named in the section's `drums.notes`. Without roles the stem is compared as a whole, and `drums.notes`
     says so. `reference_stale` names profile
     inputs that changed since it was built (a drum role whose stem changed is

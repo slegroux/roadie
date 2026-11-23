@@ -456,5 +456,14 @@ of them), with the same cuts, pre-roll, post-roll and same-place rule as before,
 hat of the hat stem or an echo is never "the kick", "the hat" or "the snare". A complete hit is still one not cut off by
 the next hit of any kind. An echo is listed with `echo_of`, `echo_ms` and a note, no readings; bleed groups are never
 compared and are named in the section's `drums.notes`. A stem without roles is compared as one stem, as before, and
-`drums.notes` says so. Limits: a role whose every hit in the section is cut off by the next hit (a 16th hat; Glacier's
-`hh 16th`) has no clean hit and gives a note, no readings; roles of fewer than 4 measured hits are not compared.
+`drums.notes` says so.
+
+A role none of whose hits in the section is complete (each still rings when the next hit of the stem starts: a 16th
+hat, Glacier's `hh 16th`) is compared short: its hit with the most room before the next onset of any hit in the stem,
+if that room is at least 60 ms (`SHORT_ROOM_S`: the 30 ms attack window and a 30 ms body window after it, where a
+short cut's body starts), both sides cut to that room by the same cut path. The falls (10, 20, 40 dB) and the length
+need the tail and are not read; attack, pitch, harmonics, noise, click, width and bands are, over the same window on
+both sides. The note says "compared over the first N ms". Under 60 ms of room: "no clean hit", no readings. Our hit
+at the reference's place must rise within 30 ms of it and sit within 30 dB of where the reference's hit sits in its
+own slice (a quiet role is not refused for being 30 dB under the stem's loudest hit). In the markdown a neutral name
+is marked "(neutral name)" (the reason is in the JSON). Roles of fewer than 4 measured hits are not compared.

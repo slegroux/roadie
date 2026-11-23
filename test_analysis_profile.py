@@ -1369,7 +1369,7 @@ def test_drum_layer_by_role_a_tom_bled_into_the_kick_stem_is_not_the_kick(tmp_pa
 def test_drum_layer_by_role_an_offbeat_hat_and_a_16th_hat_are_two_entries_each_at_its_place(tmp_path):
     """One hat stem, two sounds: an offbeat hat (8 kHz, steps 2, 6, 10, 14) and a shorter, quieter 16th hat (11 kHz,
     the odd 16ths). Two roles, two entries, each the clean hit of its own role compared with ours at the same place;
-    the neutral name shows its reason in the markdown."""
+    the markdown marks the neutral name (the reason stays in the JSON)."""
     total = 0.5 + 8.0 + 1.0
     off = [0.5 + b * 0.5 + 0.25 for b in range(16)]
     odd = [0.5 + b * 0.25 + 0.125 for b in range(32)]
@@ -1381,7 +1381,7 @@ def test_drum_layer_by_role_an_offbeat_hat_and_a_16th_hat_are_two_entries_each_a
     for d, period, at in ((a, 500, 250), (b, 250, 125)):         # the offbeat hat on an offbeat, the other on an odd 16th
         assert d["readings"] == [] and d["notes"] == [] and d["ours_hit"] is not None, d
         assert abs(d["reference_at_ms"] % period - at) <= 3 and abs(d["ours_at_ms"] - d["reference_at_ms"]) <= 1, d
-    assert "- hh offbeat: none" in md and "- hh 2 (neutral name: not named: stability 0.71 is under 0.75): none" in md
+    assert "- hh offbeat: none" in md and "- hh 2 (neutral name): none" in md
 
 
 def test_drum_layer_by_role_an_echo_is_listed_with_its_parent_and_not_compared(tmp_path):
@@ -1422,3 +1422,32 @@ def test_drum_layer_a_stale_drums_json_falls_back_to_the_stem_with_a_note(tmp_pa
     assert drums["notes"] == ["kick: compared by stem (one typical hit of the whole stem), not by drum role: the profile "
                               "has no drum roles for it (it was built without a fresh drums.json beside its stems)"]
     assert "- kick: compared by stem" in pathlib.Path(r["md_path"]).read_text()
+
+
+def sixteenths(freq, tau, total=0.5 + 8.0 + 1.0):
+    """A hat on every 16th of 4 bars at 120 BPM from 0.5 s (125 ms apart), each still ringing at the next: no hit of
+    it is complete."""
+    times = [0.5 + k * 0.125 for k in range(128)]
+    return times, 0.3 * hit_train(freq, tau, times, total)
+
+
+def test_drum_layer_by_role_a_role_with_no_complete_hit_is_compared_short_and_identical_audio_reads_nothing(tmp_path):
+    times, x = sixteenths(3000, 0.05)                      # falls 40 dB in 230 ms: every hit cut off 125 ms in
+    _, drums, md = one_stem_by_role(tmp_path, "hh", x, x, roles=[role("hh 16th", times)])
+    (hh,) = drums["roles"]
+    assert hh["readings"] == [] and abs(hh["ours_at_ms"] - hh["reference_at_ms"]) <= 1, hh
+    assert hh["notes"] == ["compared over the first 124 ms: no hit of this role rings out before the next hit "
+                           "(falls and length not read)"], hh["notes"]
+    assert "- hh 16th: compared over the first 124 ms" in md
+
+
+def test_drum_layer_by_role_a_dense_16th_hat_differing_reads_its_pitch_and_not_its_decay(tmp_path):
+    """Ours is two semitones up and decays faster; the hits are cut off by the next ones, so the pitch is read and
+    the falls (which need the tail) are not."""
+    times, ref_x = sixteenths(3000, 0.05)
+    _, our_x = sixteenths(3000 * 2 ** (2 / 12), 0.035)
+    _, drums, _ = one_stem_by_role(tmp_path, "hh", ref_x, our_x, roles=[role("hh 16th", times)])
+    (hh,) = drums["roles"]
+    assert any(r.startswith("body pitch 2.0 st above") for r in hh["readings"]), hh["readings"]
+    assert not any(r.startswith(("falls", "lasts")) for r in hh["readings"]), hh["readings"]
+    assert hh["notes"][0].startswith("compared over the first 124 ms"), hh["notes"]

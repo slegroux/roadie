@@ -47,6 +47,9 @@ CAPTURE_IS_REF_WIDTH = 0.01  # its per-bar curve and bands agree within this and
 STALE_MTIME_S = 2.0        # an input whose mtime moved by less than this (a cloud re-sync) is not changed
 KICK_OUT_DB = 30.0         # the kick is out where it sits this far under the loudest other role
 DRUM_ROLES = ("kick", "toms", "snare", "hh", "clap", "rim")   # roles the drum layer reads
+SHORT_ROOM_S = 0.060       # a role with no complete hit is compared over its roomiest hit's room when at least this: the
+                           # 30 ms attack window and a 30 ms body window after it (_measure's body starts at half a short cut)
+SHORT_UNREAD = ("fall_10_ms", "fall_20_ms", "fall_40_ms", "duration_ms")   # need the tail: not read on a short cut
 ROLE_MIN_HITS = 4          # a drum role of fewer measured hits is not compared (drums.MIN_SHOWN: the table lists it as one line)
 
 
@@ -744,8 +747,7 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
                 e["notes"].append("an echo of %s, %.0f ms after it: listed, not compared" % (r["echo_of"], r["echo_ms"]))
                 continue
             if r.get("may_be_one_sound_with"):
-                e["notes"].append("may be one sound with %s (drums.json: not compared, too few clean hits on one side)"
-                                  % ", ".join(r["may_be_one_sound_with"]))
+                e["notes"].append("may be one sound with %s" % ", ".join(r["may_be_one_sound_with"]))
             _drum_entry(e, times, oneshot, ref_x, rrate, ref_pre, our_x, sr, our_pre, n, pbar, bar_s)
         if not played:
             entry["notes"].append("no drum role of this stem has a hit in these bars (drums.json)")
@@ -766,7 +768,8 @@ def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref
         profs, errs = {}, []
         try:
             profs["reference"] = oneshot.profile_array(
-                ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S), among=among)
+                ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S), among=among,
+                min_room=None if among is None else SHORT_ROOM_S)
         except ValueError as e:
             errs.append("the reference: %s" % e)
         near = None
@@ -799,12 +802,18 @@ def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref
                 # and take it only if it rises out of what comes before it there, not 30 ms or more away
                 cut, on = oneshot.hit_cut(our_x, sr, near, length)
                 win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
+                floor = np.abs(our_x).max() * 10 ** (-30 / 20)
+                if among is not None:            # one role: within 30 dB of where the reference's hit sits in its slice
+                    t = rp_["onset_ms"] / 1000.0
+                    rwin = ref_x[max(0, int((t - oneshot.NEAR_S) * rrate)):int((t + oneshot.NEAR_S) * rrate + 1)]
+                    floor *= min(1.0, float(np.abs(rwin).max()) / max(float(np.abs(ref_x).max()), 1e-12))
                 if (on is not None and abs(on - near) <= oneshot.NEAR_S and len(win)
-                        and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20)):
+                        and np.abs(win).max() >= floor):
                     our_cut, our_at = cut, on
                     errs = [e for e in errs if not e.startswith("ours:")]
-                    entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
-                                          "not offer a complete hit there")
+                    if "short_room_ms" not in rp_:    # a short comparison: no complete hit was looked for
+                        entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
+                                              "not offer a complete hit there")
                 elif "ours" in profs:
                     our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
                     our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
@@ -816,8 +825,13 @@ def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref
                 ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
             entry["notes"] += errs
             if our_cut is not None:
-                entry["readings"] = oneshot.compare(oneshot.profile_array(our_cut, sr, hit=0, single=True),
-                                                    oneshot.profile_array(ref_cut, rrate, hit=0, single=True))["readings"]
+                pa, pb = oneshot.profile_array(our_cut, sr, hit=0, single=True), oneshot.profile_array(ref_cut, rrate, hit=0, single=True)
+                if "short_room_ms" in rp_:       # cut off by the next hit: what needs the tail is not read
+                    for p in (pa, pb):
+                        p.update(dict.fromkeys(SHORT_UNREAD))
+                    entry["notes"].append("compared over the first %.0f ms: no hit of this role rings out before the "
+                                          "next hit (falls and length not read)" % (1000 * (len(ref_cut) / rrate - oneshot.HIT_LEAD_S)))
+                entry["readings"] = oneshot.compare(pa, pb)["readings"]
                 entry["ours_hit"] = profs["ours"]["hit"] if "ours" in profs and same_place else None
                 entry["reference_hit"] = profs["reference"]["hit"]
                 entry["ours_at_ms"], entry["reference_at_ms"] = round((our_at - our_pre) * 1000, 1), round(pos * 1000, 1)
@@ -970,7 +984,7 @@ def _drums_markdown(r: dict) -> list:
             label = d["role"]
             if "name" in d:                       # one drum role of the stem (drums.json)
                 label = d["name"] if d["name"].startswith(d["role"]) else "%s (%s stem)" % (d["name"], d["role"])
-                label += " (neutral name: %s)" % d["name_reason"] if d["name_reason"] else ""
+                label += " (neutral name)" if d["name_reason"] else ""      # the reason is in the JSON
             lines.append("- %s: %s" % (label, "; ".join(x for x in [body] + d["notes"] if x)))
         lines.append("")
     return lines
