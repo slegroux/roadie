@@ -70,8 +70,10 @@ elif os.path.exists(_venv_py) and not os.environ.get("ROADIE_REEXEC"):
 
 import argparse
 import copy
+import glob
 import gzip
 import math
+import plistlib
 import re
 import string
 import xml.etree.ElementTree as ET
@@ -189,7 +191,7 @@ CLIP = string.Template("""<AudioClip Id="${clip_id}" Time="${start}">
 <Root Value="0" />
 <Name Value="0" />
 </ScaleInformation>
-<SampleRef>
+${wrapper}<SampleRef>
 <FileRef>
 <RelativePathType Value="1" />
 <RelativePath Value="${relpath}" />
@@ -199,7 +201,7 @@ CLIP = string.Template("""<AudioClip Id="${clip_id}" Time="${start}">
 <LivePackId Value="" />
 <OriginalFileSize Value="${size}" />
 <OriginalCrc Value="${crc}" />
-</FileRef>
+${hint}</FileRef>
 <LastModDate Value="${mtime}" />
 <SourceContext />
 <SampleUsageHint Value="0" />
@@ -245,6 +247,42 @@ ${markers}
 <MarkersGenerated Value="true" />
 <IsSongTempoLeader Value="false" />
 </AudioClip>""")
+
+
+# Live 12.4 writes two elements on an audio clip that 12.2.7 does not (read off a
+# 12.4.6 project and diffed against a 12.2.7 one). Element order matters in Live's
+# XML: the wrapper sits between ScaleInformation and SampleRef, the hint is the
+# last child of FileRef. 12.3 was never measured; the threshold is the first
+# version seen to write them, so a 12.3 template gets the older layout.
+CLIP_WRAPPER_XML = '<AutomationEnvelopesListWrapper LomId="0" />\n'
+CLIP_HINT_XML = '<SourceHint Value="" />\n'
+NEW_CLIP_SCHEMA = (12, 4)
+
+
+def set_live_version(root):
+    """(major, minor, patch) of the Live that saved the set `root`, read from its
+    <Ableton> header: Creator="Ableton Live 12.2.7", else MinorVersion="12.0_12203"
+    (12.2.03). None when the header says neither (a hand-made fixture)."""
+    m = re.search(r"Live (\d+)\.(\d+)(?:\.(\d+))?", root.get("Creator", ""))
+    if m:
+        return tuple(int(g or 0) for g in m.groups())
+    m = re.search(r"_(\d\d)(\d)(\d\d)$", root.get("MinorVersion", ""))
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def installed_live_version(pattern="/Applications/Ableton Live*.app"):
+    """Version of the newest Live app installed, or None (none found, or its
+    Info.plist unreadable): the check using it is advice, so it never fails."""
+    found = []
+    for app in glob.glob(pattern):
+        try:
+            with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+                ver = plistlib.load(f)["CFBundleShortVersionString"]
+            m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", ver)
+            found.append(tuple(int(g or 0) for g in m.groups()))
+        except (OSError, KeyError, AttributeError, plistlib.InvalidFileException):
+            continue
+    return max(found, default=None)
 
 
 def num(x):
@@ -310,8 +348,9 @@ def audio_info(path):
 
 
 def make_clip(name, path, relpath, start, trim_beats, period, warp_map, colour,
-              disabled=False, clip_id=0, info=None):
-    """One arrangement AudioClip element for `path`, placed at beat `start`."""
+              disabled=False, clip_id=0, info=None, new_schema=False):
+    """One arrangement AudioClip element for `path`, placed at beat `start`.
+    `new_schema` adds the two elements Live 12.4 writes (see CLIP_WRAPPER_XML)."""
     frames, rate = info or audio_info(path)
     total = sample_beats(frames / float(rate), period, warp_map)
     length = total - trim_beats
@@ -325,7 +364,9 @@ def make_clip(name, path, relpath, start, trim_beats, period, warp_map, colour,
         colour=colour, disabled="true" if disabled else "false",
         relpath=attr(relpath), path=attr(path), size=os.path.getsize(path), crc=live_crc(path),
         mtime=int(os.path.getmtime(path)), frames=frames, rate=rate,
-        markers=markers)
+        markers=markers,
+        wrapper=CLIP_WRAPPER_XML if new_schema else "",
+        hint=CLIP_HINT_XML if new_schema else "")
     return ET.fromstring(xml)
 
 
@@ -421,12 +462,15 @@ def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
     next_track = _max_id(root, TRACK_TAGS) + 1
     gain = 10 ** (-abs(headroom_db) / 20.0)
     trim_beats = sample_beats(trim_sec, period, warp_map)
+    version = set_live_version(root)
+    new_schema = version is not None and version[:2] >= NEW_CLIP_SCHEMA
 
     for i, (name, path) in enumerate(stems):
         rel = os.path.join(rel_dir, os.path.basename(path)) if rel_dir \
             else os.path.basename(path)
         clip = make_clip(name, path, rel, start_beat, trim_beats, period,
-                         warp_map, COLOURS.get(name, 0), disabled=name in mute)
+                         warp_map, COLOURS.get(name, 0), disabled=name in mute,
+                         new_schema=new_schema)
         track = clone_track(proto, next_track + i, ids, name, COLOURS.get(name, 0),
                             gain, [clip])
         if energy and name in energy:
@@ -445,7 +489,7 @@ def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
         # After the energy lanes, so the stems' and Main's ids are the same with or without it.
         path, rel = ref
         clip = make_clip(REF_NAME, path, rel, start_beat, trim_beats, period,
-                         warp_map, REF_COLOUR)
+                         warp_map, REF_COLOUR, new_schema=new_schema)
         tracks_el.insert(slot + len(stems), clone_track(
             proto, next_track + len(stems), ids, REF_NAME, REF_COLOUR, gain,
             [clip], muted=True))
@@ -585,7 +629,9 @@ def main(argv=None):
     ap.add_argument("-o", "--out", help="output .als (default: next to the "
                     "stems folder, named after it)")
     ap.add_argument("--template", default=DEFAULT_TEMPLATE,
-                    help="empty Live set to copy (default: %(default)s)")
+                    help="empty Live set to copy (default: %(default)s). The Set is written "
+                         "for the Live version that saved it: if a newer Live is "
+                         "installed, open the template in Live and save it once")
     ap.add_argument("--tempo", type=float, default=None,
                     help="override the measured tempo")
     ap.add_argument("--no-tempo-check", action="store_true",
@@ -673,6 +719,13 @@ def main(argv=None):
         main_energy = energy_points(total, peak_db(total), MAIN_RANGE_DB)
 
     root = read_set(args.template)
+    tmpl_ver, live_ver = set_live_version(root), installed_live_version()
+    if tmpl_ver and live_ver and live_ver > tmpl_ver:
+        print("note: the template was saved by Live %s, the installed Live is %s; "
+              "the Set is written for %s. Open the template in Live and save it "
+              "once to update it." % (".".join(map(str, tmpl_ver)),
+                                      ".".join(map(str, live_ver)),
+                                      ".".join(map(str, tmpl_ver))), file=sys.stderr)
     rel_dir = os.path.relpath(stems_dir, os.path.dirname(out))
     ref_arg = None
     if ref_file:

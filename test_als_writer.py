@@ -430,3 +430,83 @@ def test_main_warns_when_the_mix_length_differs(template, stems, mix, tmp_path, 
     root, _ = run_main(tmp_path, monkeypatch, stems)
     assert "warning" in capsys.readouterr().out
     assert v(audio_tracks(root)[-1], "Name/EffectiveName") == "REF"
+
+
+# --- the Live version a Set is written for -----------------------------------
+
+HEADER_12_2 = ('<Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" '
+               'Creator="Ableton Live 12.2.7" Revision="x">')
+HEADER_12_4 = ('<Ableton MajorVersion="5" MinorVersion="12.0_12402" SchemaChangeCount="5" '
+               'Creator="Ableton Live 12.4.6" Revision="y">')
+
+
+def template_with_header(tmp_path, header, name):
+    p = tmp_path / name
+    with gzip.open(p, "wb") as f:
+        f.write(TEMPLATE.replace("<Ableton>", header).encode())
+    return str(p)
+
+
+def written(template, stems, tmp_path, name):
+    out = tmp_path / name
+    aw.write_set(build(template, stems), str(out))
+    return gzip.open(out).read()
+
+
+def test_a_12_2_template_gets_the_clip_layout_unchanged(template, stems, tmp_path):
+    t = template_with_header(tmp_path, HEADER_12_2, "t122.als")
+    clip = audio_tracks(build(t, stems))[0].find(".//AudioClip")
+    assert clip.find("AutomationEnvelopesListWrapper") is None
+    assert clip.find("SampleRef/FileRef/SourceHint") is None
+    # same clip bytes as a template with no header: the layout is chosen, not the text
+    assert (written(t, stems, tmp_path, "a.als").split(b"<LiveSet>")[1]
+            == written(template, stems, tmp_path, "b.als").split(b"<LiveSet>")[1])
+
+
+def test_a_12_4_template_gets_the_two_elements_where_live_writes_them(template, stems, tmp_path):
+    t = template_with_header(tmp_path, HEADER_12_4, "t124.als")
+    for track in audio_tracks(build(t, stems)):
+        clip = track.find(".//AudioClip")
+        kids = [c.tag for c in clip]
+        assert kids[kids.index("ScaleInformation") + 1:kids.index("SampleRef") + 1] \
+            == ["AutomationEnvelopesListWrapper", "SampleRef"]
+        assert clip.find("AutomationEnvelopesListWrapper").attrib == {"LomId": "0"}
+        fileref = [c.tag for c in clip.find("SampleRef/FileRef")]
+        assert fileref[-2:] == ["OriginalCrc", "SourceHint"]
+        assert v(clip, "SampleRef/FileRef/SourceHint") == ""
+
+
+def test_set_live_version_reads_creator_then_minor_version():
+    mk = lambda **a: ET.Element("Ableton", a)
+    assert aw.set_live_version(mk(Creator="Ableton Live 12.4.6")) == (12, 4, 6)
+    assert aw.set_live_version(mk(MinorVersion="12.0_12203")) == (12, 2, 3)
+    assert aw.set_live_version(mk()) is None
+
+
+def make_app(tmp_path, name, version):
+    import plistlib
+    app = tmp_path / "apps" / name / "Contents"
+    app.mkdir(parents=True)
+    with open(app / "Info.plist", "wb") as f:
+        plistlib.dump({"CFBundleShortVersionString": version + " (2026-09-10_0de5c8fa9a)"}, f)
+
+
+def test_installed_live_version_is_the_newest_app_or_none(tmp_path):
+    pattern = str(tmp_path / "apps" / "Ableton Live*.app")
+    assert aw.installed_live_version(pattern) is None
+    make_app(tmp_path, "Ableton Live 11 Suite.app", "11.3.2")
+    make_app(tmp_path, "Ableton Live 12 Suite.app", "12.4.6")
+    assert aw.installed_live_version(pattern) == (12, 4, 6)
+
+
+@pytest.mark.parametrize("installed, warns", [((12, 4, 6), True), ((12, 2, 7), False),
+                                              ((12, 1, 0), False), (None, False)])
+def test_main_warns_once_when_the_installed_live_is_newer_than_the_template(
+        template, stems, mix, tmp_path, monkeypatch, capsys, installed, warns):
+    monkeypatch.setattr(aw, "installed_live_version", lambda: installed)
+    template_with_header(tmp_path, HEADER_12_2, "empty.als")      # main() reads tmp_path/empty.als
+    root, out = run_main(tmp_path, monkeypatch, stems)
+    err = capsys.readouterr().err
+    assert len(err.splitlines()) == (1 if warns else 0)
+    assert (not warns) or ("12.2.7" in err and "12.4.6" in err and "save it once" in err)
+    assert root.get("Creator") == "Ableton Live 12.2.7"           # the header is never rewritten

@@ -101,8 +101,11 @@ choose, `-f` to overwrite), and makes that folder a Live project (an empty
 (`~/Music/Ableton/User Library/Templates/empty.als`, `--template` overrides), one
 per stem, each with a warped clip on the same bar line `roadie load` uses, the
 measured tempo, `--headroom` dB of fader, and a locator per detected section
-(`--no-locators` skips the detection). The `drums` composite is muted when the
-`drums_*` parts are there. `roadie sections` also saves `sections.json` into the
+(`--no-locators` skips the detection). A Set is written for the Live version that
+saved the template, not the installed one (a 12.4 template gets the clip layout Live
+12.4 writes); when a newer Live is installed `roadie als` says so on stderr, and
+opening the template in Live and saving it once brings it up to date. The `drums`
+composite is muted when the `drums_*` parts are there. `roadie sections` also saves `sections.json` into the
 stems folder (`--no-write` skips it).
 
 **REF track.** To compare by ear, the Set also holds the original mix as one more
