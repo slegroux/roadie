@@ -434,6 +434,7 @@ def test_grid_onsets_on_a_tom_or_kick_stem_count_the_bleed_as_hits_and_say_so(ki
     assert not any("meant for hat-like stems" in n for n in off["notes"])
 
 
+@pytest.mark.slow
 def test_grid_onsets_on_the_hat_stem_find_only_hats_and_the_stem_reads_hat_like(hat_stem):
     # the same stem as the first test, the search on: nothing is added (every 16th has a hit), and the stem is hat-like
     r = run(hat_stem, grid_onsets=True)
@@ -443,6 +444,7 @@ def test_grid_onsets_on_the_hat_stem_find_only_hats_and_the_stem_reads_hat_like(
 
 # ---------------------------------------------------------------- pitch: toms an octave or a fifth apart
 
+@pytest.mark.slow
 @pytest.mark.parametrize("semitones", [12.0, 7.0])
 def test_two_toms_an_octave_or_a_fifth_apart_are_two_groups(semitones):
     # beats 1 and 3 a tom at 150 Hz, beats 2 and 4 the same drum `semitones` up: the spectral distance alone puts toms an
@@ -458,6 +460,7 @@ def test_two_toms_an_octave_or_a_fifth_apart_are_two_groups(semitones):
     assert lo_g["pattern"][0] == lo_g["pattern"][8] == hi_g["pattern"][4] == hi_g["pattern"][12] == 1.0
 
 
+@pytest.mark.slow
 def test_one_tom_with_a_third_of_a_semitone_of_jitter_stays_one_group():
     rng = np.random.default_rng(5)
     ev = [(at(i), tom_hit(rng.uniform(-2, 2), f=150.0 * 2 ** (rng.uniform(-0.3, 0.3) / 12))) for i in range(0, 48, 4)]
@@ -559,6 +562,7 @@ def test_a_hit_25_db_under_its_neighbours_is_faint_and_is_counted_where_it_fell(
     assert r["groups"][0]["pattern"][13] == 0.5
 
 
+@pytest.mark.slow
 def test_more_sounds_than_max_groups_leave_the_rest_ungrouped_and_say_so():
     # a hat on beats 1 and 3, a tom on beat 2, a snare on beat 4, 3 bars: three sounds, two groups allowed
     ev = []
