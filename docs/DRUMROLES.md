@@ -443,11 +443,11 @@ for not being named (or "marked as bleed: ..." when it is).
 
 `reference_profile` (`roadie_analysis/profile.py`) reads the `drums.json` beside each drum stem of the reference
 (kick, toms, snare, hh, clap, rim; a stem given as one file) and never runs the analysis. When it is fresh (every input it
-records is there with the same size and an mtime within 2 s) and lists that file, the profile keeps the stem's roles of at
+records is there with the size it recorded, by name: `study show`'s rule, so a study synced or downloaded again stays fresh) and lists that file, the profile keeps the stem's roles of at
 least 4 measured hits (`drum_roles`: name, `named`, `reason`, `echo_of`, `echo_ms`, `may_be_one_sound_with`, `hit_times`)
 and the names of its bleed groups. `roadie drums` writes `hit_times` (each role's onsets in seconds from the start of the
 file) by default; on Glacier 3000 they make `drums.json` 246 KB instead of 180 KB. A missing or stale `drums.json`, or one
-made before hit times were written, is a line in the profile's `notes`, and that stem has no roles.
+made before hit times were written, or a malformed one, is a line in the profile's `notes`, and that stem has no roles; so is a stem whose roles all have under 4 measured hits (it is compared by stem). Smaller roles beside kept ones are named in the section's `drums.notes`.
 
 `session_compare`'s drum layer then gives one entry per role with a hit in the paired bars, with its `name` (and
 `name_reason` when the name is neutral; the markdown prints both): the reference's hit is the clean hit of the section
@@ -465,5 +465,5 @@ short cut's body starts), both sides cut to that room by the same cut path. The 
 need the tail and are not read; attack, pitch, harmonics, noise, click, width and bands are, over the same window on
 both sides. The note says "compared over the first N ms". Under 60 ms of room: "no clean hit", no readings. Our hit
 at the reference's place must rise within 30 ms of it and sit within 30 dB of where the reference's hit sits in its
-own slice (a quiet role is not refused for being 30 dB under the stem's loudest hit). In the markdown a neutral name
+own slice (a quiet role is not refused for being 30 dB under the stem's loudest hit), and never more than 50 dB under our slice's loudest (`ROLE_FLOOR_DB`: noise or bleed is not our hit). In the markdown a neutral name
 is marked "(neutral name)" (the reason is in the JSON). Roles of fewer than 4 measured hits are not compared.

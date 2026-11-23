@@ -50,6 +50,7 @@ DRUM_ROLES = ("kick", "toms", "snare", "hh", "clap", "rim")   # roles the drum l
 SHORT_ROOM_S = 0.060       # a role with no complete hit is compared over its roomiest hit's room when at least this: the
                            # 30 ms attack window and a 30 ms body window after it (_measure's body starts at half a short cut)
 SHORT_UNREAD = ("fall_10_ms", "fall_20_ms", "fall_40_ms", "duration_ms")   # need the tail: not read on a short cut
+ROLE_FLOOR_DB = 50.0       # a role's hit of ours is never more than this under our slice's loudest (noise, bleed)
 ROLE_MIN_HITS = 4          # a drum role of fewer measured hits is not compared (drums.MIN_SHOWN: the table lists it as one line)
 
 
@@ -134,8 +135,10 @@ def _input(p: pathlib.Path) -> dict:
 
 
 def _drums_json(folder: pathlib.Path) -> tuple[dict | None, str | None]:
-    """(record, None) for the drums.json `roadie drums` wrote in `folder` when it is fresh (every input it
-    records is there with the same size and an mtime within STALE_MTIME_S) and has hit times; else (None, why)."""
+    """(record, None) for the drums.json `roadie drums` wrote in `folder` when it is fresh and has hit times;
+    else (None, why). Fresh is study.py's rule (`_drums_check`, what `roadie study show` says): every input it
+    records is there with the size it recorded, by name. Not the mtime: a study synced or downloaded again
+    has new mtimes and the same audio."""
     import json
     path = folder / "drums.json"
     if not path.is_file():
@@ -145,25 +148,49 @@ def _drums_json(folder: pathlib.Path) -> tuple[dict | None, str | None]:
         assert rec["kind"] == "drum_roles" and isinstance(rec["stems"], dict) and isinstance(rec["inputs"], list)
     except (OSError, ValueError, KeyError, TypeError, AssertionError):
         return None, "%s is not a drums.json that `roadie drums` wrote" % path
-    changed = []
-    for it in rec["inputs"]:
-        f = folder / str(it.get("name"))
-        if not f.is_file() or f.stat().st_size != it.get("size") or abs(f.stat().st_mtime - float(it.get("mtime", 0))) > STALE_MTIME_S:
-            changed.append(str(it.get("name")))
+    try:
+        changed = [str(it["name"]) for it in rec["inputs"]
+                   if not (folder / str(it["name"])).is_file() or (folder / str(it["name"])).stat().st_size != it["size"]]
+        no_times = any("hit_times" not in r for st in rec["stems"].values() for r in st["roles"])
+    except (KeyError, TypeError, AttributeError) as e:
+        return None, "%s is malformed: %s: %s" % (path, type(e).__name__, e)
     if changed:
         return None, "%s is stale: %s changed since it was made (run `roadie drums` again)" % (path, ", ".join(changed))
-    if any("hit_times" not in r for st in rec["stems"].values() for r in st.get("roles", [])):
+    if no_times:
         return None, "%s has no hit times: it was made before `roadie drums` wrote them (run it again)" % path
     return rec, None
+
+
+def _role_of(r: dict) -> dict:
+    """The fields of one drums.json role the drum layer reads; ValueError (or KeyError, TypeError) if one is
+    missing or of the wrong type."""
+    def num(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    out = {"name": r["name"], "named": r["named"], "reason": r["reason"], "measured": r["measured"],
+           "echo_of": r.get("echo_of"), "echo_ms": r.get("echo_ms"),
+           "may_be_one_sound_with": r.get("may_be_one_sound_with") or [], "hit_times": r["hit_times"]}
+    if not isinstance(out["name"], str) or not isinstance(out["named"], bool):
+        raise ValueError("a role's name or named is not a string or a boolean")
+    if not isinstance(out["measured"], int) or isinstance(out["measured"], bool):
+        raise ValueError("role %r: measured is not a whole number" % out["name"])
+    if not isinstance(out["hit_times"], list) or not all(num(t) for t in out["hit_times"]):
+        raise ValueError("role %r: hit_times is not a list of numbers" % out["name"])
+    if out["echo_of"] is not None and (not isinstance(out["echo_of"], str) or not num(out["echo_ms"])):
+        raise ValueError("role %r: echo_of or echo_ms is malformed" % out["name"])
+    if not isinstance(out["may_be_one_sound_with"], list):
+        raise ValueError("role %r: may_be_one_sound_with is not a list" % out["name"])
+    return out
 
 
 def _drum_roles_of(files: dict) -> tuple[dict, list]:
     """({stem: roles}, notes) for the reference's drum stems (those of DRUM_ROLES made of one file) from the
     drums.json beside each, when it is fresh and lists that file: per stem the file, the drums.json, the roles of
     at least ROLE_MIN_HITS measured hits (name, named, reason, measured, echo_of, echo_ms, may_be_one_sound_with,
-    hit_times: onsets in seconds from the start of the file), how many smaller ones were left out, and the names
-    of the bleed groups. Only reads the file: the analysis is `roadie drums`, a heavy job. Notes say why a drum
-    stem has no roles."""
+    hit_times: onsets in seconds from the start of the file), the names of the smaller ones left out (`small`),
+    and the names of the bleed groups. A stem whose roles all have fewer hits, or whose entry is malformed, has
+    no roles (compared by stem). Only reads the file: the analysis is `roadie drums`, a heavy job. Notes say why
+    a drum stem has no roles."""
     out, notes, seen = {}, [], {}
     for kind in DRUM_ROLES:
         if kind not in files:
@@ -177,17 +204,24 @@ def _drum_roles_of(files: dict) -> tuple[dict, list]:
         rec, why = seen[p.parent]
         if rec is None:
             continue
-        stem = next((st for st in rec["stems"].values() if st.get("file") == p.name), None)
-        if stem is None:
-            notes.append("drum stem %r: drums.json in %s has no stem %s: no drum roles for it" % (kind, p.parent, p.name))
+        try:
+            stem = next((st for st in rec["stems"].values() if st.get("file") == p.name), None)
+            if stem is None:
+                notes.append("drum stem %r: drums.json in %s has no stem %s: no drum roles for it" % (kind, p.parent, p.name))
+                continue
+            roles = [_role_of(r) for r in stem["roles"]]
+            bleed = [str(b["name"]) for b in stem.get("bleed", [])]
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            notes.append("%s is malformed: %s: %s; the drum layer compares %s by stem"
+                         % (p.parent / "drums.json", type(e).__name__, e, kind))
             continue
-        keep = [r for r in stem["roles"] if r["measured"] >= ROLE_MIN_HITS]
-        out[kind] = {"file": p.name, "drums_json": str(p.parent / "drums.json"),
-                     "roles": [{"name": r["name"], "named": r["named"], "reason": r["reason"], "measured": r["measured"],
-                                "echo_of": r.get("echo_of"), "echo_ms": r.get("echo_ms"),
-                                "may_be_one_sound_with": r.get("may_be_one_sound_with", []), "hit_times": r["hit_times"]}
-                               for r in keep],
-                     "small": len(stem["roles"]) - len(keep), "bleed": [b["name"] for b in stem.get("bleed", [])]}
+        keep = [r for r in roles if r["measured"] >= ROLE_MIN_HITS]
+        if not keep:
+            notes.append("drum stem %r: every role in %s has under %d measured hits; the drum layer compares it by stem"
+                         % (kind, p.parent / "drums.json", ROLE_MIN_HITS))
+            continue
+        out[kind] = {"file": p.name, "drums_json": str(p.parent / "drums.json"), "roles": keep,
+                     "small": [r["name"] for r in roles if r["measured"] < ROLE_MIN_HITS], "bleed": bleed}
     kinds = [k for k in DRUM_ROLES if k in files and k not in out]
     for folder, (rec, why) in seen.items():
         if rec is None:
@@ -221,7 +255,7 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     and `notes` says so.
 
     Drum roles: when a drums.json (`roadie drums`) sits beside a drum stem's file (one of DRUM_ROLES, made of one
-    file), is fresh for its inputs (size, and mtime within STALE_MTIME_S) and has hit times, the profile carries
+    file), is fresh for its inputs (by name and size, as `study show` judges it) and has hit times, the profile carries
     that stem's roles under `drum_roles` (see _drum_roles_of) and session_compare's drum layer compares role by
     role. Otherwise `notes` says why and that stem is compared as a whole. This only reads drums.json; it never
     runs the drum analysis.
@@ -418,7 +452,7 @@ def _check_profile(prof: dict) -> None:
                     need(isinstance(e["trace"], bool) and num(e["level_db"]) and "width" in e)
                     need(all(name in e["bands_db"] for name, _, _ in BANDS))
         for st in prof.get("drum_roles", {}).values():
-            need(isinstance(st["bleed"], list) and isinstance(st["roles"], list))
+            need(isinstance(st["bleed"], list) and isinstance(st["roles"], list) and isinstance(st["small"], list))
             for r in st["roles"]:
                 need(isinstance(r["name"], str) and isinstance(r["named"], bool) and "reason" in r and "echo_of" in r)
                 need(all(num(t) for t in r["hit_times"]))
@@ -730,6 +764,8 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
         if dr is None:
             _drum_entry(entry, None, oneshot, ref_x, rrate, ref_pre, our_x, sr, our_pre, n, pbar, bar_s)
             continue
+        if dr["small"]:
+            notes.append("%s: roles under %d measured hits, not compared: %s" % (role, ROLE_MIN_HITS, ", ".join(dr["small"])))
         if dr["bleed"]:
             notes.append("%s: bleed (another stem's sound leaking in), never compared: %s" % (role, ", ".join(dr["bleed"])))
         played = 0
@@ -803,17 +839,18 @@ def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref
                 cut, on = oneshot.hit_cut(our_x, sr, near, length)
                 win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
                 floor = np.abs(our_x).max() * 10 ** (-30 / 20)
-                if among is not None:            # one role: within 30 dB of where the reference's hit sits in its slice
+                if among is not None:            # one role: within 30 dB of where the reference's hit sits in its slice,
+                                                 # never more than ROLE_FLOOR_DB under our loudest
                     t = rp_["onset_ms"] / 1000.0
                     rwin = ref_x[max(0, int((t - oneshot.NEAR_S) * rrate)):int((t + oneshot.NEAR_S) * rrate + 1)]
-                    floor *= min(1.0, float(np.abs(rwin).max()) / max(float(np.abs(ref_x).max()), 1e-12))
+                    floor = max(floor * min(1.0, float(np.abs(rwin).max()) / max(float(np.abs(ref_x).max()), 1e-12)),
+                                np.abs(our_x).max() * 10 ** (-ROLE_FLOOR_DB / 20))
                 if (on is not None and abs(on - near) <= oneshot.NEAR_S and len(win)
                         and np.abs(win).max() >= floor):
                     our_cut, our_at = cut, on
                     errs = [e for e in errs if not e.startswith("ours:")]
-                    if "short_room_ms" not in rp_:    # a short comparison: no complete hit was looked for
-                        entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
-                                              "not offer a complete hit there")
+                    entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
+                                          "not offer a complete hit there")
                 elif "ours" in profs:
                     our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
                     our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on

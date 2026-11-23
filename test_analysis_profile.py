@@ -1408,7 +1408,9 @@ def test_drum_layer_a_stale_drums_json_falls_back_to_the_stem_with_a_note(tmp_pa
     kick, mix = write(d, "kick.wav", stereo(x)), write(d, "mix.wav", stereo(x))
     write_drums_json(d, {"kick": (kick, [role("kick", beats)])})
     st = kick.stat()
-    os.utime(kick, (st.st_atime, st.st_mtime + 10))                     # re-rendered since drums.json was made
+    os.utime(kick, (st.st_atime, st.st_mtime + 3600))                   # synced again: a new mtime is still fresh
+    assert "drum_roles" in profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, [{"name": "K", "start_bar": 0, "bars": 4}])
+    write(d, "kick.wav", stereo(np.concatenate([x, np.zeros(480)])))   # re-rendered since drums.json was made: another size
     prof = profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, [{"name": "K", "start_bar": 0, "bars": 4}])
     assert "drum_roles" not in prof
     assert any("is stale: kick.wav changed" in n and "compares kick by stem" in n for n in prof["notes"]), prof["notes"]
@@ -1436,9 +1438,10 @@ def test_drum_layer_by_role_a_role_with_no_complete_hit_is_compared_short_and_id
     _, drums, md = one_stem_by_role(tmp_path, "hh", x, x, roles=[role("hh 16th", times)])
     (hh,) = drums["roles"]
     assert hh["readings"] == [] and abs(hh["ours_at_ms"] - hh["reference_at_ms"]) <= 1, hh
-    assert hh["notes"] == ["compared over the first 124 ms: no hit of this role rings out before the next hit "
+    assert hh["notes"] == ["ours: measured at the reference's place; our own segmentation did not offer a complete hit there",
+                           "compared over the first 124 ms: no hit of this role rings out before the next hit "
                            "(falls and length not read)"], hh["notes"]
-    assert "- hh 16th: compared over the first 124 ms" in md
+    assert "compared over the first 124 ms" in md
 
 
 def test_drum_layer_by_role_a_dense_16th_hat_differing_reads_its_pitch_and_not_its_decay(tmp_path):
@@ -1450,4 +1453,80 @@ def test_drum_layer_by_role_a_dense_16th_hat_differing_reads_its_pitch_and_not_i
     (hh,) = drums["roles"]
     assert any(r.startswith("body pitch 2.0 st above") for r in hh["readings"]), hh["readings"]
     assert not any(r.startswith(("falls", "lasts")) for r in hh["readings"]), hh["readings"]
-    assert hh["notes"][0].startswith("compared over the first 124 ms"), hh["notes"]
+    assert hh["notes"][-1].startswith("compared over the first 124 ms"), hh["notes"]
+
+
+def kick_with_drums_json(tmp_path, roles):
+    """A kick stem (16 beats from 0.5 s, 120 BPM) and its mix, with a drums.json holding `roles`; returns
+    (kick, mix, drums.json path)."""
+    total = 0.5 + 8.0 + 1.0
+    x = 0.8 * hit_train(60, 0.05, [0.5 + b * 0.5 for b in range(16)], total)
+    d = tmp_path / "ref"
+    d.mkdir()
+    kick, mix = write(d, "kick.wav", stereo(x)), write(d, "mix.wav", stereo(x))
+    write_drums_json(d, {"kick": (kick, roles)})
+    return kick, mix, d / "drums.json"
+
+
+def _set(path, fn):
+    import json
+    rec = json.loads(path.read_text())
+    fn(rec)
+    path.write_text(json.dumps(rec))
+
+
+MALFORMED = {
+    "inputs hold a non-dict": lambda r: r.update(inputs=[1]),
+    "a stem without roles": lambda r: r["stems"]["kick"].pop("roles"),
+    "a role without reason": lambda r: r["stems"]["kick"]["roles"][0].pop("reason"),
+    "measured null": lambda r: r["stems"]["kick"]["roles"][0].update(measured=None),
+    "bleed null": lambda r: r["stems"]["kick"].update(bleed=None),
+    "hit_times null": lambda r: r["stems"]["kick"]["roles"][0].update(hit_times=None),
+    "hit_times of text": lambda r: r["stems"]["kick"]["roles"][0].update(hit_times=["a"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED) + ["mtime null"])
+def test_profile_a_malformed_drums_json_is_a_note_and_the_stem_is_compared_whole(tmp_path, case):
+    kick, mix, dj = kick_with_drums_json(tmp_path, [role("kick", [0.5 + b * 0.5 for b in range(16)])])
+    _set(dj, MALFORMED.get(case, lambda r: r["inputs"][0].update(mtime=None)))
+    prof = profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, [{"name": "K", "start_bar": 0, "bars": 4}])
+    if case == "mtime null":                                            # freshness is by name and size: no mtime needed
+        assert "drum_roles" in prof and prof["notes"] == [], prof["notes"]
+        return
+    assert "drum_roles" not in prof
+    assert any("drums.json is malformed" in n and "compares kick by stem" in n for n in prof["notes"]), prof["notes"]
+
+
+def test_drum_layer_a_stem_whose_roles_all_have_under_4_hits_is_compared_whole(tmp_path):
+    kick, mix, dj = kick_with_drums_json(tmp_path, [role("kick 1", [0.5, 1.0, 1.5]), role("kick 2", [2.0])])
+    sec = [{"name": "K", "start_bar": 0, "bars": 4}]
+    prof = profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, sec)
+    assert "drum_roles" not in prof and any("every role" in n and "under 4 measured hits" in n for n in prof["notes"])
+    m = {"tempo": 120.0, "offset_s": 0.5, "sections": sec, "sources": {"master": str(mix), "kick": str(kick)}}
+    drums = profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]
+    assert "name" not in drums["roles"][0] and drums["roles"][0]["ours_hit"] is not None, drums
+    assert "compared by stem" in drums["notes"][0]
+    beats = [0.5 + b * 0.5 for b in range(16)]                          # one kept role beside a small one: named in the notes
+    _set(dj, lambda r: r["stems"]["kick"].update(roles=[role("kick", beats[1:]), role("kick 2", beats[:1])]))
+    drums = profile.session_compare(m, reference=profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, sec),
+                                    out_dir=tmp_path / "out")["sections"][0]["drums"]
+    assert [d["name"] for d in drums["roles"]] == ["kick"]
+    assert drums["notes"] == ["kick: roles under 4 measured hits, not compared: kick 2"]
+
+
+def test_drum_layer_by_role_noise_or_bleed_50_db_under_our_loudest_is_not_our_hit(tmp_path):
+    """A reference role 38 dB under its stem's loudest hit (a 3 kHz hit on each offbeat). Ours has no such role:
+    one loud hit before the section, faint noise (-80 dB) and a different faint blip (1 kHz, -55 dB) at each of the
+    reference's places. The blip must not be taken as our hit: no readings."""
+    total = 0.5 + 8.0 + 1.0
+    beats = [0.5 + b * 0.5 for b in range(16)]
+    off = [t + 0.25 for t in beats]
+    ref = 0.8 * hit_train(200, 0.02, beats, total) + 0.8 * gain(-38) * hit_train(3000, 0.02, off, total)
+    noise = np.random.default_rng(1).standard_normal(len(ref))
+    ours = 0.8 * hit_train(200, 0.02, [0.2], total) + 0.8 * gain(-80) * noise + 0.8 * gain(-55) * hit_train(1000, 0.02, off, total)
+    _, drums, _ = one_stem_by_role(tmp_path, "snare", ref, ours,
+                                   roles=[role("snare", beats), role("snare 2", off, named=False, reason="x")])
+    quiet = next(d for d in drums["roles"] if d["name"] == "snare 2")
+    assert quiet["readings"] == [] and quiet.get("ours_at_ms") is None, quiet
+    assert any(n.startswith("ours: no clean hit") for n in quiet["notes"]), quiet["notes"]
