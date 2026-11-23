@@ -39,6 +39,14 @@ sum of the stems against its own loudest bar, MAIN_RANGE_DB deep. An unmapped ma
 so the curves are a read-only map under each clip. The set opens in automation
 mode with each track's lane set to its Energy macro, so they show straight away. The rack is copied from energy_rack.xml (a rack Live 12.2.7 saved).
 
+REF TRACK. The original mix, found beside the stems folder (<name without
+_stems>.wav/.flac/.aif/.aiff/.mp3/.m4a, or --ref FILE), is added as one more audio
+track named REF, last in the set. The stems were split from that file, so it takes
+the same start, trim and warp map. The track is muted (the mixer's Speaker, the
+track activator, set false, as Live saves a muted track) and its clip stays
+active: un-mute or solo it to compare. It is left out of the level reference, the
+stem ordering and the energy lanes. --no-ref leaves it out.
+
 KNOWN GAPS, each a guess to be corrected the first time Live says otherwise:
   * Clip colours are palette INDICES (not RGB like the bridge's), taken per stem
     name from a project Live produced. Unknown names get 0.
@@ -76,6 +84,10 @@ DEFAULT_TEMPLATE = os.path.expanduser(
 COLOURS = {"drums_kick": 14, "bass": 14, "drums": 14, "drums_toms": 5,
            "drums_crash": 6, "drums_snare": 21, "drums_hh": 9, "drums_ride": 65,
            "synths": 4, "vocals": 5}
+REF_NAME = "REF"
+REF_COLOUR = 69
+REF_EXTS = (".wav", ".flac", ".aif", ".aiff", ".mp3", ".m4a")
+REF_LENGTH_TOL = 0.005       # seconds of difference from the stems before warning
 
 ENERGY_RACK = os.path.join(os.path.dirname(_real_script), "energy_rack.xml")
 ENERGY_RANGE_DB = 40.0       # quietest bar drawn above 0, below the loudest
@@ -287,7 +299,7 @@ def audio_info(path):
         import soundfile as sf
         i = sf.info(path)
         return int(i.frames), int(i.samplerate)
-    except ImportError:
+    except (ImportError, RuntimeError):      # no soundfile, or a format it cannot read (m4a)
         import subprocess
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
@@ -333,9 +345,10 @@ def _is_pointee(el):
     return "Id" in el.attrib and (el.tag.endswith("Target") or el.tag == "Pointee")
 
 
-def clone_track(proto, track_id, ids, name, colour, gain, clips):
+def clone_track(proto, track_id, ids, name, colour, gain, clips, muted=False):
     """A copy of `proto` renamed `name`, with fresh pointee ids from `ids` (an
-    iterator), `gain` (linear) on its fader, and `clips` as its arrangement."""
+    iterator), `gain` (linear) on its fader, and `clips` as its arrangement.
+    `muted` turns the track's activator (Speaker) off."""
     t = copy.deepcopy(proto)
     t.set("Id", str(track_id))
     for el in t.iter():
@@ -347,6 +360,8 @@ def clone_track(proto, track_id, ids, name, colour, gain, clips):
     nm.find("MemorizedFirstClipName").set("Value", name)
     t.find("Color").set("Value", str(colour))
     t.find("DeviceChain/Mixer/Volume/Manual").set("Value", num(gain))
+    if muted:
+        t.find("DeviceChain/Mixer/Speaker/Manual").set("Value", "false")
     events = t.find("DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events")
     for c in list(events):
         events.remove(c)
@@ -386,11 +401,12 @@ def set_locators(root, locators):
 
 def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
               headroom_db=6.0, locators=None, rel_dir=None, mute=(),
-              energy=None, main_energy=None, rack=None):
+              energy=None, main_energy=None, rack=None, ref=None):
     """Edit `root` (a parsed template) in place. `stems` is the ordered
     [(name, absolute_path)]. `energy` {name: [(beat, value)]} and `main_energy`
-    [(beat, value)] add energy lanes (see the module docstring). Returns the
-    list of track names written."""
+    [(beat, value)] add energy lanes (see the module docstring). `ref`
+    (absolute_path, path relative to the .als) adds the original mix as a muted
+    REF track after the stems. Returns the list of track names written."""
     tracks_el = root.find("LiveSet/Tracks")
     audio = [t for t in tracks_el if t.tag == "AudioTrack"]
     if not audio:
@@ -424,11 +440,22 @@ def build_set(root, stems, start_beat, trim_sec, period, warp_map, bpm,
         # Open in automation mode (the A key), so every lane shows straight away.
         _child(root, "LiveSet/AutomationMode").set("Value", "true")
 
+    names = [n for n, _ in stems]
+    if ref:
+        # After the energy lanes, so the stems' and Main's ids are the same with or without it.
+        path, rel = ref
+        clip = make_clip(REF_NAME, path, rel, start_beat, trim_beats, period,
+                         warp_map, REF_COLOUR)
+        tracks_el.insert(slot + len(stems), clone_track(
+            proto, next_track + len(stems), ids, REF_NAME, REF_COLOUR, gain,
+            [clip], muted=True))
+        names.append(REF_NAME)
+
     pointee.set("Value", str(next(ids)))
     set_tempo(root, bpm)
     if locators is not None:
         set_locators(root, locators)
-    return [n for n, _ in stems]
+    return names
 
 
 # --- energy lanes ------------------------------------------------------------
@@ -542,6 +569,15 @@ def default_out(stems_dir):
     return os.path.join(os.path.dirname(stems_dir), base + ".als")
 
 
+def find_ref(stems_dir):
+    """The original mix beside `stems_dir` (its name without _stems, plus an
+    audio extension), or None."""
+    stems_dir = os.path.abspath(stems_dir).rstrip("/")
+    base = os.path.join(os.path.dirname(stems_dir),
+                        re.sub(r"_stems$", "", os.path.basename(stems_dir)))
+    return next((base + e for e in REF_EXTS if os.path.isfile(base + e)), None)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Write a Live project from a stems folder, without Live")
@@ -565,6 +601,10 @@ def main(argv=None):
                     help="skip section detection")
     ap.add_argument("--no-energy", action="store_true",
                     help="skip the per-stem energy automation lanes")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--ref", metavar="FILE", help="the original mix to add as a muted "
+                   "REF track (default: the file beside the stems folder named like it)")
+    g.add_argument("--no-ref", action="store_true", help="leave the REF track out")
     ap.add_argument("-f", "--force", action="store_true",
                     help="overwrite the output if it exists")
     args = ap.parse_args(argv)
@@ -577,6 +617,14 @@ def main(argv=None):
         sys.exit("template not found: %s (see --template)" % args.template)
     if os.path.exists(out) and not args.force:
         sys.exit("%s exists; --force to overwrite" % out)
+
+    ref_file = None
+    if args.ref:
+        if not os.path.isfile(args.ref):
+            sys.exit("no such --ref file: %s" % args.ref)
+        ref_file = os.path.abspath(args.ref)
+    elif not args.no_ref:
+        ref_file = find_ref(stems_dir)
 
     paths = {}
     for f in sorted(os.listdir(stems_dir)):
@@ -626,8 +674,17 @@ def main(argv=None):
 
     root = read_set(args.template)
     rel_dir = os.path.relpath(stems_dir, os.path.dirname(out))
+    ref_arg = None
+    if ref_file:
+        ref_arg = (ref_file, os.path.relpath(ref_file, os.path.dirname(out)))
+        frames, rate = audio_info(ref_file)
+        sframes, srate = audio_info(paths[order[0]])
+        if abs(frames / float(rate) - sframes / float(srate)) > REF_LENGTH_TOL:
+            print("warning: %s is %.3f s long, the stems %.3f s; REF added anyway"
+                  % (os.path.basename(ref_file), frames / float(rate), sframes / float(srate)))
     build_set(root, [(n, paths[n]) for n in order], start, trim, period, warp_map,
-              bpm, args.headroom, locators, rel_dir, mute, energy, main_energy)
+              bpm, args.headroom, locators, rel_dir, mute, energy, main_energy,
+              ref=ref_arg)
     write_set(root, out)
     if os.path.dirname(out) == os.path.dirname(stems_dir):
         # The track folder (WAV, stems, .als) becomes the Live project, so ⌘S
@@ -638,6 +695,10 @@ def main(argv=None):
     print("  %d tracks, %.3f BPM, clips at bar %.2f, %s locators"
           % (len(order), bpm, start / 4.0 + 1.0,
              "no" if locators is None else len(locators)))
+    if ref_arg:
+        print("  REF: %s, muted track, last" % os.path.basename(ref_file))
+    elif not args.no_ref:
+        print("  no original mix beside the stems folder: no REF track (--ref FILE)")
     if mute:
         print("  'drums' clip is muted: the drum parts sum back to it")
     if energy:

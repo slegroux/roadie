@@ -105,6 +105,17 @@ measured tempo, `--headroom` dB of fader, and a locator per detected section
 `drums_*` parts are there. `roadie sections` also saves `sections.json` into the
 stems folder (`--no-write` skips it).
 
+**REF track.** To compare by ear, the Set also holds the original mix as one more
+track, **REF**, last. `roadie als` takes the audio file beside the stems folder
+named like it without `_stems` (`Song_124bpm_stems/` → `Song_124bpm.wav`; `.wav`,
+`.flac`, `.aif`, `.aiff`, `.mp3` or `.m4a`), or the file named by `--ref FILE`. It
+gets the same start, trim and warp map as the stems, and the **track** is muted
+(its clip stays active): un-mute it, or solo it, to switch between mix and stems.
+It has no Energy lane and does not count in the stem levels or order. If no mix is
+found, there is no REF track and one line says so; if its length differs from the
+stems' by more than 5 ms, REF is still added with a warning. `--no-ref` leaves it
+out.
+
 **Energy lanes.** `roadie als` also draws each stem's energy as automation under
 its clip. Every stem track gets an empty Audio Effect Rack named **Energy** (no
 chains, so the audio passes through untouched) whose Macro 1 carries the stem's

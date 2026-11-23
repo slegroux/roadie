@@ -34,6 +34,7 @@ TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
               <AutomationTarget Id="40"><LockEnvelope Value="0" /></AutomationTarget>
               <ModulationTarget Id="41" />
             </Volume>
+            <Speaker><Manual Value="true" /></Speaker>
             <Sends><TrackSendHolder Id="0" /></Sends>
           </Mixer>
           <MainSequencer>
@@ -316,3 +317,116 @@ def test_bar_power_and_points_follow_loudness_on_the_bar_grid(tmp_path):
     assert [b for b, _ in pts] == [32.0, 36.0, 40.0]
     assert pts[0][1] == 127.0 and 0 < pts[1][1] < 127.0 and pts[2][1] == 0.0
     assert pts[1][1] == pytest.approx(127 * (1 - 20 / aw.ENERGY_RANGE_DB), abs=1)
+
+
+# --- REF track: the original mix, muted ------------------------------------------
+
+@pytest.fixture
+def mix(stems, tmp_path):
+    """The original mix beside the stems folder, as roadie split lays it out."""
+    sf = pytest.importorskip("soundfile")
+    p = tmp_path / "song_125bpm.wav"
+    sf.write(str(p), np.zeros(RATE * 2, dtype="float32"), RATE)
+    return str(p)
+
+
+def clip_shape(track):
+    clip = track.find(".//AudioClip")
+    return (clip.get("Time"), v(clip, "CurrentStart"), v(clip, "CurrentEnd"),
+            v(clip, "Loop/LoopStart"), v(clip, "Loop/LoopEnd"),
+            [(m.get("SecTime"), m.get("BeatTime")) for m in clip.iter("WarpMarker")])
+
+
+def test_ref_is_a_muted_last_track_aligned_like_the_stems(template, stems, mix, tmp_path):
+    warp_map = [[0.0, 0.0], [4.0, 1.9], [8.0, 3.9]]
+    out = tmp_path / "sets" / "song.als"
+    out.parent.mkdir()
+    rel = os.path.relpath(mix, out.parent)
+    root = build(template, stems, trim_sec=0.2, warp_map=warp_map, ref=(mix, rel))
+    tracks = audio_tracks(root)
+    assert [v(t, "Name/EffectiveName") for t in tracks] == \
+        ["drums_kick", "drums", "vocals", "REF"]
+    ref = tracks[-1]
+    assert v(ref, "DeviceChain/Mixer/Speaker/Manual") == "false"       # track muted
+    assert all(v(t, "DeviceChain/Mixer/Speaker/Manual") == "true" for t in tracks[:-1])
+    assert v(ref.find(".//AudioClip"), "Disabled") == "false"           # clip active
+    assert clip_shape(ref) == clip_shape(tracks[0])
+    assert v(ref, "Color") == "69"
+    assert v(ref, "DeviceChain/Mixer/Volume/Manual") == v(tracks[0], "DeviceChain/Mixer/Volume/Manual")
+    fref = ref.find(".//AudioClip/SampleRef/FileRef")
+    assert v(fref, "RelativePathType") == "1"
+    assert os.path.normpath(os.path.join(out.parent, v(fref, "RelativePath"))) == mix
+    assert v(fref, "OriginalCrc") == str(aw.live_crc(mix))
+    ids = [int(e.get("Id")) for e in root.iter()
+           if "Id" in e.attrib and (e.tag.endswith("Target") or e.tag == "Pointee")]
+    assert len(ids) == len(set(ids)) and int(v(root, "LiveSet/NextPointeeId")) > max(ids)
+
+
+def test_ref_changes_nothing_computed_for_the_stems(template, stems, mix):
+    lanes = {"drums_kick": [(32.0, 127.0)], "drums": [(32.0, 5.0)], "vocals": [(32.0, 0.0)]}
+    plain = build(template, stems, energy=lanes, main_energy=[(32.0, 100.0)])
+    withref = build(template, stems, energy=lanes, main_energy=[(32.0, 100.0)],
+                    ref=(mix, "song_125bpm.wav"))
+    assert not withref.findall(".//AudioTrack")[-1].findall(".//AudioEffectGroupDevice")  # no lane on REF
+    withref.find("LiveSet/Tracks").remove(audio_tracks(withref)[-1])
+    # Everything else is identical, apart from NextPointeeId, which moved past REF's ids.
+    for r in (plain, withref):
+        r.find("LiveSet/NextPointeeId").set("Value", "0")
+    assert ET.tostring(plain) == ET.tostring(withref)
+
+
+def test_find_ref_takes_the_mix_beside_the_stems_and_any_audio_extension(stems, tmp_path):
+    folder = os.path.dirname(stems[0][1])
+    assert aw.find_ref(folder) is None
+    (tmp_path / "other.wav").write_bytes(b"x")
+    assert aw.find_ref(folder) is None
+    mp3 = tmp_path / "song_125bpm.mp3"
+    mp3.write_bytes(b"x")
+    assert aw.find_ref(folder) == str(mp3)
+
+
+def run_main(tmp_path, monkeypatch, stems, *argv):
+    """main() on the synthetic stems; the beat analysis is stubbed (silence has none)."""
+    import beat_aligner
+    import stems2live
+    monkeypatch.setattr(beat_aligner, "analyze_alignment",
+                        lambda *a, **k: {"bpm": 125.0, "period": PERIOD, "warp_map": []})
+    monkeypatch.setattr(stems2live, "centroid", lambda p: 0.0)
+    out = tmp_path / ("out%d.als" % len(list(tmp_path.glob("out*.als"))))
+    aw.main([os.path.dirname(stems[0][1]), "-o", str(out), "--template",
+             str(tmp_path / "empty.als"), "--no-align", "--no-locators",
+             *argv])
+    return aw.read_set(str(out)), out
+
+
+def test_main_adds_ref_by_default_and_not_with_no_ref_or_without_a_mix(
+        template, stems, mix, tmp_path, monkeypatch, capsys):
+    with_ref, _ = run_main(tmp_path, monkeypatch, stems)
+    assert [v(t, "Name/EffectiveName") for t in audio_tracks(with_ref)][-1] == "REF"
+    skipped, out_a = run_main(tmp_path, monkeypatch, stems, "--no-ref")
+    os.rename(mix, mix + ".away")
+    capsys.readouterr()
+    nomix, out_b = run_main(tmp_path, monkeypatch, stems)
+    assert "no original mix" in capsys.readouterr().out      # one line, not an error
+    # --no-ref and no mix write the same Set (the file that is not there changes nothing).
+    assert gzip.open(out_a).read() == gzip.open(out_b).read()
+    assert len(audio_tracks(skipped)) == 3
+
+
+def test_main_ref_option_uses_that_file(template, stems, mix, tmp_path, monkeypatch):
+    sf = pytest.importorskip("soundfile")
+    other = tmp_path / "elsewhere.flac"
+    sf.write(str(other), np.zeros(RATE * 2, dtype="float32"), RATE)
+    os.rename(mix, mix + ".away")
+    root, out = run_main(tmp_path, monkeypatch, stems, "--ref", str(other))
+    ref = audio_tracks(root)[-1]
+    assert v(ref, "Name/EffectiveName") == "REF"
+    assert v(ref.find(".//AudioClip"), "SampleRef/FileRef/Path") == str(other)
+
+
+def test_main_warns_when_the_mix_length_differs(template, stems, mix, tmp_path, monkeypatch, capsys):
+    sf = pytest.importorskip("soundfile")
+    sf.write(mix, np.zeros(RATE * 3, dtype="float32"), RATE)      # 3 s against the stems' 2 s
+    root, _ = run_main(tmp_path, monkeypatch, stems)
+    assert "warning" in capsys.readouterr().out
+    assert v(audio_tracks(root)[-1], "Name/EffectiveName") == "REF"
