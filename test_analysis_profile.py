@@ -1287,3 +1287,138 @@ def test_drum_layer_our_post_roll_is_longer_so_identical_audio_read_early_keeps_
          "sources": {"master": d["ours"]["mix"], "toms": d["ours"]["toms"]}}
     toms = profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]["roles"][0]
     assert toms["readings"] == [] and toms["ours_hit"] is not None and toms["notes"] == [], toms
+
+
+# ------------------------------------------------- the drum layer by drum role (drums.json beside the stems)
+
+def role(name, times, named=True, reason=None, echo_of=None, echo_ms=None):
+    """A drums.json role as `roadie drums` writes it, the fields the profile reads."""
+    return {"name": name, "named": named, "reason": reason, "measured": len(times), "hit_times": sorted(times),
+            "echo_of": echo_of, "echo_ms": echo_ms}
+
+
+def write_drums_json(folder, stems, bleed=None):
+    """A drums.json in `folder` for {kind: (stem path, [roles])}, fresh for those files; `bleed` = {kind: [names]}."""
+    import json
+    rec = {"kind": "drum_roles", "version": 1,
+           "inputs": [{"name": p.name, "size": p.stat().st_size, "mtime": round(p.stat().st_mtime, 3)} for p, _ in stems.values()],
+           "stems": {k: {"file": p.name, "roles": rs, "bleed": [{"name": b} for b in (bleed or {}).get(k, [])]}
+                     for k, (p, rs) in stems.items()}}
+    (pathlib.Path(folder) / "drums.json").write_text(json.dumps(rec))
+
+
+def one_stem_by_role(tmp_path, kind, ref_x, our_x, roles=None, bleed=(), bars_n=4):
+    """(profile, the section's drums layer, markdown) for one drum stem at 120 BPM, one section from 0.5 s, read at
+    the same offset; `roles` written as the reference's drums.json (none: no drums.json)."""
+    d = {}
+    for side, x in (("ref", ref_x), ("ours", our_x)):
+        f = tmp_path / side
+        f.mkdir(parents=True)
+        d[side] = {kind: write(f, kind + ".wav", stereo(x)), "mix": write(f, "mix.wav", stereo(x))}
+    if roles is not None:
+        write_drums_json(tmp_path / "ref", {kind: (d["ref"][kind], roles)}, {kind: list(bleed)})
+    secs = [{"name": "K", "start_bar": 0, "bars": bars_n}]
+    prof = profile.reference_profile(d["ref"]["mix"], {kind: d["ref"][kind]}, 120.0, 0.5, secs)
+    m = {"tempo": 120.0, "offset_s": 0.5, "sections": secs, "sources": {"master": d["ours"]["mix"], kind: d["ours"][kind]}}
+    r = profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")
+    return prof, r["sections"][0]["drums"], pathlib.Path(r["md_path"]).read_text()
+
+
+@pytest.mark.parametrize("shift", [0.005, -0.005])
+def test_drum_layer_by_role_identical_audio_shifted_5_ms_gives_no_readings(tmp_path, shift):
+    """test_drum_layer_identical_audio_shifted_5_ms_gives_no_readings with a drums.json: one role per stem, each
+    compared on its own hits, the same hit on both sides, no readings and no notes."""
+    ref = drum_pattern(tmp_path, "ref", 0.0)
+    ours = drum_pattern(tmp_path, "ours", 0.0)
+    write_drums_json(tmp_path / "ref", {
+        "kick": (ref["kick"], [role("kick", [0.5 + b * 0.5 - 0.003 for b in range(32)])]),
+        "snare": (ref["snare"], [role("snare", [0.5 + (2 * b + 1) * 0.5 for b in range(16)])]),
+        "hh": (ref["hh"], [role("hh offbeat", [0.5 + b * 0.25 for b in range(64)])])})
+    prof = profile.reference_profile(ref["mix"], {r: ref[r] for r in ("kick", "snare", "hh")}, 120.0, 0.5,
+                                     [{"name": "K", "start_bar": 0, "bars": 4}])
+    assert set(prof["drum_roles"]) == {"kick", "snare", "hh"} and prof["notes"] == [], prof["notes"]
+    m = {"tempo": 120.0, "offset_s": 0.5 + shift, "sections": [{"name": "K", "start_bar": 0, "bars": 4}],
+         "sources": {"master": ours["mix"], **{r: ours[r] for r in ("kick", "snare", "hh")}}}
+    drums = profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")["sections"][0]["drums"]
+    assert [(d["role"], d["name"]) for d in drums["roles"]] == [("kick", "kick"), ("snare", "snare"), ("hh", "hh offbeat")]
+    assert drums["notes"] == []
+    for d in drums["roles"]:
+        assert d["readings"] == [] and d["ours_hit"] is not None and d["notes"] == [], d
+        assert abs(d["ours_at_ms"] - d["reference_at_ms"] + 1000 * shift) <= 12, d
+
+
+def test_drum_layer_by_role_a_tom_bled_into_the_kick_stem_is_not_the_kick(tmp_path):
+    """The reference's kick stem opens the section with a tom (100 Hz) bled in, as loud and as roomy as the kicks
+    (60 Hz) that follow on every other beat; ours is the kicks alone. By stem the tom, the earliest typical hit, is
+    "the kick"; by role (drums.json: the kick's hits, the tom a bleed group) the reference's hit is a kick, at the
+    same place as ours, and nothing differs."""
+    beats = [0.5 + b * 0.5 for b in range(1, 16)]
+    total = 0.5 + 8.0 + 1.0
+    kicks = 0.8 * hit_train(60, 0.05, beats, total)
+    ref_x = kicks + 0.8 * hit_train(100, 0.05, [0.5], total)
+    _, by_stem, _ = one_stem_by_role(tmp_path / "a", "kick", ref_x, kicks)
+    assert abs(by_stem["roles"][0]["reference_at_ms"]) <= 5, by_stem                  # the tom, read as the kick
+    assert "compared by stem" in by_stem["notes"][0]
+    _, drums, _ = one_stem_by_role(tmp_path / "b", "kick", ref_x, kicks, roles=[role("kick", beats)], bleed=["kick 2"])
+    (kick,) = drums["roles"]
+    assert kick["name"] == "kick" and abs(kick["reference_at_ms"] - 500) <= 5, kick
+    assert kick["readings"] == [] and kick["notes"] == [] and abs(kick["ours_at_ms"] - kick["reference_at_ms"]) <= 1, kick
+    assert drums["notes"] == ["kick: bleed (another stem's sound leaking in), never compared: kick 2"]
+
+
+def test_drum_layer_by_role_an_offbeat_hat_and_a_16th_hat_are_two_entries_each_at_its_place(tmp_path):
+    """One hat stem, two sounds: an offbeat hat (8 kHz, steps 2, 6, 10, 14) and a shorter, quieter 16th hat (11 kHz,
+    the odd 16ths). Two roles, two entries, each the clean hit of its own role compared with ours at the same place;
+    the neutral name shows its reason in the markdown."""
+    total = 0.5 + 8.0 + 1.0
+    off = [0.5 + b * 0.5 + 0.25 for b in range(16)]
+    odd = [0.5 + b * 0.25 + 0.125 for b in range(32)]
+    x = 0.3 * hit_train(8000, 0.012, off, total) + 0.2 * hit_train(11000, 0.006, odd, total)
+    roles = [role("hh offbeat", off), role("hh 2", odd, named=False, reason="not named: stability 0.71 is under 0.75")]
+    _, drums, md = one_stem_by_role(tmp_path, "hh", x, x, roles=roles)
+    a, b = drums["roles"]
+    assert (a["name"], b["name"]) == ("hh offbeat", "hh 2") and b["name_reason"].startswith("not named")
+    for d, period, at in ((a, 500, 250), (b, 250, 125)):         # the offbeat hat on an offbeat, the other on an odd 16th
+        assert d["readings"] == [] and d["notes"] == [] and d["ours_hit"] is not None, d
+        assert abs(d["reference_at_ms"] % period - at) <= 3 and abs(d["ours_at_ms"] - d["reference_at_ms"]) <= 1, d
+    assert "- hh offbeat: none" in md and "- hh 2 (neutral name: not named: stability 0.71 is under 0.75): none" in md
+
+
+def test_drum_layer_by_role_an_echo_is_listed_with_its_parent_and_not_compared(tmp_path):
+    total = 0.5 + 8.0 + 1.0
+    hits = [0.5 + (2 * b + 1) * 0.5 for b in range(8)]
+    x = 0.6 * hit_train(200, 0.025, hits, total) + 0.15 * hit_train(200, 0.025, [t + 0.150 for t in hits], total)
+    roles = [role("snare", hits), role("echo of snare +150 ms", [t + 0.150 for t in hits], named=False,
+                                       reason="an echo of snare", echo_of="snare", echo_ms=150.0)]
+    _, drums, md = one_stem_by_role(tmp_path, "snare", x, x, roles=roles)
+    sn, echo = drums["roles"]
+    assert sn["name"] == "snare" and sn["readings"] == [] and sn["ours_hit"] is not None and sn["notes"] == [], sn
+    assert echo["echo_of"] == "snare" and echo["echo_ms"] == 150.0 and echo["readings"] == [] and echo["ours_hit"] is None
+    assert echo["notes"] == ["an echo of snare, 150 ms after it: listed, not compared"]
+    assert "- echo of snare +150 ms (snare stem): an echo of snare, 150 ms after it" in md
+
+
+def test_drum_layer_a_stale_drums_json_falls_back_to_the_stem_with_a_note(tmp_path):
+    import os
+    total = 0.5 + 8.0 + 1.0
+    beats = [0.5 + b * 0.5 for b in range(16)]
+    x = 0.8 * hit_train(60, 0.05, beats, total)
+    d = tmp_path / "ref"
+    d.mkdir()
+    kick, mix = write(d, "kick.wav", stereo(x)), write(d, "mix.wav", stereo(x))
+    write_drums_json(d, {"kick": (kick, [role("kick", beats)])})
+    st = kick.stat()
+    os.utime(kick, (st.st_atime, st.st_mtime + 10))                     # re-rendered since drums.json was made
+    prof = profile.reference_profile(mix, {"kick": kick}, 120.0, 0.5, [{"name": "K", "start_bar": 0, "bars": 4}])
+    assert "drum_roles" not in prof
+    assert any("is stale: kick.wav changed" in n and "compares kick by stem" in n for n in prof["notes"]), prof["notes"]
+    m = {"tempo": 120.0, "offset_s": 0.5, "sections": [{"name": "K", "start_bar": 0, "bars": 4}],
+         "sources": {"master": str(mix), "kick": str(kick)}}
+    r = profile.session_compare(m, reference=prof, out_dir=tmp_path / "out")
+    drums = r["sections"][0]["drums"]
+    assert [sorted(e) for e in drums["roles"]] == [sorted(["role", "ours_hit", "reference_hit", "readings", "notes",
+                                                           "ours_at_ms", "reference_at_ms"])]
+    assert drums["roles"][0]["readings"] == [] and drums["roles"][0]["notes"] == []
+    assert drums["notes"] == ["kick: compared by stem (one typical hit of the whole stem), not by drum role: the profile "
+                              "has no drum roles for it (it was built without a fresh drums.json beside its stems)"]
+    assert "- kick: compared by stem" in pathlib.Path(r["md_path"]).read_text()

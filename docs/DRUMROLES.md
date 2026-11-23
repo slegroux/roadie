@@ -134,7 +134,7 @@ downbeat it came from, the sections as bar ranges after joining), `inputs` (each
 mtime: `roadie study show` says fresh or stale by name and size), `legend`, `notes`, `seconds`, `jobs`, `stage_seconds`, and
 per stem `roles`, `bleed`, `per_section` (hits per role in each section) and `notes`. Each role has `name`, `named`, `rule`,
 `reason`, `hits`, `bars_with`, `pattern`, `own_pattern`, `line`, `off_grid`, `late_ms`, `level_db`, `stability`, `separation`, `groups`,
-`variants`, `clip`, `clip_note` and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
+`variants`, `clip`, `clip_note`, `hit_times` (its hits' onsets, seconds from the start of the file; the reference profile reads them) and `per_section` (a list: `section`, `start_bar`, `bars`, `hits`, `bars_with`, `pattern`,
 `line`, only for the sections the role plays in). `drum_roles/<stem>-<role>.wav` is the role's clean hit (24-bit, the stem's
 rate); no clean hit, no file. A run writes the new clips first, then `drums.json` (by temp file and rename, so a reader never sees half of it), and last removes the clips the earlier `drums.json` listed and the new one does not.
 `roadie study show` prints each stem's roles with their pattern line when `drums.json` exists, and `study list` flags the
@@ -439,3 +439,22 @@ a neutral group. Why a group was not marked is in `mark_bleed`'s `why` and
 `evidence` for that group, not in `name_roles`: there its `reason` is the one
 for not being named (or "marked as bleed: ..." when it is).
 
+## In the comparison
+
+`reference_profile` (`roadie_analysis/profile.py`) reads the `drums.json` beside each drum stem of the reference
+(kick, toms, snare, hh, clap, rim; a stem given as one file) and never runs the analysis. When it is fresh (every input it
+records is there with the same size and an mtime within 2 s) and lists that file, the profile keeps the stem's roles of at
+least 4 measured hits (`drum_roles`: name, `named`, `reason`, `echo_of`, `echo_ms`, `may_be_one_sound_with`, `hit_times`)
+and the names of its bleed groups. `roadie drums` writes `hit_times` (each role's onsets in seconds from the start of the
+file) by default; on Glacier 3000 they make `drums.json` 246 KB instead of 180 KB. A missing or stale `drums.json`, or one
+made before hit times were written, is a line in the profile's `notes`, and that stem has no roles.
+
+`session_compare`'s drum layer then gives one entry per role with a hit in the paired bars, with its `name` (and
+`name_reason` when the name is neutral; the markdown prints both): the reference's hit is the clean hit of the section
+picked among that role's hits only (`oneshot.profile_array(..., among=...)`: a segment whose onset is within 25 ms of one
+of them), with the same cuts, pre-roll, post-roll and same-place rule as before, so a bled tom in the kick stem, the other
+hat of the hat stem or an echo is never "the kick", "the hat" or "the snare". A complete hit is still one not cut off by
+the next hit of any kind. An echo is listed with `echo_of`, `echo_ms` and a note, no readings; bleed groups are never
+compared and are named in the section's `drums.notes`. A stem without roles is compared as one stem, as before, and
+`drums.notes` says so. Limits: a role whose every hit in the section is cut off by the next hit (a 16th hat; Glacier's
+`hh 16th`) has no clean hit and gives a note, no readings; roles of fewer than 4 measured hits are not compared.

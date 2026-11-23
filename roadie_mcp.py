@@ -310,7 +310,13 @@ def session_compare(manifest: dict[str, Any] | str, reference: dict[str, Any] | 
     ours is the one at the same place in the section (within 30 ms) when there is
     one, else a hit rising within 30 ms of that place (noted), else our own with a
     note that the hits are not at the same place. A hit's earliness plus the
-    capture's read offset must stay within 20 ms. No clean hit on a side gives a note and no readings. `reference_stale` names profile
+    capture's read offset must stay within 20 ms. No clean hit on a side gives a note and no readings.
+    When the profile carries drum roles for a stem (a fresh drums.json was beside the reference's stems), that
+    stem gives one entry per role with a hit in the section, with its `name` (`hh offbeat`, `snare 2`) and, when
+    the name is neutral, `name_reason`: the reference's hit is a clean hit of that role only, ours the one at the
+    same place; an echo is listed (`echo_of`, `echo_ms`) with no readings, bleed groups are never compared and
+    are named in the section's `drums.notes`. Without roles the stem is compared as a whole, and `drums.notes`
+    says so. `reference_stale` names profile
     inputs that changed since it was built (a drum role whose stem changed is
     skipped). The numbers are measurements, not moves: the ear decides which
     gaps matter.
@@ -364,7 +370,11 @@ def reference_profile(mix: str, stems: dict[str, str | list[str]], tempo: float,
 
     Writes <mix name>.profile.json next to the mix (`out`: a .json path or a
     folder), which holds everything above plus each input's path, mtime and
-    size (session_compare reports in `reference_stale` any that changed since). This
+    size (session_compare reports in `reference_stale` any that changed since). When a
+    drums.json (`roadie drums` / drum_roles) sits beside a drum stem's file and is fresh for its
+    inputs, the profile keeps that stem's drum roles (`drum_roles`: names, hit times, echoes, bleed)
+    so session_compare compares drum sounds role by role; otherwise `notes` says why. It only reads
+    drums.json and never runs the drum analysis. This
     tool returns a summary: `json_path` (pass it to session_compare as `reference`),
     tempo, t0, `notes`, and per section the roles present, trace and absent.
     Local only."""

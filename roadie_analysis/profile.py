@@ -47,6 +47,7 @@ CAPTURE_IS_REF_WIDTH = 0.01  # its per-bar curve and bands agree within this and
 STALE_MTIME_S = 2.0        # an input whose mtime moved by less than this (a cloud re-sync) is not changed
 KICK_OUT_DB = 30.0         # the kick is out where it sits this far under the loudest other role
 DRUM_ROLES = ("kick", "toms", "snare", "hh", "clap", "rim")   # roles the drum layer reads
+ROLE_MIN_HITS = 4          # a drum role of fewer measured hits is not compared (drums.MIN_SHOWN: the table lists it as one line)
 
 
 def _level_db(x: np.ndarray) -> float:
@@ -129,6 +130,69 @@ def _input(p: pathlib.Path) -> dict:
     return {"path": str(p), "mtime": st.st_mtime, "size": st.st_size}
 
 
+def _drums_json(folder: pathlib.Path) -> tuple[dict | None, str | None]:
+    """(record, None) for the drums.json `roadie drums` wrote in `folder` when it is fresh (every input it
+    records is there with the same size and an mtime within STALE_MTIME_S) and has hit times; else (None, why)."""
+    import json
+    path = folder / "drums.json"
+    if not path.is_file():
+        return None, "no drums.json beside the drum stems in %s (`roadie drums` makes one)" % folder
+    try:
+        rec = json.loads(path.read_text())
+        assert rec["kind"] == "drum_roles" and isinstance(rec["stems"], dict) and isinstance(rec["inputs"], list)
+    except (OSError, ValueError, KeyError, TypeError, AssertionError):
+        return None, "%s is not a drums.json that `roadie drums` wrote" % path
+    changed = []
+    for it in rec["inputs"]:
+        f = folder / str(it.get("name"))
+        if not f.is_file() or f.stat().st_size != it.get("size") or abs(f.stat().st_mtime - float(it.get("mtime", 0))) > STALE_MTIME_S:
+            changed.append(str(it.get("name")))
+    if changed:
+        return None, "%s is stale: %s changed since it was made (run `roadie drums` again)" % (path, ", ".join(changed))
+    if any("hit_times" not in r for st in rec["stems"].values() for r in st.get("roles", [])):
+        return None, "%s has no hit times: it was made before `roadie drums` wrote them (run it again)" % path
+    return rec, None
+
+
+def _drum_roles_of(files: dict) -> tuple[dict, list]:
+    """({stem: roles}, notes) for the reference's drum stems (those of DRUM_ROLES made of one file) from the
+    drums.json beside each, when it is fresh and lists that file: per stem the file, the drums.json, the roles of
+    at least ROLE_MIN_HITS measured hits (name, named, reason, measured, echo_of, echo_ms, may_be_one_sound_with,
+    hit_times: onsets in seconds from the start of the file), how many smaller ones were left out, and the names
+    of the bleed groups. Only reads the file: the analysis is `roadie drums`, a heavy job. Notes say why a drum
+    stem has no roles."""
+    out, notes, seen = {}, [], {}
+    for kind in DRUM_ROLES:
+        if kind not in files:
+            continue
+        if len(files[kind]) != 1:
+            notes.append("drum stem %r is summed from %d files: no drum roles for it" % (kind, len(files[kind])))
+            continue
+        p = files[kind][0]
+        if p.parent not in seen:
+            seen[p.parent] = _drums_json(p.parent)
+        rec, why = seen[p.parent]
+        if rec is None:
+            continue
+        stem = next((st for st in rec["stems"].values() if st.get("file") == p.name), None)
+        if stem is None:
+            notes.append("drum stem %r: drums.json in %s has no stem %s: no drum roles for it" % (kind, p.parent, p.name))
+            continue
+        keep = [r for r in stem["roles"] if r["measured"] >= ROLE_MIN_HITS]
+        out[kind] = {"file": p.name, "drums_json": str(p.parent / "drums.json"),
+                     "roles": [{"name": r["name"], "named": r["named"], "reason": r["reason"], "measured": r["measured"],
+                                "echo_of": r.get("echo_of"), "echo_ms": r.get("echo_ms"),
+                                "may_be_one_sound_with": r.get("may_be_one_sound_with", []), "hit_times": r["hit_times"]}
+                               for r in keep],
+                     "small": len(stem["roles"]) - len(keep), "bleed": [b["name"] for b in stem.get("bleed", [])]}
+    kinds = [k for k in DRUM_ROLES if k in files and k not in out]
+    for folder, (rec, why) in seen.items():
+        if rec is None:
+            notes.append("%s; the drum layer compares %s by stem" % (why, ", ".join(
+                k for k in kinds if files[k][0].parent == folder)))
+    return out, notes
+
+
 def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: float, sections: list,
                       beats_per_bar: int = 4, out: str | pathlib.Path | None = None) -> dict:
     """Profile of a reference track and its stems, per section; written as JSON.
@@ -152,6 +216,12 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
     before its line, else on the line (the mix's bands, width and LUFS use the plain window). Files must share one sample rate
     (refused otherwise); of different lengths they are trimmed to the shortest
     and `notes` says so.
+
+    Drum roles: when a drums.json (`roadie drums`) sits beside a drum stem's file (one of DRUM_ROLES, made of one
+    file), is fresh for its inputs (size, and mtime within STALE_MTIME_S) and has hit times, the profile carries
+    that stem's roles under `drum_roles` (see _drum_roles_of) and session_compare's drum layer compares role by
+    role. Otherwise `notes` says why and that stem is compared as a whole. This only reads drums.json; it never
+    runs the drum analysis.
 
     Writes <mix stem>.profile.json next to the mix (`out`: a file path ending
     in .json, or a folder) and returns the profile with its `json_path`. The
@@ -208,6 +278,8 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         raise ValueError("the files are %.2f s long but the sections run to %.2f s" % (n / sr, end_s))
     if "kick" not in files:
         notes.append("no kick stem: levels against the kick are left out")
+    drum_roles, drum_notes = _drum_roles_of(files)
+    notes += drum_notes
 
     def span(sec):
         a = t0 + sec["start_bar"] * bar_s
@@ -275,6 +347,8 @@ def reference_profile(mix: str | pathlib.Path, stems: dict, tempo: float, t0: fl
         "sections": [{"name": nm, "start_bar": sec["start_bar"], "bars": sec["bars"], "mix": mix_rows[i],
                       "stems_sum": sums[i], "roles": {role: role_rows[role][i] for role in files}}
                      for i, (nm, sec) in enumerate(zip(names, sections))]}
+    if drum_roles:
+        profile["drum_roles"] = drum_roles
     dest = pathlib.Path(out).expanduser() if out else mixp.parent
     if dest.is_dir() or not str(dest).lower().endswith(".json"):
         dest = dest / (mixp.stem + ".profile.json")
@@ -340,6 +414,11 @@ def _check_profile(prof: dict) -> None:
                 if not e["absent"]:
                     need(isinstance(e["trace"], bool) and num(e["level_db"]) and "width" in e)
                     need(all(name in e["bands_db"] for name, _, _ in BANDS))
+        for st in prof.get("drum_roles", {}).values():
+            need(isinstance(st["bleed"], list) and isinstance(st["roles"], list))
+            for r in st["roles"]:
+                need(isinstance(r["name"], str) and isinstance(r["named"], bool) and "reason" in r and "echo_of" in r)
+                need(all(num(t) for t in r["hit_times"]))
     except (KeyError, TypeError, AttributeError, IndexError):
         raise ValueError("the reference profile is incomplete or malformed: rebuild it with reference_profile")
 
@@ -592,105 +671,161 @@ def _drum_layer(prof: dict, psec: dict, fb: int, sec: dict, audio: dict, sr: int
     was picked in does not change its reading; `ours_at_ms` and `reference_at_ms` are those onsets. The
     reference stems are read again from the profile's paths, only the span needed; a role whose
     stems changed or are missing since the profile is skipped. Any failure on one role is that
-    role's note."""
+    role's note.
+
+    When the profile carries drum roles for a stem (`drum_roles`, from a fresh drums.json), that stem
+    gives one entry per role that has a hit in the paired bars, with its `name` (and `named`,
+    `name_reason`): the reference's hit is the clean hit among that role's hits (oneshot's `among`), so
+    another role's hit, an echo or a bleed group's hit is never it; ours is the one at the same place, as
+    above. An echo role is listed with `echo_of` and `echo_ms` and a note, no readings; bleed groups are
+    not roles and are named in the layer's `notes`. A stem without roles is compared as one, and the
+    layer's `notes` say so."""
     from . import oneshot
     n = sec["bars"]
     pbar = float(prof["beats_per_bar"]) * 60.0 / float(prof["tempo"])
     r0 = prof["t0"] + (psec["start_bar"] + fb) * pbar
     rrate = prof["sample_rate"]
-    out = []
+    droles = prof.get("drum_roles") or {}
+    out, notes, by_stem = [], [], []
     for role in DRUM_ROLES:
         if role not in audio or role not in prof["inputs"]["stems"]:
             continue
         entry = {"role": role, "ours_hit": None, "reference_hit": None, "readings": [], "notes": []}
-        out.append(entry)
+        dr = droles.get(role)
+        if dr is None:
+            by_stem.append(role)
+            out.append(entry)
+        pr = presence.get(role, {})
         try:
             if role in stale:
                 entry["notes"].append("a stem of this role changed or is missing since the profile was built: skipped")
-                continue
-            pr = presence.get(role, {})
-            if pr.get("reference") != "present" or pr.get("ours") != "present":
+            elif pr.get("reference") != "present" or pr.get("ours") != "present":
                 entry["notes"].append("not present on both sides in these bars (reference %s, ours %s): skipped"
                                       % (pr.get("reference") or "-", pr.get("ours") or "-"))
-                continue
-            # a beat of pre-roll and post-roll, each ending EDGE_S short of the beat line, where hits that start a
-            # few ms early sit; ours runs NEAR_S longer than the reference's, so a hit of the same audio read up to
-            # NEAR_S apart never has less room to fall on our side than on the reference's
-            edge = GRID_LEAD_S + oneshot.NEAR_S
-            pbeat = pbar / prof["beats_per_bar"]
-            got = _read_span(prof["inputs"]["stems"][role], rrate, r0 - pbeat - edge, r0 + n * pbar + pbeat - edge)
-            if got is None:
-                entry["notes"].append("the reference stem does not reach these bars")
-                continue
-            ref_x, ref_start = got
-            ref_pre = r0 - ref_start
-            profs, errs = {}, []
-            try:
-                profs["reference"] = oneshot.profile_array(
-                    ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S))
-            except ValueError as e:
-                errs.append("the reference: %s" % e)
-            a0 = max(0, int(round((t0 - bar_s / beats - edge) * sr)))
-            a1 = min(len(audio[role][0]), int(round((t0 + n * bar_s + bar_s / beats - GRID_LEAD_S) * sr)))
-            our_x, our_pre = to_stereo(audio[role][0][a0:a1]), t0 - a0 / sr
-            near = None
-            if "reference" in profs:
-                pos = profs["reference"]["onset_ms"] / 1000.0 - ref_pre          # s into the section, reference time
-                near = our_pre + pos * bar_s / pbar
-            try:
-                profs["ours"] = oneshot.profile_array(
-                    our_x, sr, hit="clean", within=(our_pre - GRID_LEAD_S, our_pre + n * bar_s - GRID_LEAD_S), near=near)
-            except ValueError as e:
-                errs.append("ours: %s" % e)
-
-            if "reference" in profs:
-                rp_ = profs["reference"]
-                ons = rp_["onsets_ms"]
-                # the reference slice does not move with the capture's offset, so its hit's length (to the next
-                # onset) is the one both cuts use: the same audio gives the same two cuts at any offset
-                length = ons[rp_["hit"] + 1] / 1000.0 - rp_["onset_ms"] / 1000.0 - 0.001 if rp_["hit"] + 1 < len(ons) else None
-                ref_cut, ref_on = oneshot.hit_cut(ref_x, rrate, rp_["onset_ms"] / 1000.0, length)
-                if ref_on is not None:           # positions are reported where the cuts found the onsets
-                    pos = ref_on - ref_pre
-                same_place = "ours" in profs and abs(profs["ours"]["onset_ms"] / 1000.0 - near) <= oneshot.NEAR_S + 0.0005
-                our_cut, our_at = None, None
-                if same_place:
-                    our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
-                    our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
-                else:
-                    # our own segmentation did not offer a complete hit there (its thresholds follow the slice's
-                    # loudest hit, and a fast pattern splits differently): look for the hit at that place anyway,
-                    # and take it only if it rises out of what comes before it there, not 30 ms or more away
-                    cut, on = oneshot.hit_cut(our_x, sr, near, length)
-                    win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
-                    if (on is not None and abs(on - near) <= oneshot.NEAR_S and len(win)
-                            and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20)):
-                        our_cut, our_at = cut, on
-                        errs = [e for e in errs if not e.startswith("ours:")]
-                        entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
-                                              "not offer a complete hit there")
-                    elif "ours" in profs:
-                        our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
-                        our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
-                        entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into "
-                                              "the section, ours %.0f ms; the readings compare different hits"
-                                              % (pos * 1000, (our_at - our_pre) * 1000))
-                if our_cut is not None:          # a cut that reached the end of its slice: both as long as the shorter
-                    dur = min(len(ref_cut) / rrate, len(our_cut) / sr)
-                    ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
-                entry["notes"] += errs
-                if our_cut is not None:
-                    entry["readings"] = oneshot.compare(oneshot.profile_array(our_cut, sr, hit=0, single=True),
-                                                        oneshot.profile_array(ref_cut, rrate, hit=0, single=True))["readings"]
-                    entry["ours_hit"] = profs["ours"]["hit"] if "ours" in profs and same_place else None
-                    entry["reference_hit"] = profs["reference"]["hit"]
-                    entry["ours_at_ms"], entry["reference_at_ms"] = round((our_at - our_pre) * 1000, 1), round(pos * 1000, 1)
             else:
-                entry["notes"] += errs
+                # a beat of pre-roll and post-roll, each ending EDGE_S short of the beat line, where hits that start a
+                # few ms early sit; ours runs NEAR_S longer than the reference's, so a hit of the same audio read up to
+                # NEAR_S apart never has less room to fall on our side than on the reference's
+                edge = GRID_LEAD_S + oneshot.NEAR_S
+                pbeat = pbar / prof["beats_per_bar"]
+                got = _read_span(prof["inputs"]["stems"][role], rrate, r0 - pbeat - edge, r0 + n * pbar + pbeat - edge)
+                if got is None:
+                    entry["notes"].append("the reference stem does not reach these bars")
+                else:
+                    ref_x, ref_start = got
+                    ref_pre = r0 - ref_start
+                    a0 = max(0, int(round((t0 - bar_s / beats - edge) * sr)))
+                    a1 = min(len(audio[role][0]), int(round((t0 + n * bar_s + bar_s / beats - GRID_LEAD_S) * sr)))
+                    our_x, our_pre = to_stereo(audio[role][0][a0:a1]), t0 - a0 / sr
         except Exception as e:                    # one role failing must not take the report down
             entry["readings"] = []
             entry["notes"].append("failed: %s: %s" % (type(e).__name__, e))
-    return {"roles": out}
+        if entry["notes"]:                        # skipped as a whole: one entry for the stem, roles or not
+            if dr is not None:
+                out.append(entry)
+            continue
+        if dr is None:
+            _drum_entry(entry, None, oneshot, ref_x, rrate, ref_pre, our_x, sr, our_pre, n, pbar, bar_s)
+            continue
+        if dr["bleed"]:
+            notes.append("%s: bleed (another stem's sound leaking in), never compared: %s" % (role, ", ".join(dr["bleed"])))
+        played = 0
+        for r in dr["roles"]:
+            times = [t - ref_start for t in r["hit_times"] if r0 - GRID_LEAD_S <= t < r0 + n * pbar - GRID_LEAD_S]
+            if not times:
+                continue
+            played += 1
+            e = {"role": role, "name": r["name"], "named": r["named"], "name_reason": None if r["named"] else r["reason"],
+                 "ours_hit": None, "reference_hit": None, "readings": [], "notes": []}
+            out.append(e)
+            if r["echo_of"] is not None:
+                e["echo_of"], e["echo_ms"] = r["echo_of"], r["echo_ms"]
+                e["name_reason"] = None
+                e["notes"].append("an echo of %s, %.0f ms after it: listed, not compared" % (r["echo_of"], r["echo_ms"]))
+                continue
+            if r.get("may_be_one_sound_with"):
+                e["notes"].append("may be one sound with %s (drums.json: not compared, too few clean hits on one side)"
+                                  % ", ".join(r["may_be_one_sound_with"]))
+            _drum_entry(e, times, oneshot, ref_x, rrate, ref_pre, our_x, sr, our_pre, n, pbar, bar_s)
+        if not played:
+            entry["notes"].append("no drum role of this stem has a hit in these bars (drums.json)")
+            out.append(entry)
+    if by_stem:
+        notes.append("%s: compared by stem (one typical hit of the whole stem), not by drum role: the profile has no "
+                     "drum roles for %s (it was built without a fresh drums.json beside its stems)"
+                     % (", ".join(by_stem), "it" if len(by_stem) == 1 else "them"))
+    return {"roles": out, "notes": notes}
+
+
+def _drum_entry(entry: dict, among: list | None, oneshot, ref_x, rrate: int, ref_pre: float, our_x, sr: int,
+                our_pre: float, n: int, pbar: float, bar_s: float) -> None:
+    """Fill one drum-layer entry: the reference's clean hit in the section (with `among`, among those times,
+    seconds into ref_x: one role's hits), ours at the same place, and oneshot.compare's readings on cuts made
+    from the two hits (see _drum_layer). Any failure is the entry's note."""
+    try:
+        profs, errs = {}, []
+        try:
+            profs["reference"] = oneshot.profile_array(
+                ref_x, rrate, hit="clean", within=(ref_pre - GRID_LEAD_S, ref_pre + n * pbar - GRID_LEAD_S), among=among)
+        except ValueError as e:
+            errs.append("the reference: %s" % e)
+        near = None
+        if "reference" in profs:
+            pos = profs["reference"]["onset_ms"] / 1000.0 - ref_pre          # s into the section, reference time
+            near = our_pre + pos * bar_s / pbar
+        try:
+            profs["ours"] = oneshot.profile_array(
+                our_x, sr, hit="clean", within=(our_pre - GRID_LEAD_S, our_pre + n * bar_s - GRID_LEAD_S), near=near)
+        except ValueError as e:
+            errs.append("ours: %s" % e)
+
+        if "reference" in profs:
+            rp_ = profs["reference"]
+            ons = rp_["onsets_ms"]
+            # the reference slice does not move with the capture's offset, so its hit's length (to the next
+            # onset) is the one both cuts use: the same audio gives the same two cuts at any offset
+            length = ons[rp_["hit"] + 1] / 1000.0 - rp_["onset_ms"] / 1000.0 - 0.001 if rp_["hit"] + 1 < len(ons) else None
+            ref_cut, ref_on = oneshot.hit_cut(ref_x, rrate, rp_["onset_ms"] / 1000.0, length)
+            if ref_on is not None:           # positions are reported where the cuts found the onsets
+                pos = ref_on - ref_pre
+            same_place = "ours" in profs and abs(profs["ours"]["onset_ms"] / 1000.0 - near) <= oneshot.NEAR_S + 0.0005
+            our_cut, our_at = None, None
+            if same_place:
+                our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
+                our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
+            else:
+                # our own segmentation did not offer a complete hit there (its thresholds follow the slice's
+                # loudest hit, and a fast pattern splits differently): look for the hit at that place anyway,
+                # and take it only if it rises out of what comes before it there, not 30 ms or more away
+                cut, on = oneshot.hit_cut(our_x, sr, near, length)
+                win = our_x[max(0, int((near - oneshot.NEAR_S) * sr)):int((near + oneshot.NEAR_S) * sr + 1)]
+                if (on is not None and abs(on - near) <= oneshot.NEAR_S and len(win)
+                        and np.abs(win).max() >= np.abs(our_x).max() * 10 ** (-30 / 20)):
+                    our_cut, our_at = cut, on
+                    errs = [e for e in errs if not e.startswith("ours:")]
+                    entry["notes"].append("ours: measured at the reference's place; our own segmentation did "
+                                          "not offer a complete hit there")
+                elif "ours" in profs:
+                    our_cut, on = oneshot.hit_cut(our_x, sr, profs["ours"]["onset_ms"] / 1000.0, length)
+                    our_at = profs["ours"]["onset_ms"] / 1000.0 if on is None else on
+                    entry["notes"].append("the hits are not at the same place: the reference's is %.0f ms into "
+                                          "the section, ours %.0f ms; the readings compare different hits"
+                                          % (pos * 1000, (our_at - our_pre) * 1000))
+            if our_cut is not None:          # a cut that reached the end of its slice: both as long as the shorter
+                dur = min(len(ref_cut) / rrate, len(our_cut) / sr)
+                ref_cut, our_cut = ref_cut[:int(round(dur * rrate))], our_cut[:int(round(dur * sr))]
+            entry["notes"] += errs
+            if our_cut is not None:
+                entry["readings"] = oneshot.compare(oneshot.profile_array(our_cut, sr, hit=0, single=True),
+                                                    oneshot.profile_array(ref_cut, rrate, hit=0, single=True))["readings"]
+                entry["ours_hit"] = profs["ours"]["hit"] if "ours" in profs and same_place else None
+                entry["reference_hit"] = profs["reference"]["hit"]
+                entry["ours_at_ms"], entry["reference_at_ms"] = round((our_at - our_pre) * 1000, 1), round(pos * 1000, 1)
+        else:
+            entry["notes"] += errs
+    except Exception as e:                    # one role failing must not take the report down
+        entry["readings"] = []
+        entry["notes"].append("failed: %s: %s" % (type(e).__name__, e))
 
 
 def session_compare(manifest: dict | str | pathlib.Path, reference: dict | str | pathlib.Path,
@@ -827,11 +962,16 @@ def _drums_markdown(r: dict) -> list:
         if "drums" not in s:
             continue
         lines += ["### %s" % s["name"], ""]
+        lines += ["- %s" % x for x in s["drums"].get("notes", [])]
         if not s["drums"]["roles"]:
             lines += ["- no drum role is in both the manifest and the profile", ""]
         for d in s["drums"]["roles"]:
             body = "; ".join(d["readings"]) or ("none" if not d["notes"] else "")
-            lines.append("- %s: %s" % (d["role"], "; ".join(x for x in [body] + d["notes"] if x)))
+            label = d["role"]
+            if "name" in d:                       # one drum role of the stem (drums.json)
+                label = d["name"] if d["name"].startswith(d["role"]) else "%s (%s stem)" % (d["name"], d["role"])
+                label += " (neutral name: %s)" % d["name_reason"] if d["name_reason"] else ""
+            lines.append("- %s: %s" % (label, "; ".join(x for x in [body] + d["notes"] if x)))
         lines.append("")
     return lines
 
