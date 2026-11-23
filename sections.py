@@ -921,6 +921,10 @@ def detect_transitions(stems_dir, sections, period, sr=ANALYSIS_SR,
             "kind": kind,
             "ratio": float(round(ratio, 2)),
             "into": sections[i].get("label", "?"),
+            # the counts behind the ratio: a median of 0 is floored at 0.5, so a ratio after a drumless section is
+            # twice the bar's hits, not a measure of how much busier it is
+            "median_hits": float(np.median(counts)),
+            "last_hits": int(last),
         })
     return out
 

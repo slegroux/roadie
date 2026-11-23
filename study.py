@@ -520,7 +520,8 @@ def load_study(name_or_path: str, roots=None) -> Study:
         else:
             layers["drums"] = unreadable("drums", path)
 
-    known = {stems_dir / "alignment.json", stems_dir / "sections.json", stems_dir / "drums.json", folder / "study.json"}
+    known = {stems_dir / "alignment.json", stems_dir / "sections.json", stems_dir / "drums.json", stems_dir / "micro.json",
+             folder / "study.json"}
     profiles, extras = [], []
     for p in _json_files(folder):
         if p in known or p.name == "study.json":      # a nested study.json marks a nested folder, it is no extra
@@ -893,7 +894,16 @@ def main(argv=None) -> int:
     ren.add_argument("--stamp", help="a name for the --write files (default: the date and time); they are created exclusively")
     ren.add_argument("--root", default="pcloud", help="the root label to plan for (default pcloud)")
     ren.add_argument("--out", help="write the table (markdown) to this file")
+    rep = sub.add_parser("report", help="one study's report as Markdown: structure, mix and micro, from the records (studyreport.py)")
+    rep.add_argument("name", nargs="?", help="a title under the studies root, or a path")
+    rep.add_argument("--artist", help="the artist report instead: every analysed study of this artist (`label:Artist` picks a root)")
+    rep.add_argument("--write", action="store_true", help="write report.md into the study folder, or _artist.md into the artist's "
+                                                         "(a pCloud study through rclone)")
+    rep.add_argument("--json", action="store_true", help="print the report's record as JSON")
     args = ap.parse_args(argv)
+    if args.cmd == "report":
+        import studyreport
+        return studyreport.main(args)
     if args.cmd == "rename":
         import studyrename
         return studyrename.main(args)

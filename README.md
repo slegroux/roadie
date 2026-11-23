@@ -46,6 +46,8 @@ roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the au
 | `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
 | `roadie study list\|show <name>` | the studies under the Studies folder with their bpm, key, Camelot code and what each has been analysed for (read-only, see [Reading a study](#reading-a-study)); `roadie study tag <name> --key Am` writes a study's own key and bpm | `study.py` |
 | `roadie key <study or stems folder>` | estimate the key from the bass and synths stems (an estimate, with a confidence; see [Reading a study](#reading-a-study)) | `roadie_analysis/key.py` |
+| `roadie study report <name> [--write] [--json]`, `--artist <name>` | one study's report as Markdown, from its records: bpm, key, grid reliability, section map, entries and exits, kick-outs, groove blocks, mix per section, the micro layer, and what is missing (see [Study reports and the micro layer](#study-reports-and-the-micro-layer)) | `studyreport.py` |
+| `roadie micro <study or stems folder>` | per section, what the bass, the synths, the vocal and the drums play at the scale of a bar; writes `micro.json` beside `drums.json` | `roadie_analysis/micro.py` |
 | `roadie stats` | runs and distinct tracks from the local usage log | — |
 | `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
 
@@ -344,6 +346,114 @@ second `roadie drums --no-write` took 41 s against 200 s, with the same record a
 - **Bypass:** `roadie drums <study> --no-cache`, `python -m roadie_analysis.drumstability <stems> --no-cache`, or
   `ROADIE_NO_CACHE=1` for everything (nothing is read or written).
 - **Clear it:** delete the folder (`rm -r ~/Library/Caches/roadie/drum-hits`); it is made again on the next run.
+
+## Study reports and the micro layer
+
+```bash
+roadie micro "Blomqvist/More"                 # writes micro.json beside drums.json; --json for the record, --no-write to only print
+roadie study report "Blomqvist/More"          # the report, Markdown on stdout
+roadie study report "Blomqvist/More" --write  # ...into report.md in the study folder
+roadie study report "Blomqvist/More" --json   # the record the Markdown is made from
+```
+
+**Macro is the structure, micro is each instrument's pattern at a small scale.** The report is built from the
+records only, nothing is measured: the study record (`roadie study show`), the structure `roadie arrangement ref`
+reads from `bar_activity` (groove blocks, each role's entry, the stretches it is out and its last bar, kick-outs,
+the labelled drops), the mix profile per section (the mix's level, LUFS and six bands, then each stem's level) and
+`micro.json`. From the track card (PR #6, folded in; `card.py`) it has an element map, a text grid with one column per
+4 bars (`█` plays throughout, `▒` in part, `·` not at all) from `bar_activity`, so bar by bar and not smoothed;
+"into each section", the fill or dropout in the bar before each change, which `roadie micro` measures from the drum
+parts (`sections.detect_transitions`, tuned on one track: none found means none found; micro.json keeps the hit
+counts, so drums coming back after a drumless section read as "drums come in (N hits; the section had none)" rather
+than a ratio of the floored median, and other ratios show up to "≥ 4×"); and observations (the longest stretch with
+nothing coming in or going out, the deepest breakdown under the loudest drop, mini-breaks of 4 bars or less, sections
+that are not a multiple of 8 bars, and a tempo-drift warning). The map is bar by bar; the observations read the
+presence despeckled to 4-bar runs as the section cuts are (#6's reading), so a one-bar vocal gap does not end a stretch.
+
+```
+bar     9†      41†     73†     105†    137†
+        || |Drop 1     |Br |Bu |Drop 2     |
+kick    ███████████████·······▒███████▒████··
+bass    █▒·████████████····█████████████████·
+hh      ███████████████····████████████████··
+synths  ·███████████████████████████████████·
+```
+*(Rodriguez Jr., Off Gerlach, rows cut: the breakdown at Live bar 69 and the drop at 101 match PR #6's by-ear check;
+`†` because its downbeat is chance-level.)* A part that is not on disk is listed as `missing: <layer>` with the command that makes it. The report
+is generated: a rebuild overwrites it, so notes belong in the vault.
+
+**Grid reliability.** Every bar position and every 16-step pattern counts from bar 1. When the downbeat is
+chance-level, there is no `alignment.json`, or the grid has a warp map (the tempo drifts; bars are placed at a
+constant tempo), the report says why at the top and marks each of those numbers with `†`; `micro.json` carries
+`reliable: false` on the grid and on every section.
+
+`roadie micro` uses the grid and sections of the stems folder, with bar 0 placed as `drums.json` places it (the
+downbeat moved back whole bars to the first bar line in the file). A stem plays in a bar by the rule
+`sections.json` uses; onsets count only there, and one within 30 % of a 16th of a line is on it (else off-grid,
+counted, never moved); an onset is the start of the rise before a spectral-flux peak (librosa's backtrack), since
+the peak itself comes late on a slow attack. Per section:
+
+- **bass** (`bass.flac`): the most common one-bar rhythm (`o..o o... o..o o...`, with its 16th steps `1, 4, 5, 9, 12,
+  13`) and its share of the bars, onsets per bar, the share of onsets on step 1 and on the 8th offbeats, the notes
+  (pyin per onset) as scale degrees of the study's key with their shares, the median register and range, the
+  number of pitch classes and the top one's share (`pedal` at 75 % or more, else `moving`), the duty (sounding
+  time per bar: `stabby` under 0.5, `continuous` from 0.8), and its mean level at each 16th of the bar over its
+  playing bars (the report lists the 16ths 6 dB or more under the loudest). A dip says the part is quieter there on
+  average, from a sidechain duck, the gap between notes or the tail of notes that start elsewhere; it does not say
+  which. A continuous bass with no note starts to count still shows one.
+- **synths** (`synths.wav`): the rhythm as for the bass, a chord per bar from chroma (major, minor, sus2, sus4, root
+  and fifth), named against the key (`i`, `VI`, `III`, `VII`, `i5`; upper case major); a chord lasts while its root
+  holds, so the progression, bars per chord and the distinct chords follow the root, and the pitch classes held in
+  90 % of the bars (a drone, or a tone the chords share). The progression is a loop of 2 to 4 chords: one at which
+  75 % of the changes equal the change that many before, or one followed in order through 75 % of the changes with
+  now and then a chord put in or left out, in at least two full passes; with neither, every change in order. Short
+  of an exact repeat, a loop must also be more loop-like than 95 % of 200 orderings of the same changes with no chord
+  twice in a row (a fixed seed, so a run is repeatable): three or four chords in any order often reach 75 % by chance.
+  A loop longer than half the section (`iv VI i VII iv VI`) counts only when every change repeats and another section
+  of the track plays the same loop twice through. One loop is written on the phase most sections start it on (`iv VI
+  i VII` throughout, not `i VII iv VI` in the one section that starts on `i`), so a section's progression need not
+  begin on its first chord; `micro.json` keeps the section's own rotation as `section_progression`.
+  **The stem holds leads and pads together**: the chords and rhythm are of both, and a lead line cannot be followed.
+- **vocals** (`vocals.flac`): the bars with the vocal, its share of the section, and the phrase starts as bar.beat
+  (a pickup shows as `.4`), found over the whole track so a phrase running over a section line starts only once.
+- **drums**: the roles of 4+ hits and their patterns from `drums.json`, not measured again. A hat's accent (the
+  loudest 16th of the beat) needs per-hit levels, which `drums.json` does not record: it is `missing`, with that
+  reason.
+- **variation** (bass and synths): the repeat period, the smallest of 1, 2, 4 or 8 bars at which 75 % of the bars
+  equal the bar that many before (read from at least 3 pairs of playing bars, else none: too few), and the bars that
+  break it.
+
+What cannot be measured is `null` with the reason in `notes`, never left empty. A study on the pCloud mount is
+never read or written through the mount: the stems and records are copied to a temp folder with `rclone copyto`
+(deleted after), and `micro.json` and `report.md` go back with `rclone copyto` and are read back and compared. The
+report says when `micro.json` is stale (another key, grid or section list, or a stem or record of another size than it
+was made from) and to re-run `roadie micro`.
+
+**The artist report.** `roadie study report --artist Blomqvist [--write] [--json]` (`label:Artist` picks a root)
+puts every analysed study of an artist side by side in `<Artist>/_artist.md`, written like `report.md` (rclone and a
+read-back on pCloud). It has one row per track (bpm, key and source, grid verdict, length, sections, Drop 2 / Drop 1,
+the longest kick-out, the bass entry, and from micro.json the bass type and duty, the synth loop with bars per chord,
+and the vocal share), then medians and ranges, then each kind of pattern in full across the tracks (bass held until
+Drop 1 or not, the kick-out's length class, Drop 2 against Drop 1, chord loops as numerals up to rotation, bars per
+chord, the bass type, drum-role names and lines, bass rhythms): every class with `N of M` and its tracks, `M` being the
+tracks that qualify (the layer it needs, a reliable grid for 16-step lines, a key that is not only `detected` for chord
+numerals: a detected key is to harmony what a chance-level downbeat is to bar 1; the key module has no confidence
+threshold, so every detected key counts as one), the tracks left out and why, and "not compared" when fewer than 2
+qualify. With a handful of tracks a coarse kind puts two in one class by construction: a class is a finding only
+against the library's rate. Then the layers each track lacks, with the command that makes them; a study that cannot be
+read is listed and counted (`N of M, K unreadable`).
+Aggregates are of two kinds. **Bar-1-dependent** ones leave out tracks with an unreliable grid (chance-level
+downbeat, warp map, no alignment.json): where section boundaries fall in their 8-bar phrase, 16-step patterns (bass
+rhythms, drum-role lines), the bass's share on step 1, vocal phrases on beat 1. **Shift-invariant** ones use every
+track, since a downbeat a beat or two off does not move them: section and kick-out lengths, Drop 2 / Drop 1, bars per
+chord, onsets per bar, duty, pedal or moving, chord loops as numerals, and positions given as a share of the track
+(they move by under a bar). Every row says how many tracks it used and which it left out.
+
+Known limits: the artist report counts study folders, so the same song kept under two folders (a re-split beside the
+original) counts twice; a section that switches from one chord loop to another halfway gets one progression (the one that fits
+best, or every change); drums.json joins sections under 8 bars, so both rows of a joined pair show the same drum
+roles (count them once when adding up); pyin's frames are 186 ms and centred, so a note's pitch is read with up to
+68 ms of the note before it in the first frames (the median over the note damps it).
 
 ## Heavy jobs queue
 
