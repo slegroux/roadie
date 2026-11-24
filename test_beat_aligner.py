@@ -768,14 +768,24 @@ class TestAlignmentCache:
             fh.write("{not json")
         assert ba.read_cache(d, fp) is None
 
-    def test_changed_stem_mtime_invalidates(self, tmp_path):
+    def test_a_changed_stem_mtime_keeps_the_cache(self, tmp_path):
+        """pCloud stamps an upload with the upload time: a study copied back
+        down has new mtimes and the same audio."""
         paths = self._paths(tmp_path)
         d = os.path.dirname(next(iter(paths.values())))
         fp = ba._cache_fingerprint(paths, None, "heuristic")
         ba.write_cache(d, fp, {"bpm": 125.003})
         os.utime(paths["bass"], (1_600_000_000, 1_600_000_000))
-        after = ba._cache_fingerprint(paths, None, "heuristic")
-        assert ba.read_cache(d, after) is None
+        assert ba.read_cache(d, ba._cache_fingerprint(paths, None, "heuristic")) == {"bpm": 125.003}
+
+    def test_a_cache_written_with_mtimes_still_matches(self, tmp_path):
+        paths = self._paths(tmp_path)
+        d = os.path.dirname(next(iter(paths.values())))
+        fp = ba._cache_fingerprint(paths, None, "heuristic")
+        old = {**fp, "stems": [s + [1_500_000_000] for s in fp["stems"]]}
+        ba.write_cache(d, old, {"bpm": 125.003, "period": 0.48, "grid_t0": 0.0, "downbeat_sec": 0.0})
+        assert ba.read_cache(d, fp)["bpm"] == 125.003
+        assert ba.cached_grid(d)["period"] == 0.48
 
     def test_changed_stem_size_invalidates(self, tmp_path):
         paths = self._paths(tmp_path)

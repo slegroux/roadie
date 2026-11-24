@@ -1099,16 +1099,19 @@ def _cache_fingerprint(paths, override_tempo, detector,
                        use_structural=True, tempo_check=True):
     """Identity of an analysis: the inputs plus every parameter that changes it.
 
-    Sizes and mtimes rather than content hashes — the stems are hundreds of MB
-    and hashing them would cost more than the analysis being cached. Basenames
+    Names and sizes rather than content hashes — the stems are hundreds of MB
+    and hashing them would cost more than the analysis being cached. No mtimes:
+    a cloud copy (pCloud stamps an upload with the upload time) changes them
+    without changing the audio, and the grid was then recomputed for every study
+    downloaded from the library. Basenames
     only, never absolute paths: yt2stems RENAMES the stems directory once it has
     a BPM to tag with, so a cache keyed on absolute paths would be invalidated
     by the very step that wrote it.
     """
     return {
         "version": CACHE_VERSION,
-        "stems": sorted([os.path.basename(p), os.path.getsize(p),
-                         int(os.stat(p).st_mtime)] for p in paths.values()),
+        "stems": sorted([os.path.basename(p), os.path.getsize(p)]
+                        for p in paths.values()),
         "override_tempo": override_tempo,
         "detector": detector,
         # Changes the ANSWER, not just the reporting — structure can override the
@@ -1119,8 +1122,27 @@ def _cache_fingerprint(paths, override_tempo, detector,
     }
 
 
+def _stems_id(fp):
+    """A fingerprint's stems as [name, size] pairs.
+
+    Caches written before mtimes left the fingerprint hold [name, size, mtime];
+    the mtime is dropped, so those caches still match their stems. None when
+    the entry is not a list of such rows."""
+    try:
+        return sorted([s[0], s[1]] for s in fp["stems"])
+    except (KeyError, TypeError, IndexError):
+        return None
+
+
+def _same_fingerprint(have, want):
+    if not isinstance(have, dict):
+        return False
+    rest = lambda fp: {k: v for k, v in fp.items() if k != "stems"}
+    return rest(have) == rest(want) and _stems_id(have) == _stems_id(want)
+
+
 def read_cache(stems_dir, fingerprint):
-    """Cached result for this exact fingerprint, or None."""
+    """Cached result for this fingerprint, or None."""
     path = os.path.join(stems_dir, CACHE_NAME)
     if not os.path.exists(path):
         return None
@@ -1129,7 +1151,7 @@ def read_cache(stems_dir, fingerprint):
             blob = json.load(fh)
     except (OSError, ValueError):
         return None
-    if blob.get("fingerprint") != fingerprint:
+    if not isinstance(blob, dict) or not _same_fingerprint(blob.get("fingerprint"), fingerprint):
         return None
     return blob.get("result")
 
@@ -1139,7 +1161,7 @@ def cached_grid(stems_dir):
 
     For the standalone section tools, which should snap to the grid the
     arrangement was built on. Matched on cache version and the stem files
-    (names, sizes, mtimes) only — NOT on detector or tempo override, because
+    (names and sizes) only — NOT on detector or tempo override, because
     the question here is "which grid did stems2live last use on this audio",
     whatever options it ran with. Stale or unreadable caches give None.
     """
@@ -1156,7 +1178,7 @@ def cached_grid(stems_dir):
         return None
     want = _cache_fingerprint(paths, None, DEFAULT_DETECTOR, True)
     have = blob.get("fingerprint") or {}
-    if have.get("version") != want["version"] or have.get("stems") != want["stems"]:
+    if have.get("version") != want["version"] or _stems_id(have) != _stems_id(want):
         return None
     res = blob.get("result") or {}
     if not all(k in res for k in ("period", "grid_t0", "downbeat_sec")):
@@ -1303,6 +1325,9 @@ def analyze_alignment(stems_dir_or_audio, override_tempo=None, detector=DEFAULT_
             cached = read_cache(stems_dir_or_audio, fingerprint)
             if cached is not None:
                 return cached
+            if os.path.exists(os.path.join(stems_dir_or_audio, CACHE_NAME)):
+                sys.stderr.write("%s does not match these stems or options: "
+                                 "computing the grid again\n" % CACHE_NAME)
 
     # Preferred audio for beat tracking: kick stem > drums stem > bass > full mix
     pref_order = ["drums_kick", "drums", "bass", "mix"]
