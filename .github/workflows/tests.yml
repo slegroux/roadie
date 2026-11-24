@@ -142,10 +142,23 @@ jobs:
       # point is the server-side moveto / check / read-back behaviour. A fake
       # would test the fake. Only lsf, moveto and copyto are used, all in the
       # Ubuntu package.
+      #
+      # Cached: on 2026-11-24 this step took 8 and 18 minutes on two runs (a slow package
+      # mirror) and each job hit its time limit before or during the tests. The action
+      # restores the installed files from the cache and only goes to apt when the package
+      # list or `version` changes. Bump `version` to force a fresh install.
       - name: System packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ffmpeg aubio-tools libsndfile1 rclone
+          version: 1
+
+      # A restored cache that left a tool out would turn into skipped tests, not a failure.
+      - name: Check the system packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg aubio-tools libsndfile1 rclone
+          ffmpeg -version | head -1
+          rclone version | head -1
+          command -v aubiotrack
 
       # VERSIONS ARE PINNED in requirements.txt — see the note there. The same
       # files install.sh builds a user's .venv from, so CI tests what users get.
