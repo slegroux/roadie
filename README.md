@@ -1,1087 +1,180 @@
-# Roadie
+<p align="center">
+  <img src="docs/logo.svg" alt="roadie" width="320">
+</p>
 
-*Formerly yt2live.*
+<p align="center">
+  <strong>From finished track to Live set.</strong><br>
+  Split a recording into stems and get a ready-to-study Ableton Live 12 arrangement.
+</p>
 
-**From finished track to Live set.** Roadie is stem separation for Ableton
-Live 12. Give it a recording of your own track or set, as a local file (or, as one
-more input, the URL of your own YouTube upload); it separates the audio into stems
-and builds the arrangement in your running Live session: one track per stem, on
-the bar line, ordered by frequency, colour-coded, levelled, with a locator per
-section. The stems are plain audio files any DAW can open; everything past the
-split is Ableton-only.
-
-Every default here was measured on real material, not taken from a benchmark
-leaderboard; where the two disagree, the measurement is documented alongside the
-setting. The calibration material was deep/melodic house, so that is where the
-defaults are known to hold. Each measurement is written down below so it can be
-re-derived for other material rather than trusted.
-
-```
-roadie split my-set.wav -o <dir> -s     # audio -> stems -> drum parts (-D: stems only)
-roadie load <dir>/<name>_stems          # -> Ableton, tempo measured from the audio
-```
-
-> **Use it on recordings you have the rights to.** A DJ set contains other
-> artists' music: stems you extract are for your own practice and analysis, not
-> for release. Downloading from YouTube is subject to YouTube's Terms of Service.
-> For your own uploads, YouTube Studio's download gives you the original file;
-> pass it to `roadie split` as a local file. `roadie split <url>` also accepts a
-> URL and runs `yt-dlp` on it, and what you point it at is your responsibility.
+<p align="center">
+  <a href="https://github.com/slegroux/roadie/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/slegroux/roadie/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="https://slegroux.github.io/roadie/"><img alt="site" src="https://img.shields.io/badge/site-slegroux.github.io%2Froadie-C93C25"></a>
+  <img alt="Python 3.13" src="https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white">
+  <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-000000?logo=abletonlive&logoColor=white">
+  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple">
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
+</p>
 
 ---
 
-## Commands
+Roadie takes a recording of your own track or set and does two things:
 
-| command | what it does | script |
-|---|---|---|
-| `roadie split <file\|url>` | audio → 44.1 kHz WAV → stems with `-s` (BS-Roformer-SW; `-m htdemucs_6s` for Demucs) → drum parts (skip with `-D`) | `yt2stems.sh` |
-| `roadie load <stems_dir>` | stems → the Live set that is open now | `stems2live.py` |
-| `roadie open <stems_dir>` | stems → a **new** Live project (copies a template `.als`, opens it, loads) | `stems2als.sh` |
-| `roadie sections <stems_dir>` | detect song sections, print locator positions | `sections.py` |
-| `roadie scenes <stems_dir>` | one Session View scene per section, one looping clip per stem | `session_view.py` |
-| `roadie als <stems_dir>` | stems → a Live project **file** (`.als`), written directly; Live need not be running | `als_writer.py` |
-| `roadie batch plan\|run\|verify-sources` | unattended overnight batch over many local files, stored on pCloud | `batch.py` |
-| `roadie stats` | runs and distinct tracks from the local usage log | — |
-| `roadie mcp` | MCP server (stdio) for the analysis tools below; an MCP client starts it | `roadie_mcp.py` |
+1. **Splits it** into stems (bass, drums, synths, vocals) and the drum kit into
+   kick, snare, toms, hats, ride and crash.
+2. **Builds the arrangement** in Live: one track per stem, on the bar line, at the
+   measured tempo, sorted low to high, colour-coded, 6 dB down, with a locator
+   per section.
 
-`roadie <command> --help` shows that command's own options. Every argument after
-the command passes through untouched, except that `split` turns a bare local path
-into `--file <path>`. The underlying scripts still work directly, under the same
-names without extension (`yt2stems`, `stems2live`, `stems2als`) once installed.
+The stems are plain audio files any DAW can open. Everything after the split is
+Ableton-only. *Roadie was formerly called yt2live.*
 
-## MCP server: analysis against a reference
-
-`roadie mcp` is an MCP server with four tools for the analysis that needs **a
-reference track, its stems or samples**. Measuring the Set on its own needs only
-Live and the Set's signal, and stays in Sideman's server: `audio_analyze`,
-`audio_compare`, and `mix_report` with no reference or an audio file as the
-reference. Register both:
+## Quick start
 
 ```bash
-claude mcp add --scope user sideman -- /path/to/sideman/.venv/bin/python -m mcp_server.server
-claude mcp add --scope user roadie -- "$PWD/roadie" mcp          # from this clone
+roadie split my-track.wav -s -o ~/Studies          # audio -> stems -> drum parts
+roadie load ~/Studies/my-track_124bpm_stems         # stems -> the Live set that is open
 ```
 
-| tool | what it does |
-|---|---|
-| `sample_analyze(source, hit=None)` | a drum one-shot in synth terms: envelope, pitch and its drop, harmonics, noise, click, bands, width |
-| `sample_compare(a, b, hit_a=None, hit_b=None)` | two hits compared, with one plain `readings` line per difference past its threshold |
-| `reference_profile(mix, stems, tempo, t0, sections, beats_per_bar=4, out=None)` | a reference track and its stems measured once per section; writes `<mix>.profile.json`, returns a summary |
-| `session_compare(manifest, reference, out_dir=None)` | a capture of the Set against a profile, per section: Sideman's mix report plus each element against the kick and each drum sound against the reference's; writes `mix_report.json` and `mix_report.md` |
+Don't want Live running? `roadie als <stems_dir>` writes a `.als` project file
+you can open later.
 
-The first three have the names, arguments and output of Sideman's tools of the
-same name; `session_compare` is what Sideman's `mix_report` returns when its
-`reference` is a profile, and refuses an audio file or no reference (that is
-Sideman's `mix_report`). The tools' docstrings are the full documentation; the
-model reads them. A `source` is a file path or an audio clip's LOM path (`live_set
-tracks 3 clip_slots 0 clip`): its `file_path` is read through
-`sideman.client.Live`, the only thing sent to Live. Everything else runs locally
-on the files.
+> [!IMPORTANT]
+> **Use it on recordings you have the rights to.** Stems extracted from a DJ set
+> are other artists' music: fine for practice and analysis, not for release.
+> `roadie split <url>` runs `yt-dlp`, which is subject to YouTube's Terms of
+> Service. For your own uploads, download the original from YouTube Studio and
+> pass the file instead.
 
-Roadie builds on Sideman here too: `roadie_analysis/` imports the measurement
-core from `sideman.listen` (and `session_compare` takes the plain report from it
-before adding its layers); nothing in Sideman imports Roadie. The server needs
-the `mcp` package, which `install.sh` installs from `requirements-mcp.txt`
-(every package pinned); without it `roadie mcp` exits with that hint.
+## Features
 
-`roadie als <stems_dir>` writes `<name>.als` next to the stems folder (`-o` to
-choose, `-f` to overwrite), and makes that folder a Live project (an empty
-`Ableton Project Info` folder), so ⌘S in Live saves the set in place. It copies the audio tracks of your empty template
-(`~/Music/Ableton/User Library/Templates/empty.als`, `--template` overrides), one
-per stem, each with a warped clip on the same bar line `roadie load` uses, the
-measured tempo, `--headroom` dB of fader, and a locator per detected section
-(`--no-locators` skips the detection). The `drums` composite is muted when the
-`drums_*` parts are there. `roadie sections` also saves `sections.json` into the
-stems folder (`--no-write` skips it).
-
-**Energy lanes.** `roadie als` also draws each stem's energy as automation under
-its clip. Every stem track gets an empty Audio Effect Rack named **Energy** (no
-chains, so the audio passes through untouched) whose Macro 1 carries the stem's
-mean power per bar: the top of the lane is the loudest bar of any stem, the bottom
-is 40 dB below it, so a quiet hat line reads as quiet next to the bass. The Main
-track gets the same lane for the whole mix, 12 dB deep, because a mastered track
-moves much less than a stem (on Off Gerlach 95% of bars sit within 6 dB of the
-loudest). The set opens in automation mode with each track showing its Energy
-lane, aligned with the clips and the locators (`A` toggles the view). The macro is mapped to nothing, so the lanes are a
-read-only map; `--no-energy` leaves them out. Reading the stems adds about 8 s
-on a 5-minute track.
-
-The `.als` format is gzipped XML. The track and clip layout match a project Live
-12.2.7 saved itself. Live also stores each sample's size and a 16-bit checksum
-(`OriginalCrc`, CRC-16 of the first 16 KiB) and reports the file missing if they
-disagree; `roadie als` computes both, a rule that reproduces every reference in a
-project Live saved. Clip colours are palette indices copied from that project, so
-treat them as approximate. Samples are referenced by a path relative to the
-`.als` (the way Live 12 does for files outside a project), so keep the `.als`
-next to its `_stems` folder.
-
-## Drum roles
-
-`roadie_analysis/drumroles.py` lists the sounds inside one drum stem (no tool or
-command yet). `hit_groups` finds the hits (oneshot's hit detection), puts each on
-the 16th grid and groups the ones that sound alike (average linkage on
-`oneshot.spectral_distance`, threshold 1.5). `name_roles` names the groups and
-`mark_bleed` marks the ones that are another stem's sound leaking in.
-
-**A name is a rule over a group's stem, pattern and clean-hit readings, not
-recognition.** A group no rule fits keeps a neutral name (`hh 2`: stem and group
-number) with the reason. A name says "this group passed this rule"; listen to the
-clean hit before trusting it.
-
-- **Eligible to be named:** at least 4 measured hits, `stability` at least 0.75
-  (or stable by construction: no more measured hits than the 32-hit sample), and
-  `separation` over 1.5 from the nearest group of at least 4 hits.
-- **Pattern:** a 16th is *in use* when the group plays there in at least 25 % of
-  its own bars in which it could be seen. A cell is not seen when it held an
-  unmeasured on-grid hit, or lay under another hit's tail within 15 dB
-  (`RISE_DB`; 6 dB with `grid_onsets`) of the group's level. A 16th seen in
-  fewer than 4 bars is unknown and counts neither way.
-- **Members, not one hit:** the measurement rules (`hh open`, `rim`, `snare`,
-  `tom`, `kick`) read up to 8 complete members nearest the medoid and name only
-  when at least two thirds agree, from at least 3.
-
-| Stem | Name | Rule |
-|---|---|---|
-| hh | `hh offbeat` | at least 90 % of the hits on steps 2, 6, 10, 14; at least 3 of those 4 known, at most 1 of the known ones unused; at least 2 hits a bar on them |
-| hh | `hh 16th` | at least 6 of the 8 odd 16ths known, at most 2 of the known ones unused; at least 4 hits a bar on them |
-| hh | `hh open` | neither pattern, and the members fall 20 dB in 140 ms or more |
-| snare | `rim` | the members fall 20 dB in under 30 ms |
-| snare | `snare` | not a rim; the body's noise share over -12.0 dB and at most -1.0 dB |
-| toms | `tom` | the members are pitched; several toms are ranked `tom low` / `mid` / `high` by body pitch within the stem |
-| kick | `kick` | pitched, body at most 70 Hz |
-
-There is no `hh closed`, `clap` or `conga`: nothing measured separates them
-(closed and open hats overlap in decay; a clap's readings match a noise snare's;
-a conga reads like a high tom). Two groups with one name that play at the same
-16ths (cosine at least 0.8) and are within 1.73 (1.15 times the threshold) of
-each other are one role with variants.
-
-**Bleed** needs all three: (1) at least 70 % of the group's hits within 25 ms of
-the other group's, at least 25 points over what the patterns give by chance, at
-p at most 1 %; (2) the other group louder by at least 6 dB in at least 75 % of
-those pairs; (3) the two clean hits at most 2.0 apart. When the chance rate is
-90 % or more, the patterns cannot tell a leak from a shared part: the group is
-judged *co-located* (at least 90 % of its hits coincide) and, like a group whose
-chance over its own bars is 90 % or more, held to 12 dB louder in 90 % of the
-pairs and clean hits within 1.5. A group that fails against every single group
-of a stem is also tested against the union of that stem's unmarked groups, never
-on coincidence alone.
-
-The numbers come from 108 role-sorted one-shots and the Flare replica. Where each
-comes from, and the known misnames (a rim rule that also names some hats, "tom" meaning
-"pitched, in the toms stem", what bleed cannot catch), are in
-[`docs/DRUMROLES.md`](docs/DRUMROLES.md).
-
-## Configuration
-
-Roadie reads one optional file, `~/.config/roadie/config` (`$XDG_CONFIG_HOME` is
-honoured). It is plain `key = value` text: one setting per line, `#` starts a
-comment, a leading `~` expands to your home directory. The file is parsed, never
-executed, and a missing file is fine.
-
-```
-# ~/.config/roadie/config
-out = ~/Projects/Music/slgMusProd/Studies
-```
-
-| setting | meaning | default |
-|---|---|---|
-| `out` | folder `roadie split` writes the WAV and `_stems` folder into | the current directory |
-
-A configured `out` is treated as a studies library: `roadie split` gives each
-track its own folder, `<out>/<Artist>/<Title>/`, holding the WAV and the `_stems`
-folder; `roadie als` and `roadie open` then write the `.als` beside the stems, so
-one folder holds the whole analysis project. Artist and title split at the first
-` - ` (`Matador - Eternity` → `Matador/Eternity/`, `PML - Under Water` →
-`PML/Under Water/`). An existing folder named for the artist or for their last
-name is reused, so `Marc Holstege - Mangata` lands in `Holstege/Mangata/` if you
-already have a `Holstege/`. A title with no ` - ` (a live set) gets
-`<out>/<Title>/`; pass `-o` to place it. An explicit `-o` always writes exactly
-there (`yt2stems.sh -a` applies the layout by hand).
-
-Precedence, highest first: the command-line flag (`roadie split -o DIR`), then the
-config file, then the built-in default. Config applies only through the `roadie`
-command; the underlying scripts run directly (`yt2stems`, `stems2live`) ignore it.
-
-Two environment variables sit beside the file:
-
-| variable | effect |
-|---|---|
-| `ROADIE_CONFIG=<file>` | read this config file instead; set it empty to ignore config |
-| `ROADIE_LOG=<file>` | write the usage log here; set it empty to turn the log off |
-
-**Usage log.** Each `roadie` run on a source or a stems dir appends one
-tab-separated line (time, command, exit code, seconds, absolute path or URL) to
-`~/.local/state/roadie/usage.log` (`$XDG_STATE_HOME` is honoured). It stays on your
-machine; nothing is sent. `roadie stats` summarises it. Runs that never reach a
-script (`--help`, a mistyped directory) are not logged.
-
----
-
-## Overnight batch
-
-`roadie batch` runs the whole pipeline (`split -d`, `sections`, `als`) over a list
-of local files, one at a time, unattended. Each track is processed in a scratch
-dir, uploaded with `rclone`, checked, and deleted, so local disk stays around
-1 GB however long the list is.
-
-```
-roadie batch plan Studies References --out manifest.tsv     # inventory; writes manifest.excluded.tsv too
-roadie batch run manifest.tsv --dry-run                     # what it would do; touches nothing
-caffeinate -i nohup roadie batch run manifest.tsv > run.log 2>&1 &
-roadie batch verify-sources manifest.tsv                    # exit 1 if any source changed
-```
-
-- `plan` takes one or more root folders (a root's name is its `tree`, e.g. `Studies`). It skips
-  anything under `*_stems`, `* Project`, `Samples` and `Backup`, and lists every exclusion with its
-  reason in `manifest.excluded.tsv`: pCloud `(conflicted)` copies, stem packs (2 or more audio files in a
-  folder named for stems or a remix pack, or 5 or more that are mostly `.aif`), tracks already processed (a sibling
-  `<name>_stems` folder), and duplicates. Duplicates are matched on a normalised title (BPM/key prefixes,
-  YouTube ids and artist prefixes dropped; "Kolsch Full Circle Moment" equals "Full Circle Moment"), and
-  versions such as remixes stay distinct. The best copy is kept: lossless over m4a over ogg over mp3,
-  then root order. Existing `*_stems` folders become `topup` rows. `--dest` sets the pCloud base
-  (default `pcloud:Music/Production/Roadie`); a track lands in `<dest>/<tree>/<subfolder>/<track>/`.
-- `run` does `topup` rows first, then `new` rows in manifest order. A `topup` row only adds a missing
-  `sections.json` and a missing `.als`; it never passes `-f`, never overwrites an `.als` and never
-  deletes anything (`roadie als` does add its `Ableton Project Info/`, and `sections` may refresh a stale
-  `alignment.json`).
-  A `new` row: skip if the destination holds `.roadie-batch-ok`, the marker written only after a passing
-  check; stop if free disk is under `--floor-gb` (4, exit 4); `split --file <src> -d` into
-  `<work>/<id>` (the separator's temp files inside it too); `sections`; `als`; delete the 24-bit working wav;
-  `rclone copy`, then `rclone check --one-way`, then the marker; only then delete the work dir. A step that
-  fails or times out (3x duration + 10 min for the split, 15 min for the rest) marks the row `failed`
-  and the run moves on. A failed upload or check keeps the work dir and stops the run (exit 3), so
-  failed tracks cannot pile up on disk; the next run uploads that kept work dir without re-splitting. Options: `--dest` (override the manifest), `--work`, `--state`,
-  `--logs`, `--report-dir`, `--limit N`, `--only-mode new|topup`, `--dry-run`.
-- State is `~/.cache/roadie-batch/state.jsonl` (one line per event); a re-run skips rows whose last
-  status is `done`, so a second night resumes. Per-row logs are in `~/.cache/roadie-batch/logs/`. A lock
-  file in the work dir's parent refuses a second concurrent run. On exit, including SIGINT/SIGTERM/SIGHUP
-  (the current child process group is killed) it writes `batch-report-YYYY-MM-DD.md` to `--report-dir`:
-  start and end, counts per status, one line per row, minimum free disk, and the rows still remaining.
-- Safety: sources are only read. Every delete goes through one helper that refuses any path not strictly
-  inside the work dir. `ROADIE_BATCH_ROADIE` and `ROADIE_BATCH_RCLONE` point at other `roadie` / `rclone`
-  commands (used by the tests).
-
----
-
-## What it produces
-
-From one input:
-
-| File | What it is |
-|---|---|
-| `<title>_<bpm>bpm.wav` | 44.1 kHz / 24-bit working copy of the source, tempo-tagged |
-| `<title>_<bpm>bpm_stems/bass.flac` | 16-bit FLAC — see *Output format* below |
-| `…/drums.flac` | composite kit |
-| `…/synths.wav` | float32 WAV — see *the synths merge* below |
-| `…/vocals.flac` | |
-| `…/drums_{kick,snare,toms,hh,ride,crash}.flac` | six-way drum split (on with `-s`; `-D` skips it) |
-| `…/alignment.json` | cached beat grid, reused by `roadie load` |
-
-All stems are sample-identical in length, so they drop into Live at bar 1 and
-lock without warping — unless the set itself drifts in tempo, in which case a warp
-map is written. See *Warping: only when the tempo actually drifts*.
-
-`roadie load` then loads them into a running Live set, and can optionally mark
-the arrangement:
-
-```bash
-roadie load <stems_dir> --locators        # + a locator per detected section
-roadie load <stems_dir> --start-bar 1     # butt the audio against bar 1 (default 9)
-roadie load <stems_dir> --energy-map      # + a silent MIDI track mapping who plays where
-roadie load <stems_dir> --session         # + a Session View grid, same beat grid
-```
-
-`roadie open <stems_dir>` does the same into a fresh project: it copies
-`~/Music/Ableton/User Library/Templates/empty.als` (`--template` overrides) next
-to the stems, opens it in the newest `/Applications/Ableton Live*.app`
-(`ABLETON_APP` overrides), waits for the bridge and runs `roadie load` into it.
-It cannot save for you — Live's Object Model has no save command — but because
-the `.als` already exists on disk, ⌘S saves in place with no dialog.
-
-`roadie scenes <stems_dir>` builds the Session View grid on its own, over tracks
-`roadie load` already created (it decorates, it does not create tracks).
-`--dry-run` prints the scene/clip plan without writing; `--replace` overwrites an
-existing grid. It reuses the beat grid and downbeat `roadie load` cached in the
-stems folder's `alignment.json`, so its scenes start on the same bar lines as the
-arrangement. With no cache it says so once and assumes bar 1 is the first grid
-beat; `--tempo`/`--grid-t0`/`--downbeat` set the grid by hand.
-
-See *Section locators*, *Downbeat detectors* and *Gain staging* below.
-
----
+- **Measured defaults.** BS-Roformer-SW separation, chosen by scoring stems
+  against true multitracks rather than a leaderboard. Tuned on deep and melodic
+  house.
+- **Tempo from the audio.** The beat grid is fitted to the kick stem, then
+  cross-checked against it, so a set doesn't drift two bars out by the end.
+- **Warps only when needed.** Steady tracks drop in unwarped. Drifting ones get a
+  smoothed warp map.
+- **Section locators** named by which stems come and go: `Drop 1 (bass in) · 64`.
+- **Energy lanes.** `roadie als` draws each stem's loudness per bar as automation,
+  a read-only map of who plays where.
+- **Session View scenes**, one per section, with a looping clip per stem.
+- **Overnight batch** over a whole library, uploaded to pCloud with `rclone`,
+  using about 1 GB of local disk.
+- **MCP server** for comparing your Set against a reference track and its stems.
 
 ## Install
+
+macOS, with Homebrew:
 
 ```bash
 brew install ffmpeg deno aubio uv
 uv tool install yt-dlp
 uv tool install "audio-separator[cpu]==0.44.5"
-./install.sh
+./install.sh            # builds .venv, links `roadie` into ~/.local/bin
+./install.sh --check    # reports what's missing, changes nothing
 ```
 
-`demucs` is optional now: only `-m htdemucs_6s` (and the other Demucs models)
-needs it, with `uv tool install demucs --with numpy`.
+The first split downloads about 1.1 GB of models to
+`~/.cache/audio-separator-models`.
 
-`./install.sh` checks the tools above, builds `.venv` from `requirements.txt`
-(Python 3.13, via `uv`) if it does not exist yet, and symlinks `roadie` plus the
-per-script names into `~/.local/bin` (`--bin DIR` to change). `./install.sh
---check` reports without changing anything.
+To work with a running Live set, install
+**[Sideman](https://github.com/slegroux/sideman)**, the Live remote script Roadie
+talks to. Then in Live, set **Preferences → Link, Tempo & MIDI → Control
+Surface** to `AbletonLOM`. `./install.sh --check` confirms the bridge answers.
 
-Four of those install details are load-bearing and easy to get wrong:
+Demucs is optional: `uv tool install demucs --with numpy`, then `-m htdemucs_6s`.
+Pin details and pitfalls are in [Install details](docs/REFERENCE.md#install-details).
 
-- **`audio-separator[cpu]==0.44.5`** — the pin is the version everything here was
-  tested at (its flags, its output file names, how it writes stems); a newer one may
-  work, untested. The base package doesn't pull `onnxruntime`.
-  Worse, `audio-separator --list_models` **exits 0** while printing a
-  `ModuleNotFoundError` traceback, so a naive exit-code check reports success.
-  Despite the name, the extra only picks the ONNX runtime: on an Apple-silicon Mac
-  the PyTorch models (BS-Roformer-SW, DrumSep) still run on the GPU, and its log
-  says `setting Torch device to MPS`.
-- **`demucs --with numpy`** (optional) — demucs 4.1.0 omits numpy from its
-  metadata. A plain install "succeeds", then dies on `import numpy` at runtime.
-- **Models** — `audio-separator` keeps them in `/tmp/audio-separator-models` by
-  default, which a reboot empties. `roadie split` points it at
-  `ROADIE_MODEL_DIR`, else `AUDIO_SEPARATOR_MODEL_DIR`, else
-  `~/.cache/audio-separator-models`. The first run downloads BS-Roformer-SW
-  (~700 MB) and the DrumSep model (~440 MB), about 1.1 GB. A DrumSep model left
-  in `/tmp` by an earlier version is not found there: it downloads once more, and a
-  line says so before it does.
-- **`deno`** — yt-dlp needs a JS runtime or YouTube extraction runs in a
-  deprecated mode where some formats silently go missing. Only needed for URLs.
+## Commands
 
-### Ableton side: Sideman
+| Command | What it does |
+|---|---|
+| `roadie split <file\|url>` | Audio → 44.1 kHz WAV; `-s` adds stems and drum parts. `-D` skips the drum parts; `-m htdemucs_6s` uses Demucs. |
+| `roadie load <stems_dir>` | Stems → the Live set that is open now. Add `--locators`, `--session`, `--energy-map`. |
+| `roadie open <stems_dir>` | Stems → a **new** Live project, from your template `.als`. |
+| `roadie als <stems_dir>` | Stems → a `.als` file directly. Live need not be running. |
+| `roadie sections <stems_dir>` | Detect song sections and print their bars. |
+| `roadie scenes <stems_dir>` | One Session View scene per section. |
+| `roadie batch plan\|run\|verify-sources` | Unattended batch over many files. See [BATCH.md](docs/BATCH.md). |
+| `roadie stats` | Runs and tracks from the local usage log. |
+| `roadie mcp` | MCP server for reference-based analysis. |
 
-`roadie load`, `roadie open` and `roadie scenes` talk to
-**[Sideman](https://github.com/slegroux/sideman)**
-([site](https://slegroux.github.io/sideman/)), an Ableton Live remote script
-that exposes the Live Object Model over a local socket on port **9878**. Install
-it by its own instructions (a `.pkg` from its Releases, or `./scripts/install.sh`
-from a clone), then in Live: **Preferences → Link, Tempo & MIDI → Control
-Surface = AbletonLOM** (the name Sideman's remote script registers under),
-Input/Output = None. Restart Live once if it was running during the install.
+`roadie <command> --help` lists each command's options.
 
-Roadie does not speak that socket itself: `roadie load` and `roadie scenes` go
-through Sideman's Python client, `sideman.client.Live`. `install.sh` installs
-the `sideman` package into Roadie's `.venv` from `requirements-sideman.txt`
-(pinned to a commit, installed with `--no-deps`, so Sideman's own dependency
-`mcp` is not pulled in unpinned; `roadie mcp`'s copy comes from
-`requirements-mcp.txt`, every package pinned) and re-syncs it on every run, so a bumped pin reaches an
-existing `.venv` with one `./install.sh`. A `.venv` built before Sideman was a
-dependency says so and asks for that run.
+## What you get
 
-Sideman ships `warp_markers_set` natively, so no patch is needed on the Live side.
-Verify with:
+```
+my-track_124bpm.wav                 44.1 kHz / 24-bit working copy
+my-track_124bpm_stems/
+├── bass.flac  drums.flac  vocals.flac
+├── synths.wav                      float32, so the summed parts can't clip
+├── drums_{kick,snare,toms,hh,ride,crash}.flac
+├── alignment.json                  beat grid, reused by load / als / scenes
+└── sections.json                   written by sections / als
+```
+
+All stems are the same length, so they line up at bar 1.
+
+## Configuration
+
+One optional file, `~/.config/roadie/config`:
+
+```
+out = ~/Projects/Music/Studies
+```
+
+With `out` set, each track gets its own folder: `Matador - Eternity` lands in
+`<out>/Matador/Eternity/`. A `-o` on the command line always wins. Details,
+environment variables and the usage log are in
+[Configuration](docs/REFERENCE.md#configuration).
+
+## MCP server
 
 ```bash
-./install.sh --check
+claude mcp add --scope user roadie -- "$PWD/roadie" mcp
 ```
 
-It asks the bridge whether it knows `warp_markers_set`. **Port-open is not
-evidence**: the socket answers normally whatever version of the handlers Live has
-loaded.
-
-**Why Sideman rather than AbletonMCP.** Sideman exposes the Live Object Model
-generically — every call is a `get`/`set`/`call`/`count` against a path like
-`live_set tracks 3 arrangement_clips 0` — so what the AbletonMCP patches below
-add is reachable without patching:
-
-| | |
+| Tool | What it does |
 |---|---|
-| `create_audio_track` | native — patch 0001 unnecessary |
-| locators (`set_or_delete_cue`, cue naming) | native — patch 0003's fixes done client-side |
-| warp markers | native `warp_markers_set` — patch 0002 unnecessary |
-| track and clip colour | native |
-| clip deletion | unreachable, and unnecessary — creating a clip at the same position replaces it |
+| `sample_analyze` | One drum hit in synth terms: envelope, pitch drop, harmonics, noise, click, width. |
+| `sample_compare` | Two hits compared, one line per real difference. |
+| `reference_profile` | A reference track and its stems, measured per section. |
+| `session_compare` | A capture of your Set against that profile, per section. |
 
-**Few requests, few undo steps.** A request to Live costs about 400 ms whatever it
-carries (it waits on Live's main thread), so `roadie load` and `roadie scenes` send
-reads that do not depend on each other in one `get_batch` and writes in one
-`transaction`. A ten-stem load with `--session` into a fresh Set is 38 requests
-instead of 439 (measured on 10 stems of 92 s: 185 s before, 38.6 s after), and
-each transaction is one Cmd-Z on Live 12.4+ (about 23 to undo
-a load instead of about 280). Anything that depends on an earlier step (a clip
-addressed after the request that made it, a read-back after its write, the play-head
-moves for locators) still waits for a later request: `live_batch.py` lists them.
-**Don't touch the Set while a load or `roadie scenes` runs**: each batch is one undo step,
-and on Live 12.4+ a knob you move while one lands can be swept into it. A batch Live does
-not answer in time ends the run, since Live may still be applying it.
+Measuring the Set on its own, with no reference, stays in Sideman's own MCP
+server. The tools' docstrings are the full documentation.
 
-**The decisive difference is reload.** Sideman's `handlers.py` is re-imported on
-`{"op": "reload"}` — **no Live restart**. The AbletonMCP path needs a full quit
-and reopen for every remote-script change, because Python keeps the module in
-`sys.modules` and toggling the Control Surface re-instantiates the class from
-already-loaded code. That restart cycle is the single most expensive thing about
-bridge work, and Sideman removes it for everything except the initial install.
+## Documentation
 
-Nothing warns you when a bridge is running stale code. Besides `--check`, the
-bytecode cache tells you: delete `__pycache__` next to the remote script; a real
-restart recreates `__init__.cpython-311.pyc` (3.11 is Live 12's interpreter).
-
-Also check **which copy Live loads** — `~/Music/Ableton/User Library/Remote
-Scripts/`, not the Preferences path (trap 3 below). Updating the wrong one looks
-exactly like a failed reload.
-
-### Don't use `activate` with a uv venv
-
-`uv venv` does not install pip. After `source .venv/bin/activate`, `python`
-points at the venv but **`pip` falls through to whatever pip is next on PATH** —
-here, miniconda's, which silently installed 16 packages into the conda base
-environment. Always:
-
-```bash
-uv pip install --python .venv/bin/python <pkgs>
-```
-
----
-
-## Legacy: AbletonMCP patches
-
-Roadie no longer uses these. They are kept because they are the reference for
-what Live's API will and will not accept, and because the MCP bridge remains the
-only way to DELETE an arrangement clip — needed once here, to clear stale clips
-after changing `--start-bar`.
-
-All three are patches against
-[uisato/ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended)
-(MIT, © 2025 uisato) at commit `1116449`, and apply in order: `0001`, then
-`0002`, then `0003` on top of both. They touch only that project's
-`AbletonMCP_Remote_Script/__init__.py`.
-
-<details>
-<summary>The AbletonMCP setup these patches were written against</summary>
-
-```bash
-git clone https://github.com/uisato/ableton-mcp-extended
-cd ableton-mcp-extended
-git checkout 1116449
-git apply /path/to/roadie/patches/0001-create_audio_track.patch
-git apply /path/to/roadie/patches/0002-warp_markers.patch
-git apply /path/to/roadie/patches/0003-cue_points.patch
-
-uv venv --python 3.11 .venv
-uv pip install --python .venv/bin/python "mcp[cli]>=1.3.0,<2" \
-    "elevenlabs>=0.2.26" "python-dotenv>=1.0.0"
-
-mkdir -p ~/Music/Ableton/"User Library"/"Remote Scripts"/AbletonMCP
-cp AbletonMCP_Remote_Script/__init__.py \
-   ~/Music/Ableton/"User Library"/"Remote Scripts"/AbletonMCP/
-```
-
-Control Surface = AbletonMCP, port 9877. The two bridges coexist by design —
-Sideman's source says *"deliberately NOT 9877 — coexists with an existing
-AbletonMCP"* — so both can be enabled at once.
-</details>
-
-Four traps from the MCP setup, all of which cost real time here:
-
-1. **`pip install -e .` fails.** The repo's `pyproject.toml` declares a package
-   `AbletonMCP_UDP` that doesn't exist in the tree. Install the three
-   dependencies directly instead and run via `PYTHONPATH`.
-2. **Pin `mcp<2`.** mcp 2.0.0 removed `mcp.server.fastmcp`, which the server
-   imports. Unpinned resolves to 2.x and the server won't start.
-3. **The documented install path is wrong.** The project says
-   `~/Library/Preferences/Ableton/Live X.X.X/User Remote Scripts/`. Live 11+
-   scans `~/Music/Ableton/User Library/Remote Scripts/`. Installing to the
-   documented path means AbletonMCP never appears in the Control Surface list.
-4. **Clear `__pycache__` after patching.** Live's embedded Python will load a
-   stale `.pyc` compiled from the pre-patch source. Symptom: your patch is
-   provably in the file on disk and Live still reports `Unknown command`.
-
-### `patches/0001-create_audio_track.patch`
-
-The MCP server advertises a `create_audio_track` tool, but the remote script has
-no handler for it, so the bridge can place audio clips yet cannot create anywhere
-to put them. Every stem import required adding tracks by hand first.
-
-The fix needs **two** edits, and this is the part worth knowing if you re-derive
-it: adding the handler alone is not enough. There is a second gate — a whitelist
-of commands routed to Live's main thread. A command missing from that list never
-reaches the dispatch chain and falls through to `Unknown command`, which reads
-exactly like a missing handler. Both sites are marked `LOCAL PATCH`.
-
-### `patches/0002-warp_markers.patch`
-
-Adds one command, `set_clip_warp_markers`, taking `track_index`, `clip_index`, a
-list of `[beat_time, sample_time]` pairs, and an optional `warp_mode`.
-
-**This one cannot be done from the client side, and that is the whole reason it
-exists.** `Clip.add_warp_marker()` wants a C++ `TWarpMarker`, and boost.python
-registers a from-Python converter for exactly one Python shape. **Which shape is
-undocumented and not guessable.** Measured against Live 12.2.7, all four of these
-are rejected with `No registered converter was able to produce a C++ rvalue of
-type NApiHelpers::TWarpMarker from this Python object of type X`:
-
-| passed | result |
+| Doc | What's in it |
 |---|---|
-| `dict` | rejected |
-| `list` | rejected |
-| `tuple` | rejected |
-| `int` | rejected |
-
-So the handler does not assume a shape — `_make_warp_marker` **probes** five
-constructions in order (`Live.Clip.WarpMarker` by keyword, the same positionally,
-a `namedtuple`, a duck-typed object with `.beat_time`/`.sample_time`, and a plain
-tuple), caches the first that Live accepts, and re-probes if a cached one later
-fails. If every one fails it raises with all five error strings joined, because a
-silent no-op would look like a successful warp and leave the clip subtly out of
-time. The accepted shape comes back over the socket as `marker_strategy`.
-
-On Live 12.2.7 the winner is the first candidate,
-`Live.Clip.WarpMarker(beat_time=…, sample_time=…)` — but the probe stays, because
-that is a measurement of one build, not a documented contract.
-
-Whatever that shape turns out to be, it has to be constructed **inside Live** —
-the socket carries JSON, which cannot express a Live API object. That is the part
-that makes this irreducibly a remote-script change, and why Sideman carries
-`warp_markers_set` as a dedicated op rather than a generic `call`.
-
-### `patches/0003-cue_points.patch`
-
-Fixes `create_cue_point`, which was wrong in three ways — all found by inserting
-nine locators and reading them back, none visible from reading the code:
-
-1. **`set_or_delete_cue()` is a toggle.** Asking for a locator where one already
-   sits *deletes* it.
-2. **Live snaps `current_song_time`.** The old handler then looked the new cue up
-   by the *requested* time, never matched, and silently skipped naming — all nine
-   locators came back as Live's defaults `"1"`…`"9"`. The fix reads the actual time
-   back and identifies the new cue by diffing the cue list.
-3. **Cue points cannot be created past `song_length`**, which is why locators are
-   written after the clips.
-
-Bulk delete is deliberately a `NotImplementedError`: it cannot work inside one
-main-thread task (see *Section locators*), and an endpoint that looks like it works
-is worse than one that refuses. `stems2live.py` applies the same three rules
-client-side over Sideman.
-
-> An earlier version of this README claimed `add_warp_marker` "accepts a real
-> Python tuple and nothing else". That was inferred from seeing dict and list
-> rejected, never verified, and is **wrong** — tuple is rejected too. The handler
-> built on it compiled, installed and reviewed clean, and would have written zero
-> markers. Only an end-to-end write against Live caught it.
-
-Same two-site rule as 0001: the command also has to join the main-thread
-whitelist, or clip mutation happens off the main thread and Live no-ops or
-crashes.
-
----
-
-## Why these settings
-
-### Model: BS-Roformer-SW, scored against true stems
-
-`roadie split -s` separates with **BS-Roformer-SW** (a six-stem BS-RoFormer, through
-`audio-separator`) and merges its `other`, `piano` and `guitar` into `synths.wav`
-exactly as `htdemucs_6s` was merged. It replaced `htdemucs_6s` on a measurement with
-ground truth: Rodriguez Jr.'s "Synthwave #1" remix pack (30 stems, summed to a mix,
-124 BPM) separated by both, each stem scored against its true role. SI-SDR in dB,
-higher is better:
-
-| stem | BS-Roformer-SW | htdemucs_6s | change |
-|---|---|---|---|
-| kick | 19.3 | 17.0 | +2.3 |
-| snare | 7.1 | 6.4 | +0.7 |
-| hats | 1.6 | 1.8 | −0.2 (even) |
-| bass | 5.7 | 3.7 | +2.0 |
-| synths | −0.4 | −1.7 | +1.3 |
-| drums | 18.8 | 16.4 | +2.4 |
-
-BS-Roformer-SW wins 86–99 % of the bars where a stem is active on kick, snare, bass
-and synths, and the bass energy left in the synths stem falls from 29.9 % to 15.0 %.
-**That is one track**, a remix pack with no master bus, so easier than a rip: read the
-margins as a direction. The scores come from `benchmark.py --truth` with
-`bench/synthwave1.json`; re-run it, with a truth file of your own, on your own
-material before trusting the size of them. Its other candidates (Mel-Band RoFormer, a
-soft-mask re-mask, a residual track, cross-stem gating) did not help. (`benchmark.py`'s
-corpus mode, without `--truth`, still separates with Demucs only, so it needs
-`demucs` installed.)
-
-**Cost, on an Apple M3 Pro (both models' timings back to back, Live open in the
-background)**: a 5:43 mix separates in 2:25 against 0:34 for `htdemucs_6s`; the drum
-pass (3:00) is unchanged, so the whole `roadie split -s` takes 5:26 against 3:35
-(+51 %). It runs on the GPU (the log says `setting Torch device to MPS`), peaks at
-about 2.3 GB resident (demucs: 2.7 GB), and scales linearly: an 11:25 mix took 10:32
-(separation 4:31, drum pass 5:47, 3.3 GB resident, no CPU fallback, no swap growth).
-
-The stems are real **24-bit** FLAC, where demucs's were 16-bit. That needs
-`--use_soundfile`: audio-separator's default writer converts every stem to 16 bits and
-only then labels the file 24-bit (checked: the low 8 bits of every sample were zero).
-Measured on a 60 s excerpt of the benchmark mix, the whole `-s` run is 52 MB against
-43 MB with the default writer: bass, drums and vocals go from 6.5 to 15.2 MB, the
-float32 `synths.wav` is 21.2 MB either way, and the drum parts (still written by the
-default writer) are 15.8 MB. That is 1.2× the disk overall and 2.3× for the three FLAC
-stems, about 470 MB for a 9-minute set. `-m htdemucs_6s` (or `htdemucs_ft`,
-`mdx_extra`, `htdemucs`) selects Demucs again.
-
-`--normalization 1.0` keeps the stems adding up to the mix. audio-separator's default
-(0.9) scales the input down to a 0.9 peak when it is louder, and then each stem on its
-own by the same rule, so the stems no longer sum to the file you gave it. On the same
-excerpt, made 1.9 dB hotter (peak 0.963), the stem sum was 0.61 dB under the input at
-the default and 0.02 dB under at 1.0; SI-SDR of the sum against the input is 32.2 dB
-either way (it ignores scale), so only the level moves. At 1.0 nothing is amplified
-and a stem is scaled only if its own peak passes full scale, so a stem that clips is
-still brought down by itself. The input is a WAV we wrote, so its peak is at most 1.0
-and it is never scaled. The drum pass keeps audio-separator's default writer and
-normalization, as it was measured.
-
-**Re-running with another model.** The stems folder holds a `.stem-model` file naming
-the model that wrote it. `-m` with a different model re-separates, redoes the drum
-parts, and prints `stems in <dir> are from <X>; re-separating with <Y>`; a folder from
-before the marker counts as Demucs. The same model skips.
-
-**A silent stem.** audio-separator writes no file for a stem whose peak is under 1e-6
-(BS-Roformer-SW's vocals on this mix sit at −116 dB). `bass`, `drums` and `other` are
-required; a missing `vocals`, `piano` or `guitar` is replaced by silence of the input's
-length, with a warning, so the merge still runs.
-
-**Not tested.** Sets of an hour or more: the longest run was 11:25 at 3.3 GB resident,
-and audio-separator suggests `--chunk_duration 600` past an hour but joins the chunks
-without a crossfade. The detected tempo of the Synthwave pack is tagged 62 bpm (half
-tempo) in both pipelines; that is a `beat_aligner` matter, left alone here.
-
-### Model: `htdemucs_6s` — the previous default, for narrower reasons than first claimed
-
-**Corrected finding.** An earlier version of this README claimed stock `htdemucs`
-emits a silent bass stem (−72.4 dB) and that the SDR leaderboard is therefore
-inverted on house material. That came from a **single 60-second window**, and it
-does not survive proper sampling.
-
-Bass deficit (source 20–120 Hz level minus bass-stem level; lower is better),
-5 windows across one 9:23 house set:
-
-| model | 56s | 154s | 251s | 349s | 446s | **median** |
-|---|---|---|---|---|---|---|
-| htdemucs | 1.0 | 1.8 | 19.4 | 26.9 | 4.2 | **4.2** |
-| htdemucs_ft | 1.1 | 2.0 | 14.9 | 13.5 | 3.9 | **3.9** |
-| htdemucs_6s | 0.9 | 1.4 | 11.8 | 9.3 | 4.0 | **4.0** |
-| mdx_extra | 1.0 | 1.8 | 12.9 | 8.9 | 3.7 | **3.7** |
-
-All four medians sit within **0.5 dB** of each other. Window choice moves the
-result by up to **26 dB on the same track** — far more than model choice does.
-
-What *does* replicate, across both overlap settings: in **bass-sparse** passages
-(251s, 349s — where the source sub-band drops from −14 dB to −22 dB) the models
-diverge and the ordering is stable. `htdemucs` lands 19–29 dB down; `htdemucs_6s`
-and `mdx_extra` 9–13 dB. Where the low end is strong, all four are identical.
-
-So `htdemucs_6s` was kept as the default because it is **never worse and clearly
-better when the bass thins out** — not because published SDR is wrong. `-m`
-still picks it.
-
-**The real lesson: never benchmark an audio model on one excerpt.** Use
-`benchmark.py --samples 5`.
-
-### The synths merge
-
-`htdemucs_6s` and BS-Roformer-SW also emit `piano` and `guitar`. On synth-based music these measure
-as the *same spectral contour* as `other` at lower level — fragmentation, not
-separation:
-
-```
-other   −28.2  −23.0  −29.2  −42.5  −51.5
-piano   −33.2  −31.4  −41.8  −61.2  −78.5   <- same shape, just quieter
-```
-
-So all three are summed back into one `synths.wav`. For `htdemucs_6s` the merged
-result lands at −19.6 dB versus the plain 4-stem model's `other` at −19.4 dB — i.e.
-recombining recovers exactly what the simpler model gave you (the 6-stem model was
-kept purely for its bass).
-
-Written **float32 WAV**, deliberately: the three inputs sum past full scale
-(`htdemucs_6s`: measured true peak 1.0018, 0.016 dB over) and FLAC has no float format, so any
-integer format would clip. float32 keeps the sum exact, so
-`synths + bass + drums + vocals` still reconstructs the mix. It is the one WAV
-among the FLAC stems, on purpose.
-
-### `--overlap`: demucs's 0.25 default — 0.5 was tried and did not earn its place
-
-**Also corrected.** 0.5 was once recommended on a reconstruction residual of
-−33.7 dB versus −32.5 dB at the 0.25 default. That was one window. Re-run across
-5 windows measuring bass deficit, `0.25` and `0.50` are indistinguishable:
-
-| model | median @ 0.25 | median @ 0.50 | Δ |
-|---|---|---|---|
-| htdemucs | 4.2 | 4.1 | −0.1 |
-| htdemucs_ft | 3.9 | 4.0 | +0.1 |
-| htdemucs_6s | 4.0 | 4.1 | +0.1 |
-| mdx_extra | 3.7 | 3.8 | +0.1 |
-
-Per-window values agree to within 2.2 dB, mostly under 0.5. So `roadie split`
-leaves demucs at its own 0.25 default. (`benchmark.py` still defaults to 0.5,
-the setting that table was measured against.)
-
-`--shifts` is skipped on the same reasoning: that comparison (shifts=5 scoring
-*worse* than shifts=2) was also single-window, so it demonstrates measurement noise
-rather than a property of the setting.
-
-### Output format: FLAC stems
-
-The source is converted to a 44.1 kHz / **24-bit** WAV working copy. With the
-default model, `audio-separator --use_soundfile` writes 24-bit FLAC (it follows the
-input's depth; without the flag it rounds to 16 bits first).
-With demucs, run with `--flac` and without `--int24`, the stems are **16-bit** FLAC
-(`soundfile` reports `PCM_16`), which is what the rest of this section is about.
-`synths.wav` is the float32 exception above.
-
-That is a choice, not an accident. On the path this was built on, the source is a
-lossy stream — a ~133 kbps Opus transcode off YouTube — whose noise floor sits far
-above 16-bit's ~96 dB of range, so 24-bit stems would store more bits of the same
-information. FLAC then cuts the output by ~57% against WAV (a 9-minute bass stem:
-149 MB → 64 MB; a whole set ~1.6 GB → ~700 MB), and Live imports `.flac` from an
-absolute path exactly like `.wav`.
-
-For a **lossless local source** that argument is weaker. demucs's own code passes
-24 bits to its FLAC writer when `--int24` is given alongside `--flac`; that
-combination is not exposed or measured here.
-
-### BPM: from the fitted beat grid, kick first
-
-Stage 4 of `roadie split` runs `beat_aligner.py` on the stems **directory**. It
-fits a beat grid to the cleanest percussive stem it finds — `drums_kick`, then
-`drums`, then `bass`, then the mix — resolves bar phase off the summed mix, and
-caches the result in `alignment.json`, which `roadie load` reads instead of
-repeating the analysis. The filename gets that tempo rounded to an integer.
-
-The kick is preferred because no pads or vocals confuse onset detection:
-measured on one set, interval IQR was 3.9% (kick) / 6.2% (drums) / 4.6% (mix),
-same ~126 BPM from all three.
-
-When the aligner or `.venv` is unavailable, or returns no tempo, it falls back
-to `aubiotrack` over `drums_kick` → `drums` → the WAV, gated at interval
-IQR ≤ 10%; above that
-the filename is left untagged rather than guessing. An earlier gate on the
-p10–p90 spread rejected two of three *correct* answers — IQR is the stable
-statistic here. **Calibrated on one track**; widen it if a steady set comes back
-untagged.
-
-**The tempo is checked against the kick stem.** The beat detector can settle a
-little off: on one 9-minute track it said 121.12 where the kick, hats, snare and
-bass all lock to 120.00, so the set opened in Live at the wrong tempo and the
-grid ran two bars out by the end. After fitting the grid, `beat_aligner` asks the
-kick stem (`drums_kick`, else `drums`) which tempo within 3 BPM of the detected
-one it really locks to, scoring each half of the track on its own. When both
-halves agree, the measured tempo is more than 0.3 BPM from the detected one and
-it scores at least 1.5x better, the grid is refitted at the measured tempo and
-the change is said on stderr; the result's `tempo_check` holds both numbers.
-`--tempo` is never second-guessed, and `--no-tempo-check` (on `beat_aligner`,
-`roadie load` and `roadie als`) keeps the detector's answer. A tempo in a file
-name is a label, not evidence: on five reference tracks four were 2 BPM above
-what the audio locks to.
-
-### Warping: only when the tempo actually drifts
-
-A warp map is written **only if drift is detected**. A set that holds one tempo is
-left unwarped, which is why the stems still drop in at bar 1 and lock on their own.
-
-The reason is that the grid fit is not exact. Residual jitter of the detected beats
-against the fitted grid runs **~35 ms RMS**, which is aubio's placement noise, not
-the track moving. Writing a marker at every detected beat would pin the audio to
-that noise — you would be warping a steady track onto a jittery grid and making it
-worse. So when drift *is* found, markers go at **smoothed per-segment boundaries**,
-not at raw beat detections.
-
-**The units are the easy thing to get wrong:**
-
-| field | unit |
-|---|---|
-| `beat_time` | beats from the **sample start** |
-| `sample_time` | **seconds** from the sample start |
-
-`sample_time` is *seconds*, not sample frames — do not multiply by the sample rate.
-Nothing in the API name suggests this and nothing errors if you get it wrong; the
-map simply lands somewhere absurd.
-
-Requires Sideman's `warp_markers_set` op. A bridge whose handlers predate it
-answers `unknown op`; `roadie load` places the clips anyway, unwarped, and ends
-with a warning that the set will drift against the grid. Updating the handlers needs **no Live restart** — send
-`{"op": "reload"}` to port 9878.
-
-**A nonzero `remove_failed` in the response is normal.** Setting a map means adding
-the new markers and then removing the old ones, but a freshly created audio clip
-carries a **shadow marker** encoding its detected tempo, and Live refuses to move or
-remove it (`The shadow marker can't be moved.`). That refusal is expected, so each
-removal is attempted independently and merely counted. Markers whose `beat_time`
-collides with one of the new markers are skipped rather than removed — removal
-addresses a marker *by beat time*, so removing a colliding old marker would delete
-the new one just written at that position.
-
-### Section locators (`--locators`)
-
-`roadie load --locators` drops a Live locator at each detected section start:
-
-```
-Intro   bar   9      Build    bar  17      Drop 1   bar  25
-Main 1  bar  41      Break    bar  73      Quiet    bar  81
-Drop 2  bar  89      Main 2   bar 137      Outro    bar 153
-```
-
-That is with the default `--start-bar 9`: the clips start at bar 9, and every
-section starts a whole number of 8-bar phrases after it.
-
-**Names carry the length and what changed.** With the stem-activity method each
-locator reads `Drop 1 (bass in) · 64`: the label, up to two stems that came or went
-against the section before (`kick out`, `bass in, hats out`), and the section's
-length in bars. The comment and the length are left off when the section does not
-carry what they come from, so the spectral method gives `Drop 1 · 64`.
-
-Existing locators are cleared first; `--keep-locators` adds to them instead.
-`roadie sections <stems_dir>` runs the detection standalone (`--json` available,
-`--phrase-bars` to change the snap length). Like `roadie scenes`, it snaps to the
-grid and downbeat cached in `alignment.json` when there is one, and otherwise
-says that bar 1 is assumed at the first grid beat.
-
-**Two detectors, chosen by `--method` (default `auto`).** With the separated stems
-on disk (`drums_kick`, or the `drums` composite when there are no drum parts, plus `bass`) it reads
-**per-bar stem activity**: each stem's level per bar, relative to that stem's own loud
-level, with a hysteresis threshold for "playing". Boundaries are where the set of
-playing stems changes (kick, bass, hats, synths; vocals are reported, not cut on). A
-**muffled breakdown kick** (about 22 dB under its loud level) counts as no kick. The
-8-bar phrase cycle is **estimated from where the changes land** instead of assumed
-to start at the detected downbeat, and a boundary is snapped to it only when it is
-within a bar. A stem that is effectively silent (under -50 dB, or audible in fewer than 4 bars, like an empty ride) is ignored. Names are rules over which stems play: no kick is a Breakdown, kick and
-bass returning is a Drop, a kickless section with the hats back just before that is a
-Build, and the last section is an Outro once the kick or bass has gone, or when it is a
-stripped-down copy of the one before (a track that ends on the full groove has none). Without those stems, or with `--method spectral`, it uses the spectral method
-below. Checked by ear on one track (Gerlach, "Off"): quiet at Live bar 69, drop at 101,
-where the spectral method placed them four bars late.
-
-`roadie sections` prints a **Live** bar column next to the file's own bar count. Use
-the Live one: it is the bar in Live's ruler with the clips starting at `--start-bar`
-(default 9, as `roadie load` and `roadie als` place them), the lead-in trim included.
-
-**Spectral method: boundaries are measured; names are rules.** Boundaries come from beat-synchronous
-MFCC + chroma + RMS through `librosa.segment.agglomerative` — classical clustering,
-no model. Then every boundary is **snapped to an 8-bar (32-beat) phrase multiple
-counted from the detected downbeat**, which is what makes the output musically
-usable: unsnapped boundaries land a beat or two off and read as a mistake in the
-arrangement.
-
-The names are hand-written rules over energy *and order*: first section is Intro,
-last is Outro, loud-after-quiet is a Drop, quiet-after-loud is a Break, and a
-mid-energy section is a Build only because a full one follows it — which is why
-labelling needs a second pass over the whole list. Nothing here recognises a drop;
-`Drop 2` means *energy > 1.12 and the previous section was quieter*. Expect odd
-names on tracks that open loud or drop without a preceding break.
-
-**Locators are written after the clips, and that ordering is load-bearing.** A cue
-point cannot be created past `song_length`, and `song_length` is whatever the
-arrangement currently reaches — so on an empty Set every locator past the end is
-rejected with `Cannot set the Songtime behind the Songlength`. The clips are what
-extend the song.
-
-**They are also cleared and written one round trip at a time**: set
-`current_song_time`, then call `set_or_delete_cue`. Locators can only be toggled
-at the play head (`set_or_delete_cue()` takes no position), and Live does not
-finish moving the play head within a single main-thread task — so a bulk loop
-fires the toggle at the *previous* position, where it deletes an existing cue or
-creates a stray one. Measured: names attached one section behind, a stray locator
-at the play head, and four of nine silently missing, because the toggle deletes
-when it lands on an existing cue. The single-cue rules are the ones
-`patches/0003-cue_points.patch` found (see *Legacy*).
-
-### Downbeat detectors — `--detector`
-
-Tempo and *phase* are different problems. Tempo comes from the kick; **phase —
-which beat is bar 1 — cannot**, because four-on-the-floor is periodic at beat level
-by construction, so every bar position looks identical in a kick stem. Phase is
-detected on the summed mix, where bass movement and chord changes live.
-
-| detector | needs | reference track |
-|---|---|---|
-| `heuristic` (**default**) | nothing | phase 0, conf 0.302, **8.3 s** |
-| `madmom` | git-main install, see below | phase 2, conf 0.541, **31.2 s** |
-
-**The higher confidence is on the WRONG answer.** madmom's 0.541 is a vote
-share, and the phase it picked is the one the arrangement-boundary check has to
-override; the heuristic's 0.302 is attached to the phase that check agrees with.
-Both end at the same place because the tiebreaker corrects madmom — but the
-heuristic gets there in a quarter of the time and needs no install. madmom stays
-worth trying on material the heuristic is not tuned for: it weighs kick and
-snare energy, which is a four-on-the-floor assumption.
-
-**`beat_this` was dropped, on purpose.** It used to be listed as a third backend
-and was **never once run here**: it needs torch, torch was only ever installed
-while evaluating `allin1` (below, which does not work), and removing that 614 MB
-took `beat_this`'s only dependency with it. Advertising a backend nobody has
-exercised is worse than not offering one — the dispatch degrades to the
-heuristic silently, so a broken or absent model looks identical to a working
-one. madmom already covers the trained-model case.
-
-To bring it back: install torch plus
-`beat-this tqdm einops soxr rotary-embedding-torch`, restore a
-`_beat_this_downbeats(y, sr)` returning downbeat times in seconds, and add
-`"beat_this"` to `DETECTORS`. Worth doing only if the heuristic and madmom
-disagree on material you care about.
-
-**torch is deliberately not in the venv.** Removing it took the venv from 986 MB
-to 372 MB. madmom needs none of it, and the separation CLIs `roadie split` uses are
-separate `uv tool` installs this does not touch.
-
-The heuristic reads barely above chance on this material and says so in its output.
-That is not a bug in the heuristic: kick energy is symmetric between beats 1 and 3,
-and a backbeat is symmetric between 2 and 4, so the percussive cues cancel and only
-harmonic change is left to break the tie — which is the arrangement-boundary
-check's job.
-
-**madmom does install on Python 3.13**, contrary to its reputation. The PyPI release
-(0.16.1, 2018) does not — it does `from collections import MutableSequence`, removed
-in 3.10 — but git main does:
-
-```bash
-uv pip install --python .venv/bin/python "setuptools<81" cython     # 81+ dropped pkg_resources
-uv pip install --python .venv/bin/python --no-build-isolation \
-    "madmom @ git+https://github.com/CPJKU/madmom"
-```
-
-Asking for madmom without it installed **degrades to the heuristic rather than
-aborting**. `./install.sh --check` reports whether it is present.
-
-**The detectors can disagree about bar 1 by two beats** — the half-bar ambiguity —
-and on the reference track they do. Only one is right, and no confidence number
-settles it. Check bar 1 by ear before building an edit on it.
-
-### Why not `allin1`
-
-[All-In-One Music Structure Analyzer](https://github.com/mir-aidj/all-in-one) is the
-obvious upgrade for section labels — a transformer trained on Harmonix that emits
-functional labels (intro/verse/chorus/bridge) rather than energy rules. It does not
-work here, and the blocker is not the one you would guess.
-
-`allin1 1.1.0` imports `natten1dav, natten1dqkrpb, natten2dav, natten2dqkrpb` from
-NATTEN ≤ 0.14, but declares `natten` **unpinned**, so you resolve 0.21.7 where those
-symbols no longer exist. Pinning `natten==0.14.6` then fails to compile against
-torch 2.13 (the ATen API moved; 20 clang errors). It needs an era-matched
-Python + torch + NATTEN together.
-
-Patching `dinat.py` onto the modern NATTEN API was deliberately **not** done — that
-is a model's attention implementation, and getting it subtly wrong yields
-plausible-looking but wrong segmentation with nothing to catch it. The sound route
-is a separate Python 3.9/3.10 venv driving allin1 through its CLI as a subprocess.
-
-### Gain staging — `--headroom` (default 6 dB)
-
-Every stem track is pulled to **−6 dB** on import. Measured on the reference
-track, with the `drums` composite muted as the Set has it:
-
-| | |
-|---|---|
-| the nine stems summed | **+0.15 dBFS — clips** |
-| samples over full scale | 10 (0.0001%) |
-| the source YouTube master | **exactly 0.00 dBFS** |
-
-The clipping itself is trivial — ten samples, inaudible, and it is separation
-residue rather than a mistake, since separated stems (demucs's, here) do not sum bit-exactly back to
-their source. **The real problem is that the source has no headroom at all.**
-A mastered track is brickwalled at 0 dBFS, the stems sum back to roughly that, so
-at unity the first EQ boost or compressor you add clips and you spend the session
-fighting the master instead of mixing.
-
-Applied per stem track rather than to the master on purpose: the point is that
-YOUR faders read near unity while the SUM has room. Pulling the master down
-instead leaves every stem at unity and hides the headroom. `--headroom 0` leaves
-the faders alone.
-
-**Live's fader is a 0..1 taper, not dB**, and the mapping is undocumented.
-Measured by setting values and reading `display_value` back:
-
-| value | dB | value | dB | value | dB |
-|---|---|---|---|---|---|
-| 1.00 | +6.0 | 0.80 | −2.0 | 0.60 | −10.0 |
-| 0.85 | 0.0 | 0.75 | −4.0 | 0.50 | −14.0 |
-| 0.92 | +2.8 | 0.70 | **−6.0** | 0.40 | −18.0 |
-
-Dead linear at 40 dB per unit across that span, so `value = 0.85 + dB/40` and
-unity is 0.85 (also Live's default). It stops being linear below ~0.4 — 0.30
-reads −24.2 where the formula predicts −22 — so the conversion refuses anything
-past −18 dB rather than quietly returning a wrong fader.
-
-### Arrangement layout
-
-- **Kick is pinned first**, ahead of the sort. Measured, the kick came in at 66 Hz
-  against bass at 68 Hz — a 2 Hz margin that flips on a sub-heavy track.
-- Everything else is ordered by **log-frequency spectral centroid**, low at the
-  top.
-- Clips **and their tracks** are coloured on a **red→blue hue ramp** following
-  the same order.
-- The composite `drums` clip is **muted automatically** when `drums_*` parts are
-  present — the parts sum back to it, so both playing is the kit twice (~+6 dB).
-- Writing starts at track 2 (`--first-track`), leaving Live's two default MIDI
-  tracks alone.
-
----
+| [REFERENCE.md](docs/REFERENCE.md) | Every command in full, outputs, configuration, install |
+| [DESIGN.md](docs/DESIGN.md) | Why each default is what it is, the measurements, known limitations |
+| [BATCH.md](docs/BATCH.md) | The overnight batch: manifest, resume, safety rules |
+| [DRUMROLES.md](docs/DRUMROLES.md) | How drum sounds are grouped and named (`roadie_analysis.drumroles`) |
+| [ABLETONMCP-PATCHES.md](docs/ABLETONMCP-PATCHES.md) | Legacy AbletonMCP patches and what they taught about Live's API |
 
 ## Known limitations
 
-**No pad / arp / stab separation, and no model in this family will do it.** These
-are *arrangement roles*, not sources; no training corpus labels them, so a
-separator can only emit the classes it learned. Re-running `other` through
-demucs does not help — it asks the network to find vocals/drums/bass in a signal
-that is by construction none of those. HPSS (harmonic-percussive separation) on
-the merged `synths` stem is the closest available technique. **Untested here.**
+- **Which beat is bar 1** is the weakest link on four-on-the-floor. Check it by ear.
+- **Section names are rules**, not recognition: `Drop` means the kick and bass
+  came back.
+- **No pad, arp or stab separation.** Those are arrangement roles, not sources.
+- **The drum pass is slow**, about 2× realtime on an Apple GPU.
+- **Live must be running** for `load`, `open` and `scenes`. `als` doesn't need it.
 
-**Live's API cannot reorder tracks.** "Ordering" means *which stem is assigned to
-which track index*, which is why re-running rewrites every track rather than
-shuffling them.
+More in [DESIGN.md](docs/DESIGN.md#known-limitations).
 
-**`ride`/`crash` come out near-silent** on electronic material (−61 / −59 dB).
-That is correct — there are no acoustic cymbals — not a failure.
-
-**The drum pass is slow**: ~1.9× realtime on an Apple GPU (MPS; the stems
-themselves run at ~2× on BS-Roformer-SW, ~10× on demucs), so a 9-minute set costs
-~4.7 minutes for the drum pass alone. It is on by default anyway: a study
-wants the parts, and the beat grid is fitted to `drums_kick` first, so a split
-without it gets a looser tempo. `-D` (`--no-drums`) stops at the four stems; a
-later `-s` run on the same source adds only the drum pass.
-
-**Live must already be running** with Sideman active (`roadie open` launches it
-for you). Sideman's socket (127.0.0.1:9878, reached through `sideman.client`)
-lives inside Live; there is no headless mode, and the port is 9878 (only
-`roadie scenes` takes `--port`). The socket answers identically whatever handlers
-are loaded, so "the port is open" proves nothing — `./install.sh --check` probes
-for `warp_markers_set`, which is the reliable test.
-
-**Which beat is bar 1 is the weakest link.** Tempo is solid — the grid fit is
-cross-checked two independent ways — but phase detection is a genuinely hard problem
-on four-on-the-floor, and the two detectors disagree by two beats on the reference
-track. Confidence is reported on a 0.25-is-chance scale and a weak reading is called
-out explicitly rather than hidden. Check bar 1 by ear.
-
-**Section labels are rules, not recognition.** The boundaries are measured; the
-names (`Drop`, `Break`, `Build`) are thresholds over energy and order. See *Section
-locators*.
-
-**Tempo in the filename is not trustworthy for alignment.** It is rounded to an
-integer, and on the reference track a simple median-interval estimate was off by
-~1.4% anyway — the true tempo was 125.000 where it said 126.713. `roadie load`
-measures the tempo from the audio; do not feed the filename BPM back in as
-`--tempo`.
-
----
-
-## Tests
+## Development
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-The real-stem tests need a split of a reference track, which is not
-redistributable and never committed. Point `ROADIE_REF_STEMS` at a stems folder
-of your own (or put one at `./reference/`); without it those tests skip.
+Tests that need real stems skip unless `ROADIE_REF_STEMS` points at a stems
+folder of your own.
 
----
+## License
 
-## Packaging notes
-
-Not yet a distributable package. What is and isn't there:
-
-- `./install.sh` builds `.venv` from pinned `requirements.txt` and links the
-  commands; the separation tools (`audio-separator`, `yt-dlp`, and `demucs` if you
-  want the old models) stay separate `uv tool` installs.
-- The Live side is Sideman, installed on its own; nothing here patches Live.
-  Only its first install needs a Live restart.
-- `stems2live.py` needs only the stdlib to talk to Live, but imports
-  `beat_aligner.py` for the grid, which needs the venv.
-- The BPM gate and the model choice are calibrated on a single genre. Both are
-  documented above with their measurements so they can be re-derived rather than
-  trusted.
+[GPL-3.0](LICENSE).

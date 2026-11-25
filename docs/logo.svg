@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="96" viewBox="0 0 360 96" role="img" aria-label="roadie">
+  <title>roadie</title>
+  <style>
+    .ink { fill: #1F1F22; }
+    .acc { fill: #C93C25; }
+    .grid { stroke: #1F1F22; opacity: .18; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #E8E8E4; }
+      .acc { fill: #FF6B52; }
+      .grid { stroke: #E8E8E4; opacity: .25; }
+    }
+  </style>
+  <!-- a five-track arrangement: one lane per stem, coloured red to blue like roadie's track ramp -->
+  <g class="grid" stroke-width="1.5">
+    <line x1="8" y1="8" x2="8" y2="88"/>
+    <line x1="40" y1="8" x2="40" y2="88"/>
+    <line x1="72" y1="8" x2="72" y2="88"/>
+  </g>
+  <g>
+    <rect x="8"  y="12" width="80" height="10" rx="3" fill="#C93C25"/>
+    <rect x="24" y="28" width="64" height="10" rx="3" fill="#D9772B"/>
+    <rect x="8"  y="44" width="28" height="10" rx="3" fill="#C9A227"/>
+    <rect x="44" y="44" width="44" height="10" rx="3" fill="#C9A227"/>
+    <rect x="40" y="60" width="48" height="10" rx="3" fill="#3E8E7E"/>
+    <rect x="8"  y="76" width="16" height="10" rx="3" fill="#2F5FA8"/>
+    <rect x="56" y="76" width="32" height="10" rx="3" fill="#2F5FA8"/>
+  </g>
+  <text x="108" y="66" font-family="'Bricolage Grotesque', 'Helvetica Neue', Arial, sans-serif" font-size="56" font-weight="800" letter-spacing="-1.5"><tspan class="ink">road</tspan><tspan class="acc">ie</tspan></text>
+</svg>
